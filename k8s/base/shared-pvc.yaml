@@ -1,0 +1,14 @@
+# Shared persistent volume for the Tantivy index.
+# For local single-node clusters this is RWO and mounted by the indexer StatefulSet.
+# For multi-node production use ReadWriteMany + NFS/longhorn or switch to S3-backed index.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: webfind-index-pvc
+  namespace: webfind
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi

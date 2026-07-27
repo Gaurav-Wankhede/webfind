@@ -1,0 +1,39 @@
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:latest
+    container_name: webfind-surrealdb
+    user: root
+    command: start --user root --pass root surrealkv:///data/surreal.db
+    volumes:
+      - surreal-data:/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/surreal", "version"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  webfind:
+    build: .
+    container_name: webfind-server
+    ports:
+      - "4747:4747"
+    environment:
+      WEBFIND_DATA_DIR: /data
+      WEBFIND_GRAPH_STORE: surrealdb
+      WEBFIND_SURREAL_URL: ws://surrealdb:8000
+      WEBFIND_SURREAL_USER: root
+      WEBFIND_SURREAL_PASS: root
+    volumes:
+      - webfind-data:/data
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+    command: ["serve", "--transport", "http"]
+    restart: unless-stopped
+
+volumes:
+  surreal-data:
+  webfind-data:

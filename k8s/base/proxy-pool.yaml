@@ -1,0 +1,53 @@
+# Optional proxy-pool sidecar / microservice
+# Centralizes proxy rotation logic and exposes a single endpoint that the crawler uses.
+# For local dev this is a single pod; production can run behind a real proxy gateway.
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxy-pool
+  namespace: webfind
+spec:
+  selector:
+    app: proxy-pool
+  ports:
+    - port: 4749
+      targetPort: 4749
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: proxy-pool
+  namespace: webfind
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: proxy-pool
+  template:
+    metadata:
+      labels:
+        app: proxy-pool
+    spec:
+      containers:
+        - name: proxy-pool
+          image: webfind:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/webfind
+            - proxy-pool
+            - --port
+            - "4749"
+            - --proxy-list
+            - "$(PROXY_LIST)"
+          env:
+            - name: PROXY_LIST
+              value: "" # e.g. "http://p1:8080,socks5://p2:1080"
+          ports:
+            - containerPort: 4749
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"

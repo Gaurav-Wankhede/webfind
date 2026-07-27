@@ -1,0 +1,30 @@
+# Rust build artifacts
+/target
+Cargo.lock.bak
+
+# Local data / indexes / caches
+/data
+index_data
+*.db
+*.db-wal
+*.db-shm
+surreal_data
+surreal-data
+memory
+:memory:
+
+# OS / editor
+.DS_Store
+.vscode
+.idea
+*.swp
+*.swo
+
+# Secrets / local config
+.env
+*.pem
+webfind.toml
+
+# Logs
+*.log
+

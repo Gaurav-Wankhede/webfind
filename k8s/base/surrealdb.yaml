@@ -1,0 +1,81 @@
+# SurrealDB: graph store for page relationships and PageRank.
+# StatefulSet keeps the data on a persistent volume.
+apiVersion: v1
+kind: Service
+metadata:
+  name: surrealdb
+  namespace: webfind
+spec:
+  selector:
+    app: surrealdb
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: surrealdb
+  namespace: webfind
+spec:
+  serviceName: surrealdb
+  replicas: 1
+  selector:
+    matchLabels:
+      app: surrealdb
+  template:
+    metadata:
+      labels:
+        app: surrealdb
+    spec:
+      containers:
+        - name: surrealdb
+          image: surrealdb/surrealdb:latest
+          args:
+            - "start"
+            - "--log"
+            - "info"
+            - "--user"
+            - "$(SURREAL_USER)"
+            - "--pass"
+            - "$(SURREAL_PASS)"
+            - "rocksdb:///data/surreal.db"
+          ports:
+            - containerPort: 8000
+          env:
+            - name: SURREAL_USER
+              value: "root"
+            - name: SURREAL_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: surrealdb-secret
+                  key: password
+                  optional: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+# Default secret for local dev. In production load from external secrets manager.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: surrealdb-secret
+  namespace: webfind
+type: Opaque
+stringData:
+  password: "root"

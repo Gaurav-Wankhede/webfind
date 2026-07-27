@@ -1,0 +1,91 @@
+[package]
+name = "webfind"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+description = "Self-hosted native search engine for AI agents — CLI + MCP, zero cost"
+license = "MIT"
+repository = "https://github.com/Gaurav-Wankhede/webfind"
+
+[[bin]]
+name = "webfind"
+path = "src/main.rs"
+
+[dependencies]
+# CLI/Server
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+dashmap = "6"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+
+# Crawler
+spider = "2.52"
+reqwest = { version = "0.13", features = ["rustls", "gzip", "http2", "stream", "cookies"] }
+reqwest-middleware = "0.5"
+reqwest-retry = "0.6"
+robotstxt = "0.3"
+sitemap = "0.4"
+governor = "0.10.4"
+rand = "0.10.2"
+flate2 = "1"
+
+# Fetcher (content extraction + normalization)
+scraper = "0.27"
+html2text = "0.17"
+readability-rust = "0.1"
+unicode-normalization = "0.1"
+unicode-segmentation = "1.13"
+whatlang = "0.18"
+lingua = "1.8"
+dateparser = "0.3"
+keyword_extraction = "1.5"
+stop-words = "0.8"
+textstat = "0.1"
+htmlescape = "0.3"
+
+# Index
+tantivy = "0.26"
+hnsw_rs = "0.3"
+fastembed = "4"
+
+# Storage
+surrealdb = { version = "3.2", features = ["kv-mem", "kv-surrealkv", "protocol-ws"] }
+sha2 = "0.10"
+blake3 = "1.8.5"
+
+# MCP / HTTP API
+rmcp = { version = "2.2", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
+schemars = "1.0"
+axum = "0.8.9"
+tower = "0.5"
+tower_governor = "0.7"
+futures = "0.3.33"
+socket2 = "0.6.5"
+async-trait = "0.1"
+
+[features]
+default = []
+dynamic = ["dep:chromiumoxide"]
+
+[dependencies.chromiumoxide]
+version = "0.9.1"
+optional = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

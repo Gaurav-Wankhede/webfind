@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebFind Architecture — HLD + LLD</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    .mermaid-container { background: #0b0c10; border: 1px solid #1f2937; border-radius: 1rem; overflow-x: auto; }
+  </style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+  <div class="max-w-7xl mx-auto px-6 py-10">
+    <header class="mb-10">
+      <h1 class="text-4xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500 mb-3">
+        WebFind Architecture
+      </h1>
+      <p class="text-gray-400 text-lg max-w-3xl">
+        Google-inspired 3-phase crawl engine: <strong>Discover</strong> the link graph (depth-aware BFS), <strong>Prioritize</strong> URLs by hop depth, <strong>Fetch</strong> top-scored pages with per-host politeness and proxy rotation. Six MCP tools, two storage backends, ranked JSON output.
+      </p>
+    </header>
+
+    <section class="mb-8">
+      <h2 class="text-2xl font-bold text-white mb-4">System Architecture</h2>
+      <p class="text-gray-400 mb-6">
+        <strong>HLD</strong> (right): LLM calls 6 MCP tools — search queries the index, research crawls + indexes + queries, fetch extracts one URL, graph traverses edges.<br/>
+        <strong>LLD</strong> (center): 3-phase crawl engine — Discovery BFS with depth tracking, Priority Scoring, Budget-Constrained Fetch — plus identity rotation, extraction, and storage.
+      </p>
+
+      <div class="mermaid-container p-6 shadow-2xl">
+        <pre class="mermaid">
+flowchart LR
+  %% ===== MCP TOOLS =====
+  subgraph MCP_TOOLS["MCP Tools (6)"]
+    direction TB
+    SEARCH["webfind_search"]
+    RESEARCH["webfind_research"]
+    RPAR["webfind_research_parallel"]
+    FETCH_T["webfind_fetch"]
+    FPAR["webfind_fetch_parallel"]
+    GRAPH["webfind_graph"]
+  end
+
+  LLM["LLM / Agent"] -->|"MCP tool call"| SEARCH
+  LLM --> RESEARCH
+  LLM --> RPAR
+  LLM --> FETCH_T
+  LLM --> FPAR
+  LLM --> GRAPH
+
+  %% ===== 3-PHASE CRAWL ENGINE =====
+  subgraph ENGINE["3-Phase Crawl Engine (BulkDomainCrawler)"]
+    direction TB
+
+    subgraph P1["Phase 1 — DISCOVER"]
+      direction TB
+      SEEDS["Seed URL(s)<br/>multi-seed support"]
+      SMAP["sitemap.xml"]
+      BFS["BFS Queue<br/>VecDeque&lt;(url, depth)&gt;"]
+      INTL["Internal Links<br/>(same domain)"]
+      EXTL["External Links<br/>(cross-domain, follow_external)"]
+      DEPTH["Depth Tracker<br/>hop count from seed"]
+    end
+
+    subgraph P2["Phase 2 — PRIORITIZE"]
+      direction TB
+      SCORER["Priority Scorer<br/>score = 1 / (1 + depth)"]
+      FORCE["Force-Fetch Guard<br/>depth &lt;= min_depth"]
+      SORTED["Score-Sorted Queue<br/>shallowest first"]
+    end
+
+    subgraph P3["Phase 3 — FETCH"]
+      direction TB
+      DS["DomainState<br/>per-host queue + seen + backoff"]
+      RATE["Rate Limiter<br/>robots.txt crawl-delay + RPS"]
+      SESS["CrawlSession<br/>proxy + DeviceProfile + cookies"]
+      FETCHER["Fetcher<br/>reqwest + dynamic Chromium fallback"]
+    end
+
+    P1 -->|"discovered URLs"| P2
+    P2 -->|"top-scored URLs"| P3
+  end
+
+  %% ===== IDENTITY =====
+  subgraph IDENTITY["Identity & Rotation"]
+    direction LR
+    PP["ProxyPool<br/>user-supplied proxies"]
+    PE["ProxyEndpoint<br/>http / https / socks5"]
+    SMGR["SessionManager"]
+    DP["DeviceProfile<br/>random UA + headers"]
+  end
+
+  %% ===== EXTRACT =====
+  subgraph EXTRACT["Fetch & Extract"]
+    direction LR
+    HTML["extract_from_html<br/>readability + scraper"]
+    TEXT["extract_from_text<br/>plain / json / xml"]
+    KW["Keyword Extractor"]
+  end
+
+  %% ===== STORE =====
+  subgraph STORE["Enrich & Store"]
+    direction LR
+    SC["StructuredContent"]
+    GS["CrawlGraphStore<br/>depth + source + edges"]
+    TV["Tantivy BM25"]
+    VEC["VectorEngine<br/>fastembed"]
+    PR["PageRank Cache"]
+  end
+
+  %% ===== RANK =====
+  RANK["Ranker<br/>BM25 + vector + graph"]
+  RESP["JSON Response"]
+
+  %% MCP → Engine wiring
+  RESEARCH -.->|"seeds, min_depth, max_depth,<br/>follow_external, proxies"| SEEDS
+  RPAR -.->|"parallel seeds"| SEEDS
+  FETCH_T -.->|"single URL"| FETCHER
+  FPAR -.->|"parallel URLs"| FETCHER
+  SEARCH -.->|"query index"| TV
+  GRAPH -.->|"traverse edges"| GS
+
+  %% Phase 1 internal
+  SEEDS -->|"seed at depth 0"| BFS
+  SMAP -->|"depth 1"| BFS
+  BFS -->|"fetch + extract links"| INTL
+  BFS -->|"if follow_external"| EXTL
+  INTL -->|"depth+1, same domain"| BFS
+  EXTL -->|"depth+1, cross domain"| BFS
+  INTL --> DEPTH
+  EXTL --> DEPTH
+  BFS -->|"all discovered URLs"| SCORER
+
+  %% Phase 2 internal
+  SCORER --> FORCE
+  FORCE --> SORTED
+
+  %% Phase 3 internal
+  SORTED -->|"politeness check"| DS
+  DS --> RATE
+  RATE -->|"slot available"| SESS
+  SESS -->|"proxy + UA"| FETCHER
+  FETCHER -->|"raw HTML"| HTML
+  FETCHER -->|"raw text/json"| TEXT
+
+  %% Extract → Store
+  HTML -->|"clean object"| SC
+  TEXT -->|"clean object"| SC
+  SC --> KW
+  SC -->|"depth + edges"| GS
+  SC -->|"documents"| TV
+  SC -->|"embeddings"| VEC
+
+  %% Store → Rank → Response
+  GS -->|"link scores"| PR
+  PR -->|"PageRank"| RANK
+  TV -->|"BM25 hits"| RANK
+  VEC -->|"vector scores"| RANK
+  RANK -->|"ranked results"| RESP
+
+  %% Identity wiring
+  PP -->|"selects"| PE
+  PE -->|"assigned to"| SESS
+  SMGR -->|"manages"| DP
+  DP -.->|"profile"| SESS
+
+  classDef actor fill:#7c3aed,stroke:#a78bfa,color:#fff
+  classDef server fill:#0ea5e9,stroke:#38bdf8,color:#fff
+  classDef tool fill:#6366f1,stroke:#818cf8,color:#fff
+  classDef engine fill:#10b981,stroke:#34d399,color:#fff
+  classDef store fill:#f59e0b,stroke:#fbbf24,color:#000
+  classDef output fill:#ec4899,stroke:#f472b6,color:#fff
+  classDef phase fill:#1e293b,stroke:#475569,color:#e2e8f0
+  classDef depth fill:#0f766e,stroke:#2dd4bf,color:#fff
+
+  class LLM actor
+  class MCP_TOOLS server
+  class SEARCH,RESEARCH,RPAR,FETCH_T,FPAR,GRAPH tool
+  class SEEDS,SMAP,BFS,INTL,EXTL,SCORER,FORCE,SORTED,DS,RATE,SESS,FETCHER,HTML,TEXT,KW,SC engine
+  class GS,TV,VEC,PR,PP,PE,SMGR,DP store
+  class RANK,RESP output
+  class P1,P2,P3 phase
+  class DEPTH depth
+        </pre>
+      </div>
+    </section>
+
+    <section class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
+      <div class="bg-gray-900/60 border border-gray-800 rounded-2xl p-6">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-cyan-500/20 text-cyan-400 font-bold">1</span>
+          <h3 class="text-lg font-semibold text-white">Phase 1 — Discover</h3>
+        </div>
+        <p class="text-sm text-gray-400">
+          BFS through the link graph from seed(s). Each URL is tagged with <code>depth</code> (hop count from seed). Internal links stay on-domain; external links are followed when <code>follow_external=true</code>. Discovery stops at <code>max_depth</code> (default 5). Sitemap entries seed the queue at depth 1.
+        </p>
+      </div>
+
+      <div class="bg-gray-900/60 border border-gray-800 rounded-2xl p-6">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-teal-500/20 text-teal-400 font-bold">2</span>
+          <h3 class="text-lg font-semibold text-white">Phase 2 — Prioritize</h3>
+        </div>
+        <p class="text-sm text-gray-400">
+          Each discovered URL is scored: <code>1 / (1 + depth)</code>. URLs at or below <code>min_depth</code> (default 3) are force-fetched regardless of budget. The queue is sorted shallowest-first — Google's insight that click depth determines crawl priority, not URL path depth.
+        </p>
+      </div>
+
+      <div class="bg-gray-900/60 border border-gray-800 rounded-2xl p-6">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-green-500/20 text-green-400 font-bold">3</span>
+          <h3 class="text-lg font-semibold text-white">Phase 3 — Fetch</h3>
+        </div>
+        <p class="text-sm text-gray-400">
+          Top-scored URLs are fetched within the <code>max_pages</code> budget. Per-domain politeness enforced via robots.txt crawl-delay + RPS limiter. Each <code>CrawlSession</code> gets a rotating proxy, random DeviceProfile, and cookie jar. Dynamic Chromium fallback for JS-heavy pages.
+        </p>
+      </div>
+
+      <div class="bg-gray-900/60 border border-gray-800 rounded-2xl p-6">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 font-bold">4</span>
+          <h3 class="text-lg font-semibold text-white">Enrich, Index & Rank</h3>
+        </div>
+        <p class="text-sm text-gray-400">
+          Fetched pages become <code>StructuredContent</code> with keywords, depth metadata, and link edges written to <code>CrawlGraphStore</code>. Indexed in Tantivy (BM25) + optional vector engine. <code>Ranker</code> merges BM25, dense vector, and PageRank scores into a ranked JSON response.
+        </p>
+      </div>
+    </section>
+
+    <section class="mt-8 bg-gray-900/40 border border-gray-800 rounded-2xl p-6">
+      <h3 class="text-lg font-semibold text-white mb-4">Key Design Decisions</h3>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-400">
+        <div>
+          <strong class="text-cyan-400">Depth = hop count, not URL path.</strong>
+          Google's insight: a page at <code>/api/v2/docs/detail</code> linked from the homepage has depth 1, not 4. Depth is tracked on the BFS queue as <code>(url, depth)</code> tuples.
+        </div>
+        <div>
+          <strong class="text-teal-400">min_depth forces deep crawling.</strong>
+          Default 3 ensures the crawler reaches past landing pages to API docs, reference pages, and detail content that lives 3+ hops from the seed.
+        </div>
+        <div>
+          <strong class="text-green-400">External links get lower priority.</strong>
+          Cross-domain links are discovered at <code>ExternalLink</code> source with priority 0.3 (vs 0.5 for internal). They're followed but deprioritized in the fetch budget.
+        </div>
+        <div>
+          <strong class="text-amber-400">6 MCP tools, not 4.</strong>
+          <code>search</code> (index query), <code>research</code> (crawl+search), <code>research_parallel</code> (multi-seed), <code>fetch</code> (single URL), <code>fetch_parallel</code> (batch), <code>graph</code> (traverse edges).
+        </div>
+      </div>
+    </section>
+
+    <footer class="mt-12 text-xs text-gray-600 border-t border-gray-800 pt-6">
+      Derived from <code>src/engine/bulk_crawler.rs</code>, <code>src/engine/crawl_graph.rs</code>, <code>src/mcp.rs</code>, <code>src/api.rs</code>, <code>src/storage/surreal_store.rs</code>. Open in any browser to render.
+    </footer>
+  </div>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      themeVariables: {
+        primaryColor: '#0b0c10',
+        primaryTextColor: '#e5e7eb',
+        primaryBorderColor: '#374151',
+        lineColor: '#6b7280',
+        fontSize: '14px'
+      },
+      flowchart: {
+        useMaxWidth: true,
+        htmlLabels: true,
+        curve: 'basis'
+      }
+    });
+  </script>
+</body>
+</html>

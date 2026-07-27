@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+patches:
+  - target:
+      kind: StatefulSet
+      name: webfind
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target:
+      kind: Deployment
+      name: proxy-pool
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1
+
+# For local kind/minikube use NodePort and port-forward:
+# kubectl port-forward -n webfind svc/webfind 4747:4747

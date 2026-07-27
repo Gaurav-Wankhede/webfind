@@ -1,0 +1,91 @@
+# WebFind all-in-one StatefulSet for local Kubernetes.
+# Serves the HTTP search API on port 4747 and owns the shared Tantivy index PVC.
+# For horizontal scale, replace the index PVC with ReadWriteMany storage or an
+# object-storage-backed Tantivy directory, and split indexer/searcher roles.
+apiVersion: v1
+kind: Service
+metadata:
+  name: webfind
+  namespace: webfind
+spec:
+  selector:
+    app: webfind
+  ports:
+    - port: 4747
+      targetPort: 4747
+      name: api
+  type: NodePort
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: webfind
+  namespace: webfind
+spec:
+  serviceName: webfind
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webfind
+  template:
+    metadata:
+      labels:
+        app: webfind
+    spec:
+      containers:
+        - name: webfind
+          image: webfind:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/webfind
+            - serve
+            - --transport
+            - http
+            - --port
+            - "4747"
+          env:
+            - name: WEBFIND_DATA_DIR
+              value: /data
+            - name: RUST_LOG
+              value: info
+            - name: SURREAL_URL
+              value: http://surrealdb:8000
+            - name: SURREAL_USER
+              value: root
+            - name: SURREAL_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: surrealdb-secret
+                  key: password
+          ports:
+            - containerPort: 4747
+          volumeMounts:
+            - name: index-data
+              mountPath: /data
+            - name: cache-data
+              mountPath: /data/cache
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4747
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4747
+            initialDelaySeconds: 10
+            periodSeconds: 15
+      volumes:
+        - name: index-data
+          persistentVolumeClaim:
+            claimName: webfind-index-pvc
+        - name: cache-data
+          emptyDir: {}

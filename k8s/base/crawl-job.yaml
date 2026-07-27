@@ -1,0 +1,41 @@
+# Example Kubernetes Job to seed a crawl.
+# Run this manually or from CI when you want to refresh the index.
+# The Job writes to the same PVC as the webfind StatefulSet, so schedule it
+# when the webfind pod is not using the volume, or use ReadWriteMany storage.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: webfind-crawl
+  namespace: webfind
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: crawler
+          image: webfind:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/webfind
+            - crawl
+            - --seed
+            - "$(SEED_URL)"
+            - --max-pages
+            - "100"
+            - --delay
+            - "1000"
+            - --skip-cached
+          env:
+            - name: WEBFIND_DATA_DIR
+              value: /data
+            - name: SEED_URL
+              value: "https://example.com"
+            - name: REDIS_URL
+              value: redis://redis:6379
+          volumeMounts:
+            - name: index-data
+              mountPath: /data
+      volumes:
+        - name: index-data
+          persistentVolumeClaim:
+            claimName: webfind-index-pvc
