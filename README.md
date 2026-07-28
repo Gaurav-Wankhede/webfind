@@ -17,6 +17,7 @@ Agent (MCP) / Human (Web UI) → WebFind Crawl & Discovery → Tantivy BM25 + Ve
 - ⚡ **Hybrid BM25 + Dense Vector Search**: High-performance full-text search powered by Tantivy combined with dense vector embeddings (`fastembed-rs`) for semantic search re-ranking.
 - 🕸️ **Deep Web Crawler**: High-concurrency crawler with `robots.txt` compliance, rate limiting, domain session stickiness, User-Agent rotation, proxy CIDR pool routing, and headless Chromium fallback for JavaScript-rendered SPA pages.
 - 📊 **SurrealDB Graph Topology & PageRank**: Link graph storage in SurrealDB for link traversal, domain mapping, and PageRank score calculation.
+- 🎯 **Clean Noise-Free Extraction for AI Agents**: Strips out scripts, styles, ads, navigation bars, and headers/footers. Focuses strictly on core structural elements (`<h1-h6>`, `<p>`, `<div>`, `<span>`) to deliver high-density, token-efficient Markdown content to LLM context windows (inspired by Firecrawl).
 - 📦 **Common Crawl Import**: Tools to import and index massive datasets directly from Common Crawl (`CC-MAIN`).
 
 ---

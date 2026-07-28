@@ -199,3 +199,25 @@ Some results have empty `snippet` because the ranker defaults it to `""`.
    - No raw JSON appears in the results area.
 3. Run `cargo test --lib` to verify library tests pass.
 4. Run `cargo test` to verify all tests pass.
+
+---
+
+## 9. AI Agent Clean Content Extraction (Firecrawl-Inspired Filtering)
+
+### Goal
+Extract high-density, noise-free content for AI Agents by retaining only core semantic structural HTML elements (`<h1-h6>`, `<p>`, `<div>`, `<span>`), stripping away all web noise (scripts, styles, navigation bars, ad banners, and footers).
+
+### Rationale
+Raw HTML contains significant noise that wastes precious LLM context window tokens and degrades semantic search accuracy. Filtering down to structural headings, paragraphs, containers, and inline text mirrors Firecrawl's high-efficiency extraction strategy for AI agents.
+
+### Plan & Implementation Tasks
+
+1. **HTML Parser & Content Extractor (`src/engine/fetcher.rs` / DOM Extractor)**:
+   - Filter DOM nodes during HTML parsing:
+     - **Retain**: `<h1-h6>`, `<p>`, `<div>`, `<span>` (and standard inline formatting).
+     - **Discard**: `<script>`, `<style>`, `<nav>`, `<header>`, `<footer>`, `<aside>`, `<form>`, `<button>`, `<head>`, `<noscript>`.
+   - Normalize and collapse extra whitespace into clean, structured Markdown text.
+
+2. **MCP Tool Responses (`src/mcp.rs`)**:
+   - Ensure `webfind_search`, `webfind_research`, and `webfind_fetch` deliver this clean, high-density text format to AI Agents over MCP.
+
