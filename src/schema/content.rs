@@ -64,6 +64,46 @@ impl StructuredContent {
     }
 }
 
+/// Persisted full-page content stored in the knowledge graph.
+/// Mirrors the `page_content` SurrealDB table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PageContentRecord {
+    pub url_node: String,
+    pub content_text: String,
+    pub content_markdown: Option<String>,
+    pub content_html: Option<String>,
+    pub excerpt: Option<String>,
+    pub content_hash: String,
+    pub word_count: Option<u32>,
+    pub reading_time_seconds: Option<u32>,
+    pub fetched_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl PageContentRecord {
+    /// Build from a StructuredContent blob and a url_node record ID.
+    pub fn from_content(content: &StructuredContent, url_node_id: impl Into<String>) -> Self {
+        Self {
+            url_node: url_node_id.into(),
+            content_text: content.content_text.clone(),
+            content_markdown: Some(content.content_markdown.clone()),
+            content_html: Some(content.content_html.clone()),
+            excerpt: Some(content.excerpt.clone()),
+            content_hash: format!("{:016x}", {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                content.content_text.hash(&mut hasher);
+                hasher.finish()
+            }),
+            word_count: Some(content.word_count),
+            reading_time_seconds: Some(content.reading_time_seconds),
+            fetched_at: content.fetched_at,
+            created_at: Utc::now(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenGraph {
     pub title: Option<String>,

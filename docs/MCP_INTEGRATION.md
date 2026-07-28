@@ -33,7 +33,7 @@ docker compose up -d --build
 
 This starts:
 - `webfind-server` on `http://localhost:4747`
-- `webfind-surrealdb` on `ws://localhost:8000`
+- `webfind-surrealdb` on `http://localhost:7790`
 
 Both services are configured with `restart: unless-stopped` and a healthcheck so SurrealDB is ready before WebFind connects.
 

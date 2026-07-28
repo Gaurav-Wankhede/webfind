@@ -19,6 +19,16 @@ WORKDIR /app
 
 RUN cargo install cargo-chef --locked
 
+# Install Node.js for building Tailwind CSS assets.
+# Combine into one RUN to ensure PATH and binaries are properly set up.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version \
+    && npm --version
+
 # Reduce release-build memory usage inside Docker so large crates (surrealdb-core) don't OOM.
 # These overrides are intentionally conservative; they trade peak memory for longer compile times.
 ENV CARGO_PROFILE_RELEASE_LTO=false
@@ -33,8 +43,20 @@ ENV CARGO_BUILD_JOBS=${BUILD_JOBS}
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
+# Build frontend assets first so css is ready before Rust compilation finishes.
+# Touch a marker file to force Docker cache invalidation on each build.
+COPY assets ./assets
+# Copy templates early so Tailwind's @source can scan them during build.
+COPY templates ./templates
+RUN cd assets \
+    && npm ci --no-audit --no-fund --ignore-scripts \
+    && npm run build:css \
+    && npm run copy:js \
+    && ls -la js/ output.css
+
 # Copy source and build the application binary. This layer is invalidated when src/ changes.
 COPY src ./src
+COPY schema ./schema
 RUN cargo build --release --bin webfind
 
 # -----------------------------------------------------------------------------
@@ -49,10 +71,18 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=builder /app/target/release/webfind /usr/local/bin/webfind
+COPY --from=builder /app/assets ./assets
+COPY --from=builder /app/templates ./templates
 
 ENV WEBFIND_DATA_DIR=/data
 VOLUME ["/data"]
-EXPOSE 4747
+# Container-internal ports:
+#   4747 : API/MCP over HTTP (Streamable HTTP)
+#   4749 : HTML GUI (Google-style search)
+# When running via docker compose, the host ports are:
+#   5748 -> 4747 (API)
+#   5750 -> 4749 (GUI)
+EXPOSE 4747 4749
 
 ENTRYPOINT ["webfind"]
-CMD ["serve", "--transport", "http"]
+CMD ["serve", "--transport", "http", "--gui-port", "4749"]

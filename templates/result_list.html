@@ -1,0 +1,12 @@
+{% if results.is_empty() %}
+  <div class="text-center py-12">
+    <p class="text-slate-400">No results found.</p>
+  </div>
+{% else %}
+  <p class="text-sm text-slate-500 mb-4">About {{ results.len() }} results</p>
+  <div class="space-y-6">
+    {% for result in results %}
+      {% include "result_card.html" %}
+    {% endfor %}
+  </div>
+{% endif %}

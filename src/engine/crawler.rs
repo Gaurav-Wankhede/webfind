@@ -11,7 +11,7 @@ use super::embedder::Embedder;
 use super::fetcher::Fetcher;
 use super::indexer::Indexer;
 use super::proxy_pool::{ProxyPool, ProxyProtocol};
-use super::vector::VectorEngine;
+use super::search_engine::InMemorySearchEngine;
 use crate::schema::content::StructuredContent;
 use crate::storage::cache_store::{CacheEntry, CacheStore, ReCrawlPolicy, SimHash};
 
@@ -138,7 +138,7 @@ impl Crawler {
     }
 
     /// Run the full crawl → fetch → index pipeline.
-    pub async fn crawl_and_index(&self, index_dir: &Path) -> Result<CrawlStats> {
+    pub async fn crawl_and_index(&self, _index_dir: &Path) -> Result<CrawlStats> {
         let mut stats = CrawlStats::default();
 
         // 1. Build spider
@@ -188,10 +188,12 @@ impl Crawler {
         } else {
             Fetcher::new().context("failed to create fetcher")?
         };
-        let mut indexer = Indexer::open_at(index_dir).context("failed to open/create index")?;
-        if let Some(embedder) = &self.embedder {
-            indexer = indexer.with_vector_engine(VectorEngine::new(embedder.clone()));
-        }
+        let indexer = Indexer::new(Arc::new(
+            self.embedder
+                .as_ref()
+                .map(|e| InMemorySearchEngine::with_embedder(e.clone()))
+                .unwrap_or_else(InMemorySearchEngine::new),
+        ));
 
         // 4. Process pages as they come in
         let batch_size = 50;
@@ -258,7 +260,7 @@ impl Crawler {
                     // Index in batches
                     if batch.len() >= batch_size {
                         let batch_count = batch.len();
-                        match indexer.index_batch(&batch) {
+                        match indexer.index_batch(&batch).await {
                             Ok(indexed) => {
                                 stats.pages_indexed += indexed as usize;
                                 self.persist_cache_entries(&batch);
@@ -285,7 +287,7 @@ impl Crawler {
         // Index remaining batch
         if !batch.is_empty() {
             let batch_count = batch.len();
-            match indexer.index_batch(&batch) {
+            match indexer.index_batch(&batch).await {
                 Ok(indexed) => {
                     stats.pages_indexed += indexed as usize;
                     self.persist_cache_entries(&batch);

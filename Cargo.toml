@@ -61,6 +61,8 @@ fastembed = "4"
 surrealdb = { version = "3.2", features = ["kv-mem", "kv-surrealkv", "protocol-ws"] }
 sha2 = "0.10"
 blake3 = "1.8.5"
+hex = "0.4"
+url = "2"
 
 # MCP / HTTP API
 rmcp = { version = "2.2", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
@@ -68,9 +70,14 @@ schemars = "1.0"
 axum = "0.8.9"
 tower = "0.5"
 tower_governor = "0.7"
+tower-http = { version = "0.6", features = ["fs"] }
 futures = "0.3.33"
 socket2 = "0.6.5"
 async-trait = "0.1"
+
+# Templating / GUI
+askama = "0.13"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 [features]
 default = []

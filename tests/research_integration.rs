@@ -1,17 +1,19 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{Router, response::Html, routing::get};
 use tokio::net::TcpListener;
 use webfind::engine::indexer::Indexer;
+use webfind::engine::search_engine::InMemorySearchEngine;
 
 #[tokio::test]
 async fn test_research_endpoint_crawls_seed_and_returns_results() {
     let tmp = tempfile::TempDir::new().unwrap();
     let data_dir = tmp.path().to_path_buf();
-    let index_path = data_dir.join("index_data");
-    let indexer = Indexer::open_at(&index_path).unwrap();
-    let app = webfind::api::app(indexer, None, None, data_dir.clone(), None);
+    let indexer = Indexer::new(Arc::new(InMemorySearchEngine::new()));
+    let state = Arc::new(webfind::api::ApiState::new(indexer, None, None, data_dir.clone()));
+    let app = webfind::api::app(state, None);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_addr: SocketAddr = listener.local_addr().unwrap();

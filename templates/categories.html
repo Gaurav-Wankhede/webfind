@@ -1,0 +1,60 @@
+{% if categories.is_empty() %}
+  <p class="text-xs text-slate-500 p-2">No categories yet. Run a search to build the knowledge graph.</p>
+{% else %}
+  <div class="space-y-4">
+    <div>
+      <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2 px-2">Top Domains</h3>
+      <ul class="space-y-1">
+        {% for cat in categories %}
+          {% if cat.category_type.as_str() == "domain" %}
+            <li>
+              <a
+                href="/web/search?q={{ current_query|urlencode }}&categories={{ cat.name|urlencode }}"
+                class="flex items-center justify-between text-sm text-slate-300 hover:text-cyan-400 hover:bg-slate-800 rounded-md px-2 py-1.5 transition"
+              >
+                <span class="truncate">{{ cat.name }}</span>
+                <span class="text-xs text-slate-500">{{ cat.count }}</span>
+              </a>
+            </li>
+          {% endif %}
+        {% endfor %}
+      </ul>
+    </div>
+
+    <div>
+      <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2 px-2">Topic Tags</h3>
+      <div class="flex flex-wrap gap-1.5 px-2">
+        {% for cat in categories %}
+          {% if cat.category_type.as_str() == "topictag" %}
+            <a
+              href="/web/search?q={{ current_query|urlencode }}&categories={{ cat.name|urlencode }}"
+              class="inline-flex items-center gap-1 text-xs bg-slate-800 hover:bg-cyan-500/20 hover:text-cyan-300 text-slate-300 rounded-full px-2.5 py-1 transition"
+            >
+              <span>{{ cat.name }}</span>
+              <span class="text-slate-500">{{ cat.count }}</span>
+            </a>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </div>
+
+    <div>
+      <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2 px-2">Content Types</h3>
+      <ul class="space-y-1">
+        {% for cat in categories %}
+          {% if cat.category_type.as_str() == "contenttype" %}
+            <li>
+              <a
+                href="/web/search?q={{ current_query|urlencode }}&categories={{ cat.name|urlencode }}"
+                class="flex items-center justify-between text-sm text-slate-300 hover:text-cyan-400 hover:bg-slate-800 rounded-md px-2 py-1.5 transition"
+              >
+                <span>{{ cat.name }}</span>
+                <span class="text-xs text-slate-500">{{ cat.count }}</span>
+              </a>
+            </li>
+          {% endif %}
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+{% endif %}

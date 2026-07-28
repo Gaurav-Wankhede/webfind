@@ -23,7 +23,7 @@ docker compose up -d --build
 Running on:
 - **HTTP API**: `http://localhost:4747`
 - **MCP Streamable HTTP**: `http://localhost:4747/mcp`
-- **SurrealDB**: `ws://localhost:8000`
+- **SurrealDB**: `http://localhost:7790`
 
 ## How It Works
 

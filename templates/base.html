@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}WebFind{% endblock %}</title>
+  <link rel="stylesheet" href="/assets/output.css">
+  <script src="/assets/js/htmx.min.js" defer></script>
+  <script src="/assets/js/htmx-ext-sse.js" defer></script>
+  <script src="/assets/js/app.js" defer></script>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  {% block head %}{% endblock %}
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col">
+  <!-- Header -->
+  <header class="w-full border-b border-slate-800 bg-slate-950/80 backdrop-blur sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 h-14 flex items-center justify-between">
+      <a href="/" class="flex items-center gap-2 group">
+        <span class="text-2xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-blue-500 group-hover:from-cyan-300 group-hover:to-blue-400 transition">
+          WebFind
+        </span>
+      </a>
+      <nav class="flex items-center gap-4 text-sm">
+        <a href="/about" class="text-slate-400 hover:text-cyan-400 transition">About</a>
+        <a href="https://www.gauravwankhede.com" target="_blank" rel="noopener" class="text-slate-400 hover:text-cyan-400 transition">Portfolio</a>
+        <a href="https://x.com/GTechverse16703" target="_blank" rel="noopener" class="text-slate-400 hover:text-cyan-400 transition">X</a>
+        <a href="https://www.youtube.com/@GauravWankhede-TECHVERSE" target="_blank" rel="noopener" class="text-slate-400 hover:text-cyan-400 transition">YouTube</a>
+        <a href="https://www.linkedin.com/in/wankhede-gaurav/" target="_blank" rel="noopener" class="text-slate-400 hover:text-cyan-400 transition">LinkedIn</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Main content -->
+  <main class="flex-1 flex">
+    {% block content %}{% endblock %}
+  </main>
+
+  <!-- Footer -->
+  <footer class="border-t border-slate-800 py-6 bg-slate-950">
+    <div class="max-w-7xl mx-auto px-4 flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-slate-500">
+      <p>
+        WebFind — Self-hosted native search engine for AI agents.
+        <span class="text-cyan-500 font-medium ml-1">Hire me if You could afford me.</span>
+      </p>
+      <div class="flex items-center gap-4">
+        <a href="https://www.gauravwankhede.com" target="_blank" rel="noopener" class="hover:text-cyan-400 transition">Portfolio</a>
+        <a href="https://x.com/GTechverse16703" target="_blank" rel="noopener" class="hover:text-cyan-400 transition">X</a>
+        <a href="https://www.youtube.com/@GauravWankhede-TECHVERSE" target="_blank" rel="noopener" class="hover:text-cyan-400 transition">YouTube</a>
+        <a href="https://www.linkedin.com/in/wankhede-gaurav/" target="_blank" rel="noopener" class="hover:text-cyan-400 transition">LinkedIn</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

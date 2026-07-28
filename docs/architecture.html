@@ -9,6 +9,7 @@
   <style>
     body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
     .mermaid-container { background: #0b0c10; border: 1px solid #1f2937; border-radius: 1rem; overflow-x: auto; }
+    .detail-box { background: #0f172a; border: 1px solid #1e293b; border-radius: 0.75rem; }
   </style>
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">
@@ -18,213 +19,305 @@
         WebFind Architecture
       </h1>
       <p class="text-gray-400 text-lg max-w-3xl">
-        Google-inspired 3-phase crawl engine: <strong>Discover</strong> the link graph (depth-aware BFS), <strong>Prioritize</strong> URLs by hop depth, <strong>Fetch</strong> top-scored pages with per-host politeness and proxy rotation. Six MCP tools, two storage backends, ranked JSON output.
+        SurrealDB-first search architecture. <code>/search</code> queries URLs already stored in the knowledge graph and re-fetches them for fresh content. <code>/research</code> discovers and crawls URLs that are <em>not</em> already in the graph, persists them, and returns results. All data lives in SurrealDB; no local Tantivy index is used in production serve mode.
       </p>
     </header>
 
     <section class="mb-8">
       <h2 class="text-2xl font-bold text-white mb-4">System Architecture</h2>
       <p class="text-gray-400 mb-6">
-        <strong>HLD</strong> (right): LLM calls 6 MCP tools — search queries the index, research crawls + indexes + queries, fetch extracts one URL, graph traverses edges.<br/>
-        <strong>LLD</strong> (center): 3-phase crawl engine — Discovery BFS with depth tracking, Priority Scoring, Budget-Constrained Fetch — plus identity rotation, extraction, and storage.
+        <strong>HLD</strong> (left): LLM calls 4 MCP tools over Streamable HTTP. <strong>LLD</strong> (right): auto-discovery, dual crawl engines, SurrealDB search/rank/store layers.
       </p>
 
       <div class="mermaid-container p-6 shadow-2xl">
         <pre class="mermaid">
 flowchart LR
   %% ===== MCP TOOLS =====
-  subgraph MCP_TOOLS["MCP Tools (6)"]
+  subgraph MCP_TOOLS["MCP Tools (4) - Streamable HTTP port 4748"]
     direction TB
     SEARCH["webfind_search"]
     RESEARCH["webfind_research"]
-    RPAR["webfind_research_parallel"]
     FETCH_T["webfind_fetch"]
-    FPAR["webfind_fetch_parallel"]
     GRAPH["webfind_graph"]
   end
 
-  LLM["LLM / Agent"] -->|"MCP tool call"| SEARCH
+  LLM["LLM / Agent (Opus / Haiku / OpenCode)"] -->|"MCP tool call"| SEARCH
   LLM --> RESEARCH
-  LLM --> RPAR
   LLM --> FETCH_T
-  LLM --> FPAR
   LLM --> GRAPH
 
-  %% ===== 3-PHASE CRAWL ENGINE =====
-  subgraph ENGINE["3-Phase Crawl Engine (BulkDomainCrawler)"]
+  %% ===== SEARCH & RANK =====
+  subgraph QUERY["Query Path"]
+    direction TB
+    INDEXER["Indexer (SearchEngine trait)"]
+    BM25["BM25 Search (SurrealDB FULLTEXT)"]
+    VEC["Vector Search (SurrealDB HNSW)"]
+    RANK["Ranker BM25 + Fresh + Quality + Graph + Vector"]
+    GRAPH_SUM["GraphSummary (subgraph + PageRank)"]
+  end
+
+  SEARCH -.->|"query known URLs"| INDEXER
+  RESEARCH -.->|"discover & crawl new URLs"| DISCOVERY
+  FETCH_T -.->|"single URL extract"| FETCHER
+  GRAPH -.->|"traverse edges"| GRAPH_STORE
+
+  %% ===== DISCOVERY =====
+  subgraph DISCOVERY["Auto-Discovery (src/engine/discovery.rs)"]
+    direction TB
+    KW["Extract keywords from query"]
+    CAND["Generate URL candidates from keywords"]
+    VALID["Concurrent DNS + fetch validation"]
+    KW --> CAND --> VALID
+  end
+
+  %% ===== CRAWL ENGINES =====
+  subgraph CRAWL["Crawl Engines"]
     direction TB
 
-    subgraph P1["Phase 1 — DISCOVER"]
-      direction TB
-      SEEDS["Seed URL(s)<br/>multi-seed support"]
-      SMAP["sitemap.xml"]
-      BFS["BFS Queue<br/>VecDeque&lt;(url, depth)&gt;"]
-      INTL["Internal Links<br/>(same domain)"]
-      EXTL["External Links<br/>(cross-domain, follow_external)"]
-      DEPTH["Depth Tracker<br/>hop count from seed"]
+    subgraph SPIDER["Spider-based Engine (src/engine/crawler.rs)"]
+      SPIDER_NODE["spider::Website
+* BFS link discovery
+* sitemap.xml + robots.txt
+* configurable delay/RPS
+* subdomain toggle"]
+      CACHE["CacheStore
+* SimHash near-dup detection
+* ReCrawlPolicy (never/daily/weekly)"]
+      SPIDER_NODE --> CACHE
     end
 
-    subgraph P2["Phase 2 — PRIORITIZE"]
+    subgraph BULK["BulkDomainCrawler (src/engine/bulk_crawler.rs)"]
       direction TB
-      SCORER["Priority Scorer<br/>score = 1 / (1 + depth)"]
-      FORCE["Force-Fetch Guard<br/>depth &lt;= min_depth"]
-      SORTED["Score-Sorted Queue<br/>shallowest first"]
-    end
+      P1["Phase 1 - DISCOVER
+* BFS queue (url, depth, score)
+* Seed + Sitemap (depth 1)
+* Internal links (depth+1)
+* External links *0.3 priority
+* max_depth default 5
+* skip URLs already crawled in DB"]
+      P2["Phase 2 - PRIORITIZE
+* Score = 1/(1+depth) + relevance
+* Relevance: URL + content keyword match
+* Best-first across all domains"]
+      P3["Phase 3 - FETCH
+* Per-domain queue + rate limiter
+* robots.txt crawl-delay + RPS
+* CrawlSession: proxy + DeviceProfile + cookie jar
+* Dynamic Chromium fallback (feature=dynamic)"]
+      GRAPH_STORE["CrawlGraphStore (InMemory / SurrealDB)"]
+      PAGERANK["PageRankCache (persisted, recomputed on version change)"]
 
-    subgraph P3["Phase 3 — FETCH"]
-      direction TB
-      DS["DomainState<br/>per-host queue + seen + backoff"]
-      RATE["Rate Limiter<br/>robots.txt crawl-delay + RPS"]
-      SESS["CrawlSession<br/>proxy + DeviceProfile + cookies"]
-      FETCHER["Fetcher<br/>reqwest + dynamic Chromium fallback"]
+      P1 -->|"discovered URLs"| P2
+      P2 -->|"top-scored URLs"| P3
+      P3 -.->|"record nodes/edges"| GRAPH_STORE
+      GRAPH_STORE -.->|"edges + nodes"| PAGERANK
     end
-
-    P1 -->|"discovered URLs"| P2
-    P2 -->|"top-scored URLs"| P3
   end
 
-  %% ===== IDENTITY =====
-  subgraph IDENTITY["Identity & Rotation"]
+  %% ===== FETCH & EXTRACT =====
+  subgraph FETCH["Fetch & Extract"]
     direction LR
-    PP["ProxyPool<br/>user-supplied proxies"]
-    PE["ProxyEndpoint<br/>http / https / socks5"]
-    SMGR["SessionManager"]
-    DP["DeviceProfile<br/>random UA + headers"]
-  end
-
-  %% ===== EXTRACT =====
-  subgraph EXTRACT["Fetch & Extract"]
-    direction LR
-    HTML["extract_from_html<br/>readability + scraper"]
-    TEXT["extract_from_text<br/>plain / json / xml"]
-    KW["Keyword Extractor"]
+    FETCHER["Fetcher
+* reqwest + HumanClient
+* Readability + scraper
+* OpenGraph, Twitter Card, JSON-LD
+* Language detection (whatlang)
+* Readability metrics (textstat)
+* Keyword extraction (RAKE)"]
+    DYN["DynamicFetcher (Chromium headless feature=dynamic)"]
+    IDENTITY["Identity & Rotation
+* ProxyPool (user + CIDR)
+* SessionManager (sticky per domain)
+* DeviceProfile (random UA+headers)
+* FingerprintGenerator (TLS+HTTP/2)
+* FingerprintAuditLog (SurrealDB)"]
   end
 
   %% ===== STORE =====
-  subgraph STORE["Enrich & Store"]
+  subgraph STORE["Enrich, Index & Store"]
     direction LR
-    SC["StructuredContent"]
-    GS["CrawlGraphStore<br/>depth + source + edges"]
-    TV["Tantivy BM25"]
-    VEC["VectorEngine<br/>fastembed"]
-    PR["PageRank Cache"]
+    SC["StructuredContent ~35 fields"]
+    SURREAL["SurrealDB
+* url_node (BM25 + HNSW)
+* page_content (full text)
+* link_edge (graph)
+* crawl_job (queue)"]
+    SURREAL_ENGINE["SurrealSearchEngine
+* native BM25 + vector"]
+    FASTEMBED["FastEmbed (sentence-transformers)"]
+    GRAPH_STORE2["CrawlGraphStore UrlNode + LinkEdge"]
   end
 
-  %% ===== RANK =====
-  RANK["Ranker<br/>BM25 + vector + graph"]
-  RESP["JSON Response"]
+  %% ===== BACKGROUND WORKER =====
+  subgraph BG["Background Persistence"]
+    direction TB
+    BG_WORKER["BackgroundWorker
+* receive fetched content
+* generate embeddings
+* write page_content
+* link url_node -> page_content
+* update crawl_job status"]
+  end
 
-  %% MCP → Engine wiring
-  RESEARCH -.->|"seeds, min_depth, max_depth,<br/>follow_external, proxies"| SEEDS
-  RPAR -.->|"parallel seeds"| SEEDS
-  FETCH_T -.->|"single URL"| FETCHER
-  FPAR -.->|"parallel URLs"| FETCHER
-  SEARCH -.->|"query index"| TV
-  GRAPH -.->|"traverse edges"| GS
+  %% ===== RANK SIGNALS =====
+  RANK["Ranker
+Default: BM25 0.55 + Fresh 0.20 + Quality 0.15 + Graph 0.10
+Hybrid:  BM25 0.45 + Fresh 0.15 + Quality 0.10 + Graph 0.10 + Vector 0.20"]
+  RESP["JSON Response (SearchResponse)"]
 
-  %% Phase 1 internal
-  SEEDS -->|"seed at depth 0"| BFS
-  SMAP -->|"depth 1"| BFS
-  BFS -->|"fetch + extract links"| INTL
-  BFS -->|"if follow_external"| EXTL
-  INTL -->|"depth+1, same domain"| BFS
-  EXTL -->|"depth+1, cross domain"| BFS
-  INTL --> DEPTH
-  EXTL --> DEPTH
-  BFS -->|"all discovered URLs"| SCORER
+  %% WIRING
+  DISCOVERY -.->|"seed URLs"| BULK
+  CRAWL -.->|"StructuredContent"| FETCHER
+  FETCHER -.->|"fallback"| DYN
+  FETCHER -.->|"uses"| IDENTITY
+  FETCHER -.->|"extracts"| SC
+  SC -.->|"embed"| FASTEMBED
+  SC -.->|"queue to BG worker"| BG_WORKER
+  BG_WORKER -.->|"persist"| SURREAL
+  SC -.->|"graph nodes/edges"| GRAPH_STORE2
 
-  %% Phase 2 internal
-  SCORER --> FORCE
-  FORCE --> SORTED
+  SURREAL_ENGINE -.->|"BM25 hits"| RANK
+  FASTEMBED -.->|"vector scores"| RANK
+  GRAPH_STORE2 -.->|"PageRank"| PAGERANK
+  PAGERANK -.->|"graph scores"| RANK
+  RANK -.->|"ranked"| RESP
 
-  %% Phase 3 internal
-  SORTED -->|"politeness check"| DS
-  DS --> RATE
-  RATE -->|"slot available"| SESS
-  SESS -->|"proxy + UA"| FETCHER
-  FETCHER -->|"raw HTML"| HTML
-  FETCHER -->|"raw text/json"| TEXT
-
-  %% Extract → Store
-  HTML -->|"clean object"| SC
-  TEXT -->|"clean object"| SC
-  SC --> KW
-  SC -->|"depth + edges"| GS
-  SC -->|"documents"| TV
-  SC -->|"embeddings"| VEC
-
-  %% Store → Rank → Response
-  GS -->|"link scores"| PR
-  PR -->|"PageRank"| RANK
-  TV -->|"BM25 hits"| RANK
-  VEC -->|"vector scores"| RANK
-  RANK -->|"ranked results"| RESP
-
-  %% Identity wiring
-  PP -->|"selects"| PE
-  PE -->|"assigned to"| SESS
-  SMGR -->|"manages"| DP
-  DP -.->|"profile"| SESS
+  INDEXER -.->|"wraps"| SURREAL_ENGINE
+  INDEXER -.->|"optional"| FASTEMBED
 
   classDef actor fill:#7c3aed,stroke:#a78bfa,color:#fff
-  classDef server fill:#0ea5e9,stroke:#38bdf8,color:#fff
   classDef tool fill:#6366f1,stroke:#818cf8,color:#fff
   classDef engine fill:#10b981,stroke:#34d399,color:#fff
   classDef store fill:#f59e0b,stroke:#fbbf24,color:#000
-  classDef output fill:#ec4899,stroke:#f472b6,color:#fff
-  classDef phase fill:#1e293b,stroke:#475569,color:#e2e8f0
-  classDef depth fill:#0f766e,stroke:#2dd4bf,color:#fff
+  classDef fetch fill:#ec4899,stroke:#f472b6,color:#fff
+  classDef rank fill:#ef4444,stroke:#f87171,color:#fff
+  classDef output fill:#14b8a6,stroke:#2dd4bf,color:#fff
+  classDef worker fill:#8b5cf6,stroke:#a78bfa,color:#fff
 
   class LLM actor
-  class MCP_TOOLS server
-  class SEARCH,RESEARCH,RPAR,FETCH_T,FPAR,GRAPH tool
-  class SEEDS,SMAP,BFS,INTL,EXTL,SCORER,FORCE,SORTED,DS,RATE,SESS,FETCHER,HTML,TEXT,KW,SC engine
-  class GS,TV,VEC,PR,PP,PE,SMGR,DP store
-  class RANK,RESP output
-  class P1,P2,P3 phase
-  class DEPTH depth
+  class SEARCH,RESEARCH,FETCH_T,GRAPH tool
+  class SPIDER_NODE,CACHE,P1,P2,P3,BULK,GRAPH_STORE,PAGERANK,DISCOVERY engine
+  class FETCHER,DYN,IDENTITY fetch
+  class SC,SURREAL,SURREAL_ENGINE,FASTEMBED,GRAPH_STORE2 store
+  class BG_WORKER worker
+  class RANK rank
+  class RESP output
         </pre>
       </div>
     </section>
 
-    <section class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
-      <div class="bg-gray-900/60 border border-gray-800 rounded-2xl p-6">
+    <section class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-8">
+      <div class="detail-box p-6">
         <div class="flex items-center gap-3 mb-3">
           <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-cyan-500/20 text-cyan-400 font-bold">1</span>
-          <h3 class="text-lg font-semibold text-white">Phase 1 — Discover</h3>
+          <h3 class="text-lg font-semibold text-white">Auto-Discovery</h3>
         </div>
         <p class="text-sm text-gray-400">
-          BFS through the link graph from seed(s). Each URL is tagged with <code>depth</code> (hop count from seed). Internal links stay on-domain; external links are followed when <code>follow_external=true</code>. Discovery stops at <code>max_depth</code> (default 5). Sitemap entries seed the queue at depth 1.
+          <code>src/engine/discovery.rs</code> runs when <code>webfind_research</code> is called without a seed. It extracts keywords from the query, generates domain candidates (e.g. <code>https://keyword.com</code>), validates them with concurrent DNS + HTTP checks, and returns the best seeds. Includes a hard timeout ceiling and a fallback to the most obvious candidate so research never hangs.
         </p>
       </div>
 
-      <div class="bg-gray-900/60 border border-gray-800 rounded-2xl p-6">
+      <div class="detail-box p-6">
         <div class="flex items-center gap-3 mb-3">
           <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-teal-500/20 text-teal-400 font-bold">2</span>
-          <h3 class="text-lg font-semibold text-white">Phase 2 — Prioritize</h3>
+          <h3 class="text-lg font-semibold text-white">BulkDomainCrawler (3-Phase)</h3>
         </div>
         <p class="text-sm text-gray-400">
-          Each discovered URL is scored: <code>1 / (1 + depth)</code>. URLs at or below <code>min_depth</code> (default 3) are force-fetched regardless of budget. The queue is sorted shallowest-first — Google's insight that click depth determines crawl priority, not URL path depth.
+          <code>src/engine/bulk_crawler.rs</code> is the production crawler. <strong>Phase 1 Discover:</strong> BFS queue with <code>(url, depth, relevance)</code>. Seeds: user URL (depth 0) + sitemap entries (depth 1). Internal links at <code>depth+1</code>; external links at <code>depth+1</code> with 0.3x priority. Already-crawled URLs in the graph store are skipped. <strong>Phase 2 Prioritize:</strong> Score = <code>1/(1+depth)</code> + content relevance, best-first. <strong>Phase 3 Fetch:</strong> per-domain queue, rate limiter, robots.txt policy, rotating <code>CrawlSession</code>.
         </p>
       </div>
 
-      <div class="bg-gray-900/60 border border-gray-800 rounded-2xl p-6">
+      <div class="detail-box p-6">
         <div class="flex items-center gap-3 mb-3">
           <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-green-500/20 text-green-400 font-bold">3</span>
-          <h3 class="text-lg font-semibold text-white">Phase 3 — Fetch</h3>
+          <h3 class="text-lg font-semibold text-white">CrawlGraphStore + PageRank</h3>
         </div>
         <p class="text-sm text-gray-400">
-          Top-scored URLs are fetched within the <code>max_pages</code> budget. Per-domain politeness enforced via robots.txt crawl-delay + RPS limiter. Each <code>CrawlSession</code> gets a rotating proxy, random DeviceProfile, and cookie jar. Dynamic Chromium fallback for JS-heavy pages.
+          <code>src/engine/crawl_graph.rs</code> trait with <code>InMemoryCrawlGraph</code> and SurrealDB impl. Records <code>UrlNode</code> (url, domain, source, depth, priority, lastmod, changefreq, crawled flag) and <code>LinkEdge</code> (from, to, anchor_text). Traversal BFS supports inbound/outbound/both. <code>compute_pagerank()</code> is iterative with damping. <code>PageRankCache</code> persists scores keyed by graph version token.
         </p>
       </div>
 
-      <div class="bg-gray-900/60 border border-gray-800 rounded-2xl p-6">
+      <div class="detail-box p-6">
         <div class="flex items-center gap-3 mb-3">
           <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 font-bold">4</span>
-          <h3 class="text-lg font-semibold text-white">Enrich, Index & Rank</h3>
+          <h3 class="text-lg font-semibold text-white">Identity & Fingerprint Rotation</h3>
         </div>
         <p class="text-sm text-gray-400">
-          Fetched pages become <code>StructuredContent</code> with keywords, depth metadata, and link edges written to <code>CrawlGraphStore</code>. Indexed in Tantivy (BM25) + optional vector engine. <code>Ranker</code> merges BM25, dense vector, and PageRank scores into a ranked JSON response.
+          <code>src/engine/fetcher.rs</code> + <code>human_client.rs</code> + <code>fingerprint.rs</code>. <code>ProxyPool</code> from user list or CIDR. <code>SessionManager</code> sticky per domain. <code>DeviceProfile</code> randomized UA + headers. <code>FingerprintGenerator</code> creates TLS+HTTP/2 fingerprints. <code>FingerprintAuditLog</code> logs every request to SurrealDB. <code>ip_health</code> tracks proxy health.
+        </p>
+      </div>
+    </section>
+
+    <section class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-8">
+      <div class="detail-box p-6">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-purple-500/20 text-purple-400 font-bold">5</span>
+          <h3 class="text-lg font-semibold text-white">Fetcher & Extraction</h3>
+        </div>
+        <p class="text-sm text-gray-400">
+          <code>src/engine/fetcher.rs</code> dual path: direct <code>reqwest</code> or <code>HumanClient</code>. Content-type classifier. HTML article extraction via <code>readability_rust</code> + <code>scraper</code> fallback. Metadata: <code>&lt;meta&gt;</code>, OpenGraph, Twitter Card, JSON-LD. Internal/external link split. Language detection (<code>whatlang</code>), readability metrics, RAKE keywords, paywall detection. Optional Chromium dynamic fallback.
+        </p>
+      </div>
+
+      <div class="detail-box p-6">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-rose-500/20 text-rose-400 font-bold">6</span>
+          <h3 class="text-lg font-semibold text-white">Search Engine Trait</h3>
+        </div>
+        <p class="text-sm text-gray-400">
+          <code>src/engine/search_engine.rs</code> defines the <code>SearchEngine</code> trait: <code>index_one</code>, <code>index_batch</code>, <code>search_bm25</code>, <code>index_vector</code>, <code>index_vector_batch</code>, <code>search_vector</code>, <code>doc_count</code>, <code>optimize</code>. Two impls: <code>InMemorySearchEngine</code> (tests/local) and <code>SurrealSearchEngine</code> (production, backed by SurrealDB FULLTEXT + HNSW). <code>Indexer</code> wraps the trait.
+        </p>
+      </div>
+
+      <div class="detail-box p-6">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 font-bold">7</span>
+          <h3 class="text-lg font-semibold text-white">Ranker (Multi-Signal)</h3>
+        </div>
+        <p class="text-sm text-gray-400">
+          <code>src/engine/ranker.rs</code> combines: <strong>BM25</strong> (lexical), <strong>Freshness</strong> (exp decay, 180-day half-life), <strong>Quality</strong> (Flesch ease + grade level sweet spot), <strong>Graph/PageRank</strong> (centrality), <strong>Vector</strong> (cosine similarity, optional). Weights: 0.55/0.20/0.15/0.10 default; hybrid adds vector at 0.20. Also applies domain-diversity penalty and structured-data boost.
+        </p>
+      </div>
+
+      <div class="detail-box p-6">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-blue-500/20 text-blue-400 font-bold">8</span>
+          <h3 class="text-lg font-semibold text-white">4 MCP Tools</h3>
+        </div>
+        <p class="text-sm text-gray-400">
+          <code>src/mcp.rs</code> -- <strong>webfind_search:</strong> query URLs already in SurrealDB, re-fetch them for fresh content. <strong>webfind_research:</strong> discover/crawl URLs not already in the graph, persist them, return results. <strong>webfind_fetch:</strong> single URL extract (direct → proxy fallback). <strong>webfind_graph:</strong> traverse crawl graph from URL. All tools accept <code>timestamp</code> (ISO8601) to inject the current year into queries. Parallel batch tools were removed; use independent native tool calls instead.
+        </p>
+      </div>
+    </section>
+
+    <section class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-8">
+      <div class="detail-box p-6">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-violet-500/20 text-violet-400 font-bold">9</span>
+          <h3 class="text-lg font-semibold text-white">Background Worker</h3>
+        </div>
+        <p class="text-sm text-gray-400">
+          <code>src/engine/bg_worker.rs</code> receives fetched <code>StructuredContent</code> from the crawler over a bounded async channel. It generates embeddings (FastEmbed), writes a <code>page_content</code> record, creates the <code>url_node -&gt; page_content</code> <code>has_content</code> relation, and updates <code>crawl_job</code> status. The worker is drained before a research response is returned.
+        </p>
+      </div>
+
+      <div class="detail-box p-6">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-pink-500/20 text-pink-400 font-bold">10</span>
+          <h3 class="text-lg font-semibold text-white">SurrealDB Schema</h3>
+        </div>
+        <p class="text-sm text-gray-400">
+          <code>schema/init.sql</code> + <code>schema/unified.surql</code> define <code>url_node</code> (metadata + BM25/HNSW), <code>page_content</code> (full text/HTML/markdown), <code>link_edge</code> (directed graph relation), <code>has_content</code> (url → content relation), <code>crawl_job</code> (background queue), and auxiliary tables for fingerprints, ip_health, and graph versioning.
+        </p>
+      </div>
+
+      <div class="detail-box p-6">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 font-bold">11</span>
+          <h3 class="text-lg font-semibold text-white">Deployment</h3>
+        </div>
+        <p class="text-sm text-gray-400">
+          <code>Dockerfile</code> multi-stage build (planner/builder/runtime). <code>compose.yml</code> runs <code>surrealdb/surrealdb</code> + schema-init (curl) + webfind server on port 4748. Works on Windows (Docker Desktop/WSL2), Linux, and macOS (Docker Desktop/OrbStack). Data persisted in named volumes <code>surreal-data</code> and <code>webfind-data</code>.
         </p>
       </div>
     </section>
@@ -233,26 +326,65 @@ flowchart LR
       <h3 class="text-lg font-semibold text-white mb-4">Key Design Decisions</h3>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-400">
         <div>
-          <strong class="text-cyan-400">Depth = hop count, not URL path.</strong>
-          Google's insight: a page at <code>/api/v2/docs/detail</code> linked from the homepage has depth 1, not 4. Depth is tracked on the BFS queue as <code>(url, depth)</code> tuples.
+          <strong class="text-cyan-400">SurrealDB is the single source of truth.</strong> Both <code>/search</code> and <code>/research</code> read/write the same SurrealDB instance. No Tantivy index is used in production serve mode.
         </div>
         <div>
-          <strong class="text-teal-400">min_depth forces deep crawling.</strong>
-          Default 3 ensures the crawler reaches past landing pages to API docs, reference pages, and detail content that lives 3+ hops from the seed.
+          <strong class="text-teal-400">/search vs /research separation.</strong> <code>/search</code> only re-fetches URLs already present in the graph. <code>/research</code> only discovers and fetches URLs not yet crawled/persisted.
         </div>
         <div>
-          <strong class="text-green-400">External links get lower priority.</strong>
-          Cross-domain links are discovered at <code>ExternalLink</code> source with priority 0.3 (vs 0.5 for internal). They're followed but deprioritized in the fetch budget.
+          <strong class="text-green-400">Seed is optional for research.</strong> When omitted, auto-discovery generates and validates candidates from the query itself. Explicit seeds still skip URLs already marked <code>crawled=true</code>.
         </div>
         <div>
-          <strong class="text-amber-400">6 MCP tools, not 4.</strong>
-          <code>search</code> (index query), <code>research</code> (crawl+search), <code>research_parallel</code> (multi-seed), <code>fetch</code> (single URL), <code>fetch_parallel</code> (batch), <code>graph</code> (traverse edges).
+          <strong class="text-amber-400">External links get lower priority.</strong> Cross-domain links are recorded as <code>ExternalLink</code> with 0.3x priority. Followed only if <code>follow_external=true</code>.
+        </div>
+        <div>
+          <strong class="text-purple-400">Background persistence decouples crawl from storage.</strong> The crawler hands content to <code>BackgroundWorker</code>, which writes the full knowledge graph asynchronously while the request continues.
+        </div>
+        <div>
+          <strong class="text-rose-400">Graph version token for PageRank cache.</strong> <code>graph_meta:version</code> increments on every mutation. <code>PageRankCache</code> stores scores keyed by version; recomputes only when the graph changes.
+        </div>
+        <div>
+          <strong class="text-indigo-400">Timestamp injection for current-year queries.</strong> All MCP tools accept <code>timestamp</code> (ISO8601). If the query lacks a 4-digit year, the current year is appended.
+        </div>
+        <div>
+          <strong class="text-blue-400">Proxy support everywhere fetches happen.</strong> Both <code>/search</code> and <code>/research</code> accept a comma-separated <code>proxies</code> parameter; <code>webfind_fetch</code> also falls back through proxies on direct failure.
+        </div>
+      </div>
+    </section>
+
+    <section class="mt-8 bg-gray-900/40 border border-gray-800 rounded-2xl p-6">
+      <h3 class="text-lg font-semibold text-white mb-4">Data Flow Summary</h3>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-400">
+        <div class="detail-box p-4">
+          <strong class="text-cyan-400">Research Flow</strong>
+          <ol class="list-decimal list-inside mt-2 space-y-1">
+            <li>LLM calls <code>webfind_research(seed?, query, ...)</code></li>
+            <li>If no seed: <code>discovery.rs</code> validates query-derived candidates</li>
+            <li><code>BulkDomainCrawler</code> skips URLs already <code>crawled=true</code> in SurrealDB</li>
+            <li>Discover → Prioritize → Fetch new URLs</li>
+            <li><code>Fetcher</code> extracts <code>StructuredContent</code></li>
+            <li>URLs + edges recorded to <code>CrawlGraphStore</code> (SurrealDB)</li>
+            <li>Content queued to <code>BackgroundWorker</code> for page_content + embeddings</li>
+            <li>Freshly crawled content ranked and returned as JSON</li>
+          </ol>
+        </div>
+        <div class="detail-box p-4">
+          <strong class="text-teal-400">Search Flow</strong>
+          <ol class="list-decimal list-inside mt-2 space-y-1">
+            <li>LLM calls <code>webfind_search(query, hybrid, graph)</code></li>
+            <li><code>SurrealSearchEngine.search_bm25</code> finds known URLs</li>
+            <li>Top URLs are re-fetched from the internet for fresh content</li>
+            <li>If hybrid: <code>search_vector</code> adds semantic scores</li>
+            <li>If graph: <code>PageRankCache.get_or_compute()</code></li>
+            <li><code>Ranker.rank</code> combines signals</li>
+            <li>SearchResponse JSON returned</li>
+          </ol>
         </div>
       </div>
     </section>
 
     <footer class="mt-12 text-xs text-gray-600 border-t border-gray-800 pt-6">
-      Derived from <code>src/engine/bulk_crawler.rs</code>, <code>src/engine/crawl_graph.rs</code>, <code>src/mcp.rs</code>, <code>src/api.rs</code>, <code>src/storage/surreal_store.rs</code>. Open in any browser to render.
+      Source files: <code>src/api.rs</code>, <code>src/mcp.rs</code>, <code>src/engine/discovery.rs</code>, <code>src/engine/bulk_crawler.rs</code>, <code>src/engine/crawler.rs</code>, <code>src/engine/crawl_graph.rs</code>, <code>src/engine/fetcher.rs</code>, <code>src/engine/human_client.rs</code>, <code>src/engine/fingerprint.rs</code>, <code>src/engine/search_engine.rs</code>, <code>src/engine/surreal_engine.rs</code>, <code>src/engine/indexer.rs</code>, <code>src/engine/ranker.rs</code>, <code>src/engine/bg_worker.rs</code>, <code>src/storage/surreal_store.rs</code>, <code>src/storage/cache_store.rs</code>. Open in browser to render Mermaid.
     </footer>
   </div>
 
@@ -265,7 +397,7 @@ flowchart LR
         primaryTextColor: '#e5e7eb',
         primaryBorderColor: '#374151',
         lineColor: '#6b7280',
-        fontSize: '14px'
+        fontSize: '13px'
       },
       flowchart: {
         useMaxWidth: true,

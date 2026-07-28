@@ -1,0 +1,14 @@
+{% if suggestions.is_empty() %}
+  <div class="hidden"></div>
+{% else %}
+  <div id="suggestions" class="absolute top-1 left-0 right-0 bg-slate-900 border border-slate-700 rounded-xl shadow-xl mt-2 overflow-hidden z-50">
+    {% for suggestion in suggestions %}
+      <a href="/web/search?q={{ suggestion|urlencode }}" class="block px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800 transition first:pt-3 last:pb-3">
+        <span class="text-slate-500 mr-2">
+          <svg class="w-4 h-4 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+        </span>
+        {{ suggestion }}
+      </a>
+    {% endfor %}
+  </div>
+{% endif %}

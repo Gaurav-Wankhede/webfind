@@ -1,144 +1,86 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
-use crate::engine::embedder::Embedder;
-use crate::engine::vector::VectorEngine;
 use crate::schema::content::StructuredContent;
 use crate::schema::response::{IndexFreshness, SearchMetadata, SearchResult};
-use crate::storage::tantivy_store::{Bm25Hit, TantivyStore};
+
+use super::search_engine::SearchEngine;
 
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
-const DEFAULT_INDEX_DIR: &str = "index_data";
 
-/// High-level indexer that wraps TantivyStore and an optional vector engine.
+/// High-level indexer that wraps a SearchEngine trait object.
 pub struct Indexer {
-    store: TantivyStore,
-    vector: Option<VectorEngine>,
+    engine: Arc<dyn SearchEngine>,
 }
 
 impl Indexer {
-    /// Open or create an index at the default location relative to `base`.
-    pub fn open(base: impl AsRef<Path>) -> Result<Self> {
-        let path = base.as_ref().join(DEFAULT_INDEX_DIR);
-        Self::open_at(path)
-    }
-
-    /// Open or create an index at an explicit path.
-    pub fn open_at(path: impl AsRef<Path>) -> Result<Self> {
-        let store = TantivyStore::open(path).context("failed to open tantivy store")?;
-        Ok(Self {
-            store,
-            vector: None,
-        })
-    }
-
-    /// Attach a vector engine to enable dense/hybrid search.
-    pub fn with_vector_engine(mut self, engine: VectorEngine) -> Self {
-        self.attach_vector_engine(engine);
-        self
-    }
-
-    /// Attach a vector engine in-place.
-    pub fn attach_vector_engine(&mut self, engine: VectorEngine) {
-        self.vector = Some(engine);
-    }
-
-    /// Attach an embedder and lazily instantiate the vector engine.
-    pub fn with_embedder(self, embedder: Option<Arc<dyn Embedder>>) -> Self {
-        match embedder {
-            Some(e) => self.with_vector_engine(VectorEngine::new(e)),
-            None => self,
-        }
+    /// Create an indexer with a search engine.
+    pub fn new(engine: Arc<dyn SearchEngine>) -> Self {
+        Self { engine }
     }
 
     /// Index a single document.
-    pub fn index_one(&mut self, content: &StructuredContent) -> Result<()> {
-        if !content.is_valid_content {
-            tracing::debug!("skipping invalid content: {}", content.url);
-            return Ok(());
-        }
-        self.store.index_content(content)?;
-        if let Some(ref v) = self.vector {
-            let text = format!("{} {}", content.title, content.content_text);
-            v.index(&content.url, &text)?;
-        }
-        self.store.commit()?;
-        Ok(())
+    pub async fn index_one(&self, content: &StructuredContent) -> Result<()> {
+        self.engine.index_one(content).await
     }
 
     /// Index a batch of documents and commit once.
-    pub fn index_batch(&mut self, items: &[StructuredContent]) -> Result<u64> {
-        let valid: Vec<&StructuredContent> = items.iter().filter(|c| c.is_valid_content).collect();
-        let skipped = items.len() - valid.len();
-        if skipped > 0 {
-            tracing::debug!("skipping {} invalid documents", skipped);
-        }
-        let count = self.store.index_batch(&valid)?;
-        if let Some(ref v) = self.vector {
-            let batch: Vec<(String, String)> = valid
-                .iter()
-                .map(|c| (c.url.clone(), format!("{} {}", c.title, c.content_text)))
-                .collect();
-            v.index_batch(&batch)?;
-        }
-        Ok(count)
+    pub async fn index_batch(&self, items: &[StructuredContent]) -> Result<u64> {
+        self.engine.index_batch(items).await
     }
 
     /// Search with BM25 and return ranked results.
-    pub fn search_bm25(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        let hits: Vec<Bm25Hit> = self.store.search(query, limit)?;
-
-        let max_score = hits.iter().map(|h| h.bm25_score).fold(0.0f64, f64::max);
-
-        let results: Vec<SearchResult> = hits
-            .into_iter()
-            .enumerate()
-            .map(|(i, hit)| hit.to_search_result((i + 1) as u32, max_score))
-            .collect();
-
-        Ok(results)
+    pub async fn search_bm25(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.engine.search_bm25(query, limit).await
     }
 
     /// Attach full content blocks to search results when the caller has the
     /// raw structured content available (e.g. after a fresh crawl).
+    /// Content is truncated to `MAX_CONTENT_CHARS` per result to keep responses
+    /// within context-window limits.
     pub fn attach_content(results: &mut [SearchResult], contents: &[StructuredContent]) {
+        const MAX_CONTENT_CHARS: usize = 64 * 1024;
         let mut by_url: HashMap<&str, &StructuredContent> = HashMap::with_capacity(contents.len());
         for c in contents {
             by_url.insert(c.url.as_str(), c);
         }
         for r in results {
             if let Some(c) = by_url.get(r.url.as_str()) {
-                r.content = Some(c.to_content_block());
+                let mut block = c.to_content_block();
+                if block.text.chars().count() > MAX_CONTENT_CHARS {
+                    let truncated: String = block.text.chars().take(MAX_CONTENT_CHARS).collect();
+                    block.text = truncated;
+                    block.markdown = block.markdown.map(|m| {
+                        if m.chars().count() > MAX_CONTENT_CHARS {
+                            m.chars().take(MAX_CONTENT_CHARS).collect()
+                        } else {
+                            m
+                        }
+                    });
+                }
+                r.content = Some(block);
                 r.modified_at = c.modified_at;
                 r.author = c.author.clone();
                 r.site_name = c.site_name.clone();
             }
         }
     }
-    /// Dense vector search for `query`. Returns an empty map if no vector engine is attached.
-    pub fn search_vector(&self, query: &str, limit: usize) -> Result<HashMap<String, f64>> {
-        match self.vector {
-            Some(ref v) => v.search(query, limit),
-            None => Ok(HashMap::new()),
-        }
-    }
 
-    /// True if a vector engine is attached.
-    pub fn has_vector(&self) -> bool {
-        self.vector.is_some()
+    /// Dense vector search for `query`. Returns an empty map if no vector engine is attached.
+    pub async fn search_vector(&self, query: &str, limit: usize) -> Result<HashMap<String, f64>> {
+        self.engine.search_vector(query, limit).await
     }
 
     /// Total indexed documents.
-    pub fn doc_count(&self) -> Result<u64> {
-        self.store.doc_count()
+    pub async fn doc_count(&self) -> Result<u64> {
+        self.engine.doc_count().await
     }
 
     /// Build search metadata for responses.
-    pub fn metadata(&self, signals: Vec<String>) -> Result<SearchMetadata> {
-        let count = self.doc_count()?;
+    pub async fn metadata(&self, signals: Vec<String>) -> Result<SearchMetadata> {
+        let count = self.doc_count().await?;
         Ok(SearchMetadata {
             index_version: "1".to_string(),
             index_size: count,
@@ -153,39 +95,18 @@ impl Indexer {
         })
     }
 
-    /// Path to the index.
-    pub fn index_path(&self) -> &Path {
-        self.store.path()
-    }
-
     /// Optimize the index (force merge segments).
-    pub fn optimize(&mut self) -> Result<()> {
-        self.store.drop_writer()?;
-        tracing::info!("index optimized (writer dropped, segments merged by OS)");
-        Ok(())
+    pub async fn optimize(&self) -> Result<()> {
+        self.engine.optimize().await
     }
-
-    /// Drop the writer to release resources.
-    pub fn close(mut self) -> Result<()> {
-        self.store.drop_writer()
-    }
-}
-
-/// Resolve the default index directory path.
-pub fn default_index_path() -> PathBuf {
-    dirs().join(DEFAULT_INDEX_DIR)
-}
-
-fn dirs() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::search_engine::InMemorySearchEngine;
     use crate::schema::content::StructuredContent;
     use chrono::{TimeZone, Utc};
-    use tempfile::TempDir;
 
     fn sample(url: &str, title: &str, body: &str) -> StructuredContent {
         StructuredContent {
@@ -233,10 +154,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_indexer_search_roundtrip() {
-        let tmp = TempDir::new().unwrap();
-        let mut indexer = Indexer::open(tmp.path()).unwrap();
+    #[tokio::test]
+    async fn test_indexer_search_roundtrip() {
+        let engine = Arc::new(InMemorySearchEngine::new());
+        let indexer = Indexer::new(engine);
 
         let docs = vec![
             sample(
@@ -256,24 +177,24 @@ mod tests {
             ),
         ];
 
-        let count = indexer.index_batch(&docs).unwrap();
+        let count = indexer.index_batch(&docs).await.unwrap();
         assert_eq!(count, 3);
 
-        let results = indexer.search_bm25("systems language", 10).unwrap();
+        let results = indexer.search_bm25("systems language", 10).await.unwrap();
         assert!(!results.is_empty());
         assert!(results[0].title.contains("Rust"));
 
-        let meta = indexer.metadata(vec!["bm25".to_string()]).unwrap();
+        let meta = indexer.metadata(vec!["bm25".to_string()]).await.unwrap();
         assert_eq!(meta.index_size, 3);
     }
 
-    #[test]
-    fn test_indexer_vector_roundtrip() {
+    #[tokio::test]
+    async fn test_indexer_vector_roundtrip() {
         use crate::engine::embedder::DummyEmbedder;
-        let tmp = TempDir::new().unwrap();
-        let mut indexer = Indexer::open(tmp.path())
-            .unwrap()
-            .with_vector_engine(VectorEngine::new(Arc::new(DummyEmbedder)));
+        let engine = Arc::new(InMemorySearchEngine::with_embedder(Arc::new(
+            DummyEmbedder,
+        )));
+        let indexer = Indexer::new(engine);
 
         let docs = vec![
             sample(
@@ -287,8 +208,11 @@ mod tests {
                 "Go is a simple language for building fast concurrent software.",
             ),
         ];
-        indexer.index_batch(&docs).unwrap();
-        let hits = indexer.search_vector("systems language", 5).unwrap();
+        indexer.index_batch(&docs).await.unwrap();
+        let hits = indexer
+            .search_vector("systems language", 5)
+            .await
+            .unwrap();
         assert!(hits.contains_key("https://rust-lang.org"));
     }
 }

@@ -11,10 +11,11 @@ use rmcp::{
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
+use crate::engine::bg_worker::BackgroundWorker;
 use crate::engine::bulk_crawler::BulkDomainCrawler;
 use crate::engine::crawl_graph::{CrawlGraphStore, InMemoryCrawlGraph, TraversalDirection};
 use crate::engine::device_profile::SessionManager;
-use crate::engine::embedder::FastembedEmbedder;
+use crate::engine::embedder::{Embedder, FastembedEmbedder};
 use crate::engine::fetcher::Fetcher;
 use crate::engine::fingerprint::FingerprintAuditLog;
 use crate::engine::graph_summary::build_graph_summary;
@@ -22,7 +23,7 @@ use crate::engine::indexer::Indexer;
 use crate::engine::pagerank_cache::PageRankCache;
 use crate::engine::proxy_pool::{ProxyEndpoint, ProxyPool};
 use crate::engine::ranker::Ranker;
-use crate::engine::vector::VectorEngine;
+use crate::engine::search_engine::InMemorySearchEngine;
 use crate::schema::content::StructuredContent;
 use crate::schema::request::{ContentType, OutputFormat, SearchDepth, SearchRequest};
 use crate::schema::response::SearchResponse;
@@ -87,8 +88,9 @@ struct SearchToolParams {
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 struct ResearchToolParams {
-    /// Seed URL to crawl.
-    seed: String,
+    /// Seed URL to crawl. If omitted, WebFind will auto-discover seeds from its index, graph, and query-derived candidates.
+    #[serde(default)]
+    seed: Option<String>,
     /// Query to run against the freshly indexed pages.
     query: String,
     /// Maximum pages to crawl (default 50, max 500).
@@ -133,32 +135,6 @@ struct ResearchToolParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ResearchParallelParams {
-    /// Multiple research jobs to run in parallel.
-    #[schemars(description = "Multiple research jobs to run in parallel")]
-    jobs: Vec<ResearchToolParams>,
-}
-
-#[derive(Clone)]
-struct JobSpec {
-    index: usize,
-    seed: String,
-    query: String,
-    limit: usize,
-    max_pages: usize,
-    delay_ms: u64,
-    hybrid: bool,
-    include_graph: bool,
-    include_content: bool,
-    proxies: String,
-    follow_external: bool,
-    min_depth: u32,
-    max_depth: u32,
-    topics: Vec<String>,
-    seeds: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct GraphToolParams {
     /// Starting URL.
     url: String,
@@ -186,28 +162,6 @@ struct FetchToolParams {
     #[serde(default)]
     extract_links: Option<bool>,
     /// Include extracted keywords in the response.
-    #[serde(default)]
-    extract_keywords: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct FetchParallelParams {
-    /// Multiple URLs to fetch in parallel.
-    #[schemars(description = "Multiple URLs to fetch in parallel")]
-    urls: Vec<String>,
-    /// Comma-separated proxy URLs to route every request through.
-    #[serde(default)]
-    proxies: Option<String>,
-    /// Use Chromium headless browser fallback for JS-rendered pages.
-    #[serde(default)]
-    dynamic: Option<bool>,
-    /// Milliseconds to wait for JS execution in dynamic mode.
-    #[serde(default)]
-    dynamic_wait_ms: Option<u64>,
-    /// Include extracted internal/external links in every response.
-    #[serde(default)]
-    extract_links: Option<bool>,
-    /// Include extracted keywords in every response.
     #[serde(default)]
     extract_keywords: Option<bool>,
 }
@@ -241,6 +195,7 @@ impl WebfindMcpServer {
             .lock()
             .await
             .search_bm25(&query, limit)
+            .await
             .map_err(|e| e.to_string())?;
 
         let request = SearchRequest {
@@ -279,6 +234,7 @@ impl WebfindMcpServer {
                 .lock()
                 .await
                 .search_vector(&params.query, limit)
+                .await
             {
                 Ok(scores) => Some(scores),
                 Err(e) => {
@@ -354,9 +310,10 @@ impl WebfindMcpServer {
         let delay_ms = params.delay.unwrap_or(1000).max(100) as u64;
         let hybrid = params.hybrid.unwrap_or(false);
         let include_graph = params.include_graph.unwrap_or(false);
-        let include_content = params.include_content.unwrap_or(false);
+        // Research defaults to returning full content inline to the AI agent.
+        let include_content = params.include_content.unwrap_or(true);
         let follow_external = params.follow_external.unwrap_or(false);
-        let min_depth = params.min_depth.unwrap_or(3);
+        let min_depth = params.min_depth.unwrap_or(0);
         let max_depth = params.max_depth.unwrap_or(5);
         let topics: Vec<String> = params
             .topics
@@ -399,6 +356,44 @@ impl WebfindMcpServer {
             .map(|s| s as Arc<dyn CrawlGraphStore + Send + Sync>)
             .unwrap_or_else(|| Arc::new(InMemoryCrawlGraph::new()));
 
+        // Always generate embeddings for the knowledge graph / vector DB.
+        let embedder: Result<Arc<dyn Embedder>, String> = FastembedEmbedder::new()
+            .map(|e| Arc::new(e) as Arc<dyn Embedder>)
+            .map_err(|e| format!("failed to load embedder: {}", e));
+        let embedder = embedder?;
+
+        let background_worker = Arc::new(BackgroundWorker::new(graph.clone(), Some(embedder.clone()), 256));
+        let auto_discover = params.seed.is_none();
+        let mut all_seeds: Vec<String> = Vec::new();
+        if let Some(ref seed) = params.seed {
+            all_seeds.push(seed.clone());
+        }
+        all_seeds.extend(seeds);
+
+        if all_seeds.is_empty() {
+            // Auto-discover seeds from WebFind's own index, graph, and query-derived candidates.
+            let indexer = self.indexer.lock().await;
+            let discovered = crate::engine::discovery::discover_seeds(
+                &indexer,
+                Some(graph.as_ref()),
+                &query,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            drop(indexer);
+            if discovered.is_empty() {
+                return Err("No seeds discovered for the query. Provide a seed URL or rephrase the query.".to_string());
+            }
+            all_seeds = discovered;
+        }
+
+        // When auto-discovering, always follow external links to escape seed domains.
+        let follow_external = if auto_discover {
+            true
+        } else {
+            follow_external
+        };
+
         let proxy_pool = ProxyPool::new();
         if let Some(ref proxies_str) = params.proxies {
             for url in proxies_str.split(',') {
@@ -422,11 +417,10 @@ impl WebfindMcpServer {
         )
         .with_respect_robots(true)
         .with_graph_store(graph.clone())
+        .with_background_worker(background_worker.clone())
         .with_topics(topics);
 
-        // Multi-seed: crawl primary seed + additional seeds, merge and deduplicate.
-        let mut all_seeds = vec![params.seed.clone()];
-        all_seeds.extend(seeds);
+        // Multi-seed: crawl all seeds, merge and deduplicate.
         let mut contents: Vec<StructuredContent> = Vec::new();
         let mut seen_urls: HashSet<String> = HashSet::new();
         for seed_url in &all_seeds {
@@ -471,26 +465,28 @@ impl WebfindMcpServer {
             });
         }
 
-        // Serialize writes to the Tantivy index through a FIFO queue. Crawling
+        // Serialize writes to the index through a FIFO queue. Crawling
         // happens concurrently; only indexing + commit + search are ordered.
         let _queue_guard = self.indexer_queue.lock().await;
 
         {
             let mut indexer = self.indexer.lock().await;
             if hybrid {
-                let embedder = FastembedEmbedder::new().map_err(|e| e.to_string())?;
-                indexer.attach_vector_engine(VectorEngine::new(Arc::new(embedder)));
+                *indexer = Indexer::new(Arc::new(
+                    InMemorySearchEngine::with_embedder(embedder),
+                ));
             }
-            indexer.index_batch(&contents).map_err(|e| e.to_string())?;
+            indexer.index_batch(&contents).await.map_err(|e| e.to_string())?;
         }
 
         let indexer = self.indexer.lock().await;
         let mut results = indexer
             .search_bm25(&query, limit)
+            .await
             .map_err(|e| e.to_string())?;
 
         let vector_scores: Option<HashMap<String, f64>> = if hybrid {
-            match indexer.search_vector(&query, limit) {
+            match indexer.search_vector(&query, limit).await {
                 Ok(scores) => Some(scores),
                 Err(e) => {
                     tracing::warn!("vector search failed: {}", e);
@@ -520,9 +516,11 @@ impl WebfindMcpServer {
         let ranker = Ranker::new();
         results = ranker.rank(results, &request, None, vector_scores.as_ref());
 
-        if include_content {
-            Indexer::attach_content(&mut results, &contents);
-        }
+        // Always attach full content for research responses.
+        Indexer::attach_content(&mut results, &contents);
+
+        // Wait for background knowledge-graph + vector persistence to drain.
+        background_worker.close().await;
 
         let graph_summary = if include_graph {
             build_graph_summary(graph.as_ref(), &results).await
@@ -569,289 +567,6 @@ impl WebfindMcpServer {
         let response = self.research_one(params).await?;
         let text = serde_json::to_string_pretty(&response.to_llm_value())
             .map_err(|e| e.to_string())?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
-    }
-
-    #[tool(description = "Run multiple research crawls in parallel. Crawls run concurrently; indexing + commit + search are serialized through a FIFO queue, with a single shared commit for all jobs.")]
-    async fn webfind_research_parallel(
-        &self,
-        Parameters(params): Parameters<ResearchParallelParams>,
-    ) -> Result<CallToolResult, String> {
-        let jobs: Vec<JobSpec> = params
-            .jobs
-            .into_iter()
-            .enumerate()
-            .map(|(index, job)| -> Result<JobSpec, String> {
-                Ok(JobSpec {
-                    index,
-                    seed: job.seed,
-                    query: job.query,
-                    limit: job.limit.unwrap_or(10).clamp(1, 100),
-                    max_pages: job.max_pages.unwrap_or(50).clamp(1, 500),
-                    delay_ms: job.delay.unwrap_or(1000).max(100) as u64,
-                    hybrid: job.hybrid.unwrap_or(false),
-                    include_graph: job.include_graph.unwrap_or(false),
-                    include_content: job.include_content.unwrap_or(false),
-                    proxies: job.proxies.unwrap_or_default(),
-                    follow_external: job.follow_external.unwrap_or(false),
-                    min_depth: job.min_depth.unwrap_or(3),
-                    max_depth: job.max_depth.unwrap_or(5),
-                    topics: job
-                        .topics
-                        .as_deref()
-                        .map(|s| {
-                            s.split(',')
-                                .map(|t| t.trim().to_lowercase())
-                                .filter(|t| !t.is_empty())
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    seeds: job
-                        .seeds
-                        .as_deref()
-                        .map(|s| {
-                            s.split(',')
-                                .map(|t| t.trim().to_string())
-                                .filter(|t| !t.is_empty())
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let default_graph: Arc<dyn CrawlGraphStore + Send + Sync> =
-            Arc::new(InMemoryCrawlGraph::new());
-        let graph = self
-            .graph_store
-            .clone()
-            .map(|s| s as Arc<dyn CrawlGraphStore + Send + Sync>)
-            .unwrap_or_else(|| default_graph.clone());
-
-        // Phase 1: crawl all seeds concurrently.
-        let crawl_futures = jobs.into_iter().map(|job| {
-            let graph = graph.clone();
-            async move {
-                let proxy_pool = ProxyPool::new();
-                if !job.proxies.is_empty() {
-                    for url in job.proxies.split(',') {
-                        let url = url.trim().to_string();
-                        if !url.is_empty() {
-                            if let Ok(ep) = ProxyEndpoint::from_url(&url) {
-                                proxy_pool.add(ep);
-                            }
-                        }
-                    }
-                }
-                let crawler = BulkDomainCrawler::new(
-                    proxy_pool,
-                    100,
-                    30,
-                    job.delay_ms,
-                    1,
-                    job.max_pages,
-                    job.follow_external,
-                    job.min_depth,
-                    job.max_depth,
-                )
-                .with_respect_robots(true)
-                .with_graph_store(graph)
-                .with_topics(job.topics.clone());
-
-                // Multi-seed: crawl primary seed + additional seeds, merge and deduplicate.
-                let mut all_seeds = vec![job.seed.clone()];
-                all_seeds.extend(job.seeds.clone());
-                let mut contents: Vec<StructuredContent> = Vec::new();
-                let mut seen_urls: HashSet<String> = HashSet::new();
-                for seed_url in &all_seeds {
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(60),
-                        crawler.crawl(seed_url),
-                    )
-                    .await
-                    {
-                        Ok(Ok(crawled)) => {
-                            for c in crawled {
-                                if seen_urls.insert(c.url.clone()) {
-                                    contents.push(c);
-                                }
-                            }
-                        }
-                        Ok(Err(err)) => return Err((job, err.to_string())),
-                        Err(_) => return Err((job, "crawl timed out after 60s".to_string())),
-                    }
-                }
-                Ok((job, contents))
-            }
-        });
-        let crawled = futures::future::join_all(crawl_futures).await;
-
-        let mut job_results: Vec<serde_json::Value> = Vec::new();
-        let mut all_contents: Vec<StructuredContent> = Vec::new();
-        let mut success_jobs: Vec<(JobSpec, Vec<StructuredContent>)> = Vec::new();
-
-        for result in crawled {
-            match result {
-                Ok((job, contents)) if contents.is_empty() => {
-                    job_results.push(serde_json::json!({
-                        "index": job.index,
-                        "seed": job.seed,
-                        "query": job.query,
-                        "success": true,
-                        "result": SearchResponse {
-                            request_id: uuid::Uuid::new_v4().to_string(),
-                            query: job.query,
-                            depth: SearchDepth::Standard,
-                            total_results: 0,
-                            returned: 0,
-                            latency_ms: 0,
-                            results: vec![],
-                            suggestions: vec![],
-                            related: vec![],
-                            graph: None,
-                            metadata: crate::schema::response::SearchMetadata {
-                                index_version: "1".to_string(),
-                                index_size: 0,
-                                engine_version: env!("CARGO_PKG_VERSION").to_string(),
-                                searched_at: chrono::Utc::now(),
-                                signals_used: vec!["bm25".to_string()],
-                                index_freshness: crate::schema::response::IndexFreshness {
-                                    oldest_page: None,
-                                    newest_page: None,
-                                    avg_age_days: 0.0,
-                                },
-                            },
-                        }.to_llm_value(),
-                    }));
-                }
-                Ok((job, contents)) => {
-                    all_contents.extend(contents.clone());
-                    success_jobs.push((job, contents));
-                }
-                Err((job, err)) => {
-                    job_results.push(serde_json::json!({
-                        "index": job.index,
-                        "seed": job.seed,
-                        "query": job.query,
-                        "success": false,
-                        "error": err,
-                    }));
-                }
-            }
-        }
-
-        // Phase 2: index everything once and search each query under the FIFO queue.
-        if !all_contents.is_empty() {
-            let _queue_guard = self.indexer_queue.lock().await;
-
-            let any_hybrid = success_jobs.iter().any(|(job, _)| job.hybrid);
-            {
-                let mut indexer = self.indexer.lock().await;
-                if any_hybrid {
-                    let embedder = FastembedEmbedder::new().map_err(|e| e.to_string())?;
-                    indexer.attach_vector_engine(VectorEngine::new(Arc::new(embedder)));
-                }
-                indexer.index_batch(&all_contents).map_err(|e| e.to_string())?;
-            }
-
-            let indexer = self.indexer.lock().await;
-            for (job, contents) in success_jobs {
-                let mut results = indexer
-                    .search_bm25(&job.query, job.limit)
-                    .map_err(|e| e.to_string())?;
-
-                let vector_scores: Option<HashMap<String, f64>> = if job.hybrid {
-                    match indexer.search_vector(&job.query, job.limit) {
-                        Ok(scores) => Some(scores),
-                        Err(e) => {
-                            tracing::warn!("vector search failed: {}", e);
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                let request = SearchRequest {
-                    query: job.query.clone(),
-                    depth: SearchDepth::Standard,
-                    limit: job.limit as u32,
-                    output: OutputFormat::Json,
-                    language: None,
-                    date_range: None,
-                    domains: None,
-                    content_type: Some(ContentType::Any),
-                    include_content: job.include_content,
-                    include_graph: job.include_graph,
-                    include_keywords: false,
-                    include_metrics: false,
-                    hybrid: job.hybrid,
-                };
-
-                let ranker = Ranker::new();
-                results = ranker.rank(results, &request, None, vector_scores.as_ref());
-
-                if job.include_content {
-                    Indexer::attach_content(&mut results, &contents);
-                }
-
-                let graph_summary = if job.include_graph {
-                    build_graph_summary(graph.as_ref(), &results).await
-                } else {
-                    None
-                };
-
-                let mut signals = vec!["bm25".to_string()];
-                if job.hybrid {
-                    signals.push("vector".to_string());
-                }
-
-                let response = SearchResponse {
-                    request_id: uuid::Uuid::new_v4().to_string(),
-                    query: job.query,
-                    depth: SearchDepth::Standard,
-                    total_results: results.len() as u64,
-                    returned: results.len() as u32,
-                    latency_ms: 0,
-                    results,
-                    suggestions: vec![],
-                    related: vec![],
-                    graph: graph_summary,
-                    metadata: crate::schema::response::SearchMetadata {
-                        index_version: "1".to_string(),
-                        index_size: all_contents.len() as u64,
-                        engine_version: env!("CARGO_PKG_VERSION").to_string(),
-                        searched_at: chrono::Utc::now(),
-                        signals_used: signals,
-                        index_freshness: crate::schema::response::IndexFreshness {
-                            oldest_page: None,
-                            newest_page: None,
-                            avg_age_days: 0.0,
-                        },
-                    },
-                };
-
-                job_results.push(serde_json::json!({
-                    "index": job.index,
-                    "seed": job.seed,
-                    "query": response.query,
-                    "success": true,
-                    "result": response.to_llm_value(),
-                }));
-            }
-        }
-
-        job_results.sort_by(|a, b| {
-            let ai = a.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-            let bi = b.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-            ai.cmp(&bi)
-        });
-
-        let payload = serde_json::json!({
-            "jobs": job_results.len(),
-            "results": job_results,
-        });
-        let text = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
@@ -997,53 +712,6 @@ impl WebfindMcpServer {
     ) -> Result<CallToolResult, String> {
         let response = self.fetch_one(params).await?;
         let text = serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
-    }
-
-    #[tool(description = "Fetch and extract content from multiple URLs in parallel.")]
-    async fn webfind_fetch_parallel(
-        &self,
-        Parameters(params): Parameters<FetchParallelParams>,
-    ) -> Result<CallToolResult, String> {
-        let dynamic = params.dynamic.unwrap_or(false);
-        let dynamic_wait_ms = params.dynamic_wait_ms.unwrap_or(2000);
-        let extract_links = params.extract_links.unwrap_or(false);
-        let extract_keywords = params.extract_keywords.unwrap_or(false);
-
-        let futures = params.urls.into_iter().enumerate().map(|(idx, url)| {
-            let server = self.clone();
-            let url_for_error = url.clone();
-            let job = FetchToolParams {
-                url,
-                proxies: params.proxies.clone(),
-                dynamic: Some(dynamic),
-                dynamic_wait_ms: Some(dynamic_wait_ms),
-                extract_links: Some(extract_links),
-                extract_keywords: Some(extract_keywords),
-            };
-            async move {
-                match server.fetch_one(job).await {
-                    Ok(value) => serde_json::json!({
-                        "index": idx,
-                        "success": true,
-                        "result": value,
-                    }),
-                    Err(err) => serde_json::json!({
-                        "index": idx,
-                        "url": url_for_error,
-                        "success": false,
-                        "error": err,
-                    }),
-                }
-            }
-        });
-
-        let results = futures::future::join_all(futures).await;
-        let payload = serde_json::json!({
-            "jobs": results.len(),
-            "results": results,
-        });
-        let text = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 }

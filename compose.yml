@@ -3,11 +3,11 @@ services:
     image: surrealdb/surrealdb:latest
     container_name: webfind-surrealdb
     user: root
-    command: start --user root --pass root surrealkv:///data/surreal.db
+    command: start --user root --pass root --bind 0.0.0.0:7710 surrealkv:///data/surreal.db
     volumes:
       - surreal-data:/data
     ports:
-      - "8000:8000"
+      - "7710:7710"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "/surreal", "version"]
@@ -15,23 +15,57 @@ services:
       timeout: 5s
       retries: 5
 
-  webfind:
-    build: .
-    container_name: webfind-server
-    ports:
-      - "4747:4747"
-    environment:
-      WEBFIND_DATA_DIR: /data
-      WEBFIND_GRAPH_STORE: surrealdb
-      WEBFIND_SURREAL_URL: ws://surrealdb:8000
-      WEBFIND_SURREAL_USER: root
-      WEBFIND_SURREAL_PASS: root
-    volumes:
-      - webfind-data:/data
+  schema-init:
+    image: curlimages/curl:latest
+    container_name: webfind-schema-init
     depends_on:
       surrealdb:
         condition: service_healthy
-    command: ["serve", "--transport", "http"]
+    volumes:
+      - ./schema:/schema:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Creating namespace and database..."
+        curl -sf -X POST http://surrealdb:7710/sql \
+          -H "Authorization: Basic cm9vdDpyb290" \
+          -H "surreal-ns: kavach" \
+          -H "surreal-db: main" \
+          -d 'DEFINE NS kavach; DEFINE DB main;'
+        echo "Applying schema DDL..."
+        curl -sf -X POST http://surrealdb:7710/sql \
+          -H "Authorization: Basic cm9vdDpyb290" \
+          -H "surreal-ns: kavach" \
+          -H "surreal-db: main" \
+          --data-binary @/schema/init.sql
+        echo "Schema initialized."
+    restart: "no"
+
+  webfind:
+    build: .
+    container_name: webfind-server
+    # Host port mappings (using different host ports to avoid OrbStack conflicts):
+    #   5748 -> 4747 : API/MCP over HTTP (Streamable HTTP)
+    #   5750 -> 4749 : HTML GUI (Google-style search)
+    # Access the GUI from your host at: http://localhost:5750
+    # Access the API from your host at: http://localhost:5748
+    ports:
+      - "5748:4747"
+      - "5750:4749"
+    environment:
+      WEBFIND_DATA_DIR: /data
+      WEBFIND_GRAPH_STORE: surrealdb
+      WEBFIND_SURREAL_URL: ws://surrealdb:7710
+      WEBFIND_SURREAL_USER: root
+      WEBFIND_SURREAL_PASS: root
+      WEBFIND_SURREAL_NS: kavach
+      WEBFIND_SURREAL_DB: main
+    volumes:
+      - webfind-data:/data
+    depends_on:
+      schema-init:
+        condition: service_completed_successfully
+    command: ["serve", "--transport", "http", "--gui-port", "4749"]
     restart: unless-stopped
 
 volumes:

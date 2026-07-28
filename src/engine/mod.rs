@@ -1,7 +1,10 @@
+pub mod bg_worker;
 pub mod bulk_crawler;
+pub mod categories;
 pub mod crawl_graph;
 pub mod crawler;
 pub mod device_profile;
+pub mod discovery;
 #[cfg(feature = "dynamic")]
 pub mod dynamic_fetcher;
 pub mod embedder;
@@ -15,7 +18,11 @@ pub mod pagerank_cache;
 pub mod pipeline;
 pub mod proxy_pool;
 pub mod proxy_server;
+pub mod query_log;
 pub mod ranker;
+pub mod research_service;
+pub mod search_engine;
 pub mod site_policy;
+pub mod surreal_engine;
 pub mod util;
 pub mod vector;

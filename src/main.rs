@@ -15,7 +15,8 @@ use webfind::engine::graph_summary::build_graph_summary;
 use webfind::engine::indexer::Indexer;
 use webfind::engine::proxy_pool::{ProxyEndpoint, ProxyPool};
 use webfind::engine::ranker::Ranker;
-use webfind::engine::vector::VectorEngine;
+use webfind::engine::search_engine::InMemorySearchEngine;
+use webfind::engine::surreal_engine::SurrealSearchEngine;
 use webfind::report::format_response;
 use webfind::schema::content::StructuredContent;
 use webfind::schema::request::{OutputFormat, SearchDepth, SearchRequest};
@@ -272,14 +273,19 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
 
-            let mut indexer = Indexer::open_at(&path)?;
-            if hybrid {
-                let embedder = webfind::engine::embedder::FastembedEmbedder::new()
-                    .context("load embedding model for hybrid search")?;
-                indexer = indexer.with_vector_engine(webfind::engine::vector::VectorEngine::new(
-                    Arc::new(embedder),
-                ));
-            }
+            let embedder: Option<Arc<dyn webfind::engine::embedder::Embedder>> = if hybrid {
+                Some(Arc::new(
+                    webfind::engine::embedder::FastembedEmbedder::new()
+                        .context("load embedding model for hybrid search")?,
+                ))
+            } else {
+                None
+            };
+            let indexer = Indexer::new(Arc::new(
+                embedder
+                    .map(|e| InMemorySearchEngine::with_embedder(e))
+                    .unwrap_or_else(InMemorySearchEngine::new),
+            ));
             let ranker = Ranker::new();
 
             let depth_enum = match depth {
@@ -290,7 +296,7 @@ async fn main() -> anyhow::Result<()> {
             };
 
             let start = Instant::now();
-            let mut results = indexer.search_bm25(&query, limit as usize)?;
+            let mut results = indexer.search_bm25(&query, limit as usize).await?;
             let search_ms = start.elapsed().as_millis() as u64;
 
             let request = SearchRequest {
@@ -310,7 +316,7 @@ async fn main() -> anyhow::Result<()> {
             };
 
             let vector_scores: Option<HashMap<String, f64>> = if hybrid {
-                Some(indexer.search_vector(&query, limit as usize)?)
+                Some(indexer.search_vector(&query, limit as usize).await?)
             } else {
                 None
             };
@@ -362,7 +368,7 @@ async fn main() -> anyhow::Result<()> {
                 signals.push("graph".to_string());
             }
             let total = results.len() as u64;
-            let meta = indexer.metadata(signals)?;
+            let meta = indexer.metadata(signals).await?;
 
             let response = SearchResponse {
                 request_id: uuid::Uuid::new_v4().to_string(),
@@ -645,13 +651,13 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 if !contents.is_empty() {
-                    let mut indexer = Indexer::open_at(&path)?;
-                    if let Some(ref e) = embedder {
-                        indexer = indexer.with_vector_engine(
-                            webfind::engine::vector::VectorEngine::new(e.clone()),
-                        );
-                    }
-                    match indexer.index_batch(&contents) {
+                    let indexer = Indexer::new(Arc::new(
+                        embedder
+                            .as_ref()
+                            .map(|e| InMemorySearchEngine::with_embedder(e.clone()))
+                            .unwrap_or_else(InMemorySearchEngine::new),
+                    ));
+                    match indexer.index_batch(&contents).await {
                         Ok(_) => {
                             stats.pages_indexed =
                                 contents.iter().filter(|c| c.is_valid_content).count();
@@ -747,8 +753,8 @@ async fn main() -> anyhow::Result<()> {
                     println!("Run 'webfind crawl' or 'webfind index import' to create one.");
                     return Ok(());
                 }
-                let indexer = Indexer::open_at(&path)?;
-                let count = indexer.doc_count()?;
+                let indexer = Indexer::new(Arc::new(InMemorySearchEngine::new()));
+                let count = indexer.doc_count().await?;
                 println!("Index: {}", path.display());
                 println!("Documents: {}", count);
                 println!("Engine: v{}", env!("CARGO_PKG_VERSION"));
@@ -760,8 +766,8 @@ async fn main() -> anyhow::Result<()> {
                     println!("No index found at {}", path.display());
                     return Ok(());
                 }
-                let mut indexer = Indexer::open_at(&path)?;
-                indexer.optimize()?;
+                let indexer = Indexer::new(Arc::new(InMemorySearchEngine::new()));
+                indexer.optimize().await?;
                 println!("Index optimized.");
                 Ok(())
             }
@@ -856,7 +862,6 @@ async fn main() -> anyhow::Result<()> {
             topics,
             seeds,
         } => {
-            let path = index_path();
             let proxy_list: Vec<String> = proxies
                 .as_ref()
                 .map(|s| {
@@ -890,14 +895,13 @@ async fn main() -> anyhow::Result<()> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let crawler =
-                BulkDomainCrawler::new(proxy_pool, 100, 30, delay as u64, 1, max_pages as usize, follow_external, min_depth, max_depth)
-                    .with_respect_robots(respect_robots)
-                    .with_graph_store(graph.clone())
-                    .with_topics(topics);
 
-            // Multi-seed: crawl primary seed + additional seeds, merge and deduplicate.
-            let mut all_seeds = vec![seed.clone()];
+            // Determine seeds: explicit seed, additional seeds, or auto-discovery.
+            let auto_discover = seed.is_none();
+            let mut all_seeds: Vec<String> = Vec::new();
+            if let Some(ref seed) = seed {
+                all_seeds.push(seed.clone());
+            }
             if let Some(ref seeds_str) = seeds {
                 all_seeds.extend(
                     seeds_str
@@ -906,7 +910,35 @@ async fn main() -> anyhow::Result<()> {
                         .filter(|s| !s.is_empty()),
                 );
             }
-            println!("Researching: {}", seed);
+
+            if all_seeds.is_empty() {
+                // Auto-discover seeds from WebFind's own index and graph.
+                // In the CLI, the crawl starts with a fresh in-memory index, so
+                // discovery falls through to query-driven candidate generation.
+                let temp_engine = Arc::new(InMemorySearchEngine::new());
+                let temp_indexer = Indexer::new(temp_engine);
+                let discovered = webfind::engine::discovery::discover_seeds(
+                    &temp_indexer,
+                    Some(graph.as_ref()),
+                    &query,
+                )
+                .await?;
+                if discovered.is_empty() {
+                    anyhow::bail!("No seeds discovered for the query. Provide a seed URL or rephrase the query.");
+                }
+                all_seeds = discovered;
+            }
+
+            let follow_external = if auto_discover { true } else { follow_external };
+
+            let crawler =
+                BulkDomainCrawler::new(proxy_pool, 100, 30, delay as u64, 1, max_pages as usize, follow_external, min_depth, max_depth)
+                    .with_respect_robots(respect_robots)
+                    .with_graph_store(graph.clone())
+                    .with_topics(topics);
+
+            // Multi-seed: crawl all seeds, merge and deduplicate.
+            println!("Researching: {}", all_seeds.join(", "));
             println!("Query: {}", query);
             let crawl_start = Instant::now();
             let mut contents: Vec<StructuredContent> = Vec::new();
@@ -925,13 +957,15 @@ async fn main() -> anyhow::Result<()> {
                 contents.len()
             );
 
-            let mut indexer = Indexer::open_at(&path)?;
-            if let Some(e) = embedder {
-                indexer = indexer.with_vector_engine(VectorEngine::new(e));
-            }
-            indexer.index_batch(&contents)?;
+            let indexer = Indexer::new(Arc::new(
+                embedder
+                    .as_ref()
+                    .map(|e| InMemorySearchEngine::with_embedder(e.clone()))
+                    .unwrap_or_else(InMemorySearchEngine::new),
+            ));
+            indexer.index_batch(&contents).await?;
 
-            let mut results = indexer.search_bm25(&query, limit as usize)?;
+            let mut results = indexer.search_bm25(&query, limit as usize).await?;
 
             let request = SearchRequest {
                 query: query.clone(),
@@ -950,7 +984,7 @@ async fn main() -> anyhow::Result<()> {
             };
 
             let vector_scores: Option<HashMap<String, f64>> = if hybrid {
-                Some(indexer.search_vector(&query, limit as usize)?)
+                Some(indexer.search_vector(&query, limit as usize).await?)
             } else {
                 None
             };
@@ -972,7 +1006,7 @@ async fn main() -> anyhow::Result<()> {
             if hybrid {
                 signals.push("vector".to_string());
             }
-            let meta = indexer.metadata(signals)?;
+            let meta = indexer.metadata(signals).await?;
 
             let response = SearchResponse {
                 request_id: uuid::Uuid::new_v4().to_string(),
@@ -1005,6 +1039,7 @@ async fn main() -> anyhow::Result<()> {
             surreal_db,
             hybrid,
             rate_limit,
+            gui_port,
         } => {
             let graph_store_name = webfind::config::resolve_graph_store(
                 &cfg,
@@ -1025,16 +1060,21 @@ async fn main() -> anyhow::Result<()> {
                 surreal_ns.as_deref(),
                 surreal_db.as_deref(),
             );
-            let path = index_path();
-            let mut indexer = Indexer::open_at(&path)?;
-            if hybrid {
-                let embedder = webfind::engine::embedder::FastembedEmbedder::new()
-                    .context("load embedding model for hybrid search")?;
-                indexer = indexer.with_vector_engine(webfind::engine::vector::VectorEngine::new(
-                    Arc::new(embedder),
-                ));
-            }
 
+            // /search is OFFLINE: it queries the existing SurrealDB index populated
+            // by /research (or other indexing paths). It never crawls the internet.
+            // /research is ONLINE: it crawls the internet and writes into SurrealDB.
+            let embedder: Option<Arc<dyn webfind::engine::embedder::Embedder>> = if hybrid {
+                Some(Arc::new(
+                    webfind::engine::embedder::FastembedEmbedder::new()
+                        .context("load embedding model for hybrid search")?,
+                ))
+            } else {
+                None
+            };
+
+            // Build the graph store (SurrealDB) which is the single source of truth
+            // for both offline search and research persistence.
             let (surreal_store, graph_store): (
                 Option<Arc<SurrealStore>>,
                 Option<Arc<dyn CrawlGraphStore + Send + Sync>>,
@@ -1061,11 +1101,54 @@ async fn main() -> anyhow::Result<()> {
                 None => (None, None),
             };
 
+            // Use SurrealDB as the search backend in serve mode so both /search
+            // (offline query) and /research (online crawl) operate on the same
+            // knowledge graph and vector DB. /search never triggers a crawl.
+            let indexer: Indexer = if let Some(ref store) = surreal_store {
+                let engine = SurrealSearchEngine::new(store.db());
+                let engine = if let Some(e) = embedder.clone() {
+                    engine.with_embedder(e)
+                } else {
+                    engine
+                };
+                if let Err(e) = engine.apply_schema().await {
+                    tracing::warn!("failed to apply SurrealSearchEngine schema: {}", e);
+                }
+                Indexer::new(Arc::new(engine))
+            } else {
+                Indexer::new(Arc::new(
+                    embedder
+                        .map(|e| InMemorySearchEngine::with_embedder(e))
+                        .unwrap_or_else(InMemorySearchEngine::new),
+                ))
+            };
+
             let audit_store: Option<
                 Arc<dyn webfind::engine::fingerprint::FingerprintAuditLog + Send + Sync>,
-            > = surreal_store.map(|s| s as Arc<dyn webfind::engine::fingerprint::FingerprintAuditLog + Send + Sync>);
+            > = surreal_store
+                .as_ref()
+                .map(|s| s.clone() as Arc<dyn webfind::engine::fingerprint::FingerprintAuditLog + Send + Sync>);
 
             let rate_limit = webfind::config::resolve_rate_limit(&cfg, rate_limit);
+
+            // Initialize query log service for autocomplete if SurrealDB is available.
+            let query_log = if let Some(ref store) = surreal_store {
+                let log_service = webfind::engine::query_log::QueryLogService::new(
+                    store.db(),
+                    format!("{}_{}", surreal.ns, surreal.db),
+                );
+                Some(Arc::new(log_service))
+            } else {
+                None
+            };
+
+            // Initialize category service if SurrealDB is available.
+            let categories = if let Some(ref store) = surreal_store {
+                let cat_service = webfind::engine::categories::CategoryService::new(store.db());
+                Some(Arc::new(cat_service))
+            } else {
+                None
+            };
 
             match transport {
                 webfind::cli::TransportArg::Http => {
@@ -1073,15 +1156,35 @@ async fn main() -> anyhow::Result<()> {
                     if rate_limit.is_some() {
                         println!("Rate limiting enabled");
                     }
-                    webfind::api::run_server(
-                        indexer,
-                        graph_store,
-                        audit_store,
-                        webfind::config::data_dir(),
+                    println!("Starting WebFind GUI on port {}", gui_port);
+                    if query_log.is_some() {
+                        println!("Query log & autocomplete enabled");
+                    }
+
+                    let state = Arc::new(
+                        webfind::api::ApiState::new(
+                            indexer,
+                            graph_store,
+                            audit_store,
+                            webfind::config::data_dir(),
+                        )
+                        .with_query_log(query_log)
+                        .with_categories(categories),
+                    );
+
+                    let api_handle = tokio::spawn(webfind::api::run_server(
+                        state.clone(),
                         rate_limit,
                         port,
-                    )
-                    .await?;
+                    ));
+                    let gui_handle = tokio::spawn(webfind::gui::run_server(
+                        state.clone(),
+                        gui_port,
+                    ));
+
+                    let (api_res, gui_res) = tokio::try_join!(api_handle, gui_handle)?;
+                    api_res?;
+                    gui_res?;
                     Ok(())
                 }
                 webfind::cli::TransportArg::Stdio => {
@@ -1103,9 +1206,9 @@ async fn main() -> anyhow::Result<()> {
             println!("webfind v{}", env!("CARGO_PKG_VERSION"));
 
             if path.exists() {
-                match Indexer::open_at(&path) {
-                    Ok(indexer) => {
-                        let count = indexer.doc_count()?;
+                let indexer = Indexer::new(Arc::new(InMemorySearchEngine::new()));
+                match indexer.doc_count().await {
+                    Ok(count) => {
                         println!("Index:    {}", path.display());
                         println!("Documents: {}", count);
                         println!("Status:   ready");

@@ -1,0 +1,31 @@
+<article class="group">
+  <a href="/api/web/visit?url={{ result.url|urlencode }}&q={{ query|urlencode }}&rank={{ result.rank }}" target="_blank" rel="noopener" class="block hover:bg-slate-900/50 -mx-3 px-3 py-2 rounded-lg transition">
+    <div class="flex items-center gap-2 mb-1">
+      {% if result.favicon.is_some() %}
+        <img src="{{ result.favicon.as_ref().unwrap() }}" alt="" class="w-5 h-5 rounded-full" loading="lazy" onerror="this.style.display='none'">
+      {% endif %}
+      <span class="text-xs text-slate-400 truncate">{{ result.domain }}</span>
+      {% if result.site_name.is_some() %}
+        <span class="text-xs text-slate-500">· {{ result.site_name.as_ref().unwrap() }}</span>
+      {% endif %}
+      <a
+        hx-get="/api/web/categories?q={{ result.domain|urlencode }}"
+        hx-target="#categories-panel"
+        hx-swap="innerHTML"
+        hx-on:click="event.preventDefault(); event.stopPropagation(); window.location.href='/web/search?q={{ query|urlencode }}&categories={{ result.domain|urlencode }}';"
+        class="text-xs text-cyan-400 hover:text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/20 rounded-full px-2 py-0.5 transition ml-auto cursor-pointer"
+        onclick="event.preventDefault(); event.stopPropagation(); window.location.href='/web/search?q={{ query|urlencode }}&categories={{ result.domain|urlencode }}'"
+      >
+        filter by domain
+      </a>
+    </div>
+    <h3 class="text-lg font-medium text-cyan-400 group-hover:underline mb-1 truncate">{{ result.title }}</h3>
+    <p class="text-sm text-slate-300 line-clamp-2">{{ result.snippet }}</p>
+    <div class="flex items-center gap-3 mt-1.5 text-xs text-slate-500">
+      <span>Crawled {{ result.crawled_at.format("%Y-%m-%d") }}</span>
+      {% if result.author.is_some() %}
+        <span>· {{ result.author.as_ref().unwrap() }}</span>
+      {% endif %}
+    </div>
+  </a>
+</article>

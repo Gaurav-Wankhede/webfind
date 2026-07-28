@@ -4,3 +4,9 @@
 /tests/fixtures
 /webfind.toml
 .DS_Store
+
+# Frontend artifacts — built fresh inside Docker
+/assets/node_modules
+/assets/output.css
+/assets/js/htmx.min.js
+/assets/js/htmx-ext-sse.js

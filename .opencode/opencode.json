@@ -2,8 +2,8 @@
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "webfind": {
-      "type": "local",
-      "command": ["/Users/gauravwankhede/WebFind/scripts/webfind-mcp.sh"],
+      "type": "remote",
+      "url": "http://localhost:4748/mcp",
       "enabled": true,
       "timeout": 120000
     }

@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block title %}{{ query }} — WebFind{% endblock %}
+
+{% block content %}
+<!-- Sidebar: categories + history -->
+<aside class="w-64 border-r border-slate-800 bg-slate-900/50 hidden md:flex flex-col">
+  <!-- Categories panel -->
+  <div class="p-4 border-b border-slate-800">
+    <h2 class="text-sm font-semibold text-slate-300 flex items-center gap-2 mb-3">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4h18M3 10h18M3 16h18"></path></svg>
+      Categories
+    </h2>
+    <div
+      id="categories-panel"
+      hx-get="/api/web/categories?q={{ query|urlencode }}"
+      hx-trigger="load, every 30s"
+      hx-swap="innerHTML"
+      class="text-xs"
+    >
+      <p class="text-xs text-slate-500 p-2">Loading categories...</p>
+    </div>
+  </div>
+
+  <!-- History panel -->
+  <div class="p-4 border-b border-slate-800 flex-1 flex flex-col">
+    <h2 class="text-sm font-semibold text-slate-300 flex items-center gap-2 mb-2">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+      Recent Searches
+    </h2>
+    <div id="history-sidebar" class="flex-1 overflow-y-auto custom-scrollbar">
+      <p class="text-xs text-slate-500 p-2">Your recent searches will appear here.</p>
+    </div>
+    <button id="clear-history" class="mt-2 text-xs text-slate-500 hover:text-red-400 transition text-left">Clear history</button>
+  </div>
+</aside>
+
+<!-- Results area -->
+<div class="flex-1 flex flex-col min-w-0">
+  <!-- Top search bar -->
+  <div class="border-b border-slate-800 bg-slate-950/80 backdrop-blur px-4 py-3 sticky top-14 z-40">
+    <div class="max-w-4xl flex items-center gap-4">
+      <a href="/" class="text-xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-blue-500 shrink-0">
+        WebFind
+      </a>
+      <form id="search-form" action="/web/search" method="get" class="flex-1 flex items-center gap-2">
+        <div class="relative flex-1">
+          <input
+            type="search"
+            name="q"
+            value="{{ query }}"
+            placeholder="Search the web..."
+            autocomplete="off"
+            class="w-full bg-slate-900 border border-slate-700 text-slate-100 rounded-full py-2.5 pl-4 pr-4 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500 transition placeholder-slate-500"
+            hx-get="/api/web/suggest"
+            hx-trigger="input changed delay:300ms, keyup[key=='Enter']"
+            hx-target="#suggestions"
+            hx-swap="outerHTML"
+          >
+          <div id="suggestions" class="absolute top-full left-0 right-0 z-50"></div>
+        </div>
+        <select name="max_pages" class="bg-slate-900 border border-slate-700 text-xs text-slate-300 rounded-full px-3 py-2.5 focus:outline-none focus:border-cyan-500">
+          <option value="5" {% if max_pages == 5 %}selected{% endif %}>5 pages</option>
+          <option value="10" {% if max_pages == 10 %}selected{% endif %}>10 pages</option>
+          <option value="20" {% if max_pages == 20 %}selected{% endif %}>20 pages</option>
+          <option value="50" {% if max_pages == 50 %}selected{% endif %}>50 pages</option>
+          <option value="100" {% if max_pages == 100 %}selected{% endif %}>100 pages</option>
+        </select>
+        <button type="submit" class="bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold rounded-full px-5 py-2.5 transition">
+          Research
+        </button>
+      </form>
+    </div>
+    <div class="max-w-4xl mt-2 flex items-center gap-3">
+      <input
+        type="url"
+        name="seed"
+        value="{{ seed }}"
+        form="search-form"
+        placeholder="Optional seed URL (e.g. https://example.com)"
+        autocomplete="off"
+        class="flex-1 bg-slate-900/50 border border-slate-800 text-slate-300 text-sm rounded-full py-2 px-4 focus:outline-none focus:border-cyan-500 transition placeholder-slate-600"
+      >
+    </div>
+    {% if !categories.is_empty() %}
+    <div class="max-w-4xl mt-2 flex items-center gap-2 flex-wrap">
+      <span class="text-xs text-slate-500">Filtering by:</span>
+      {% for cat in categories %}
+        <span class="inline-flex items-center gap-1 text-xs bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 rounded-full px-2.5 py-1">
+          {{ cat }}
+          <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}" class="hover:text-cyan-100">×</a>
+        </span>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Results container -->
+  <div class="flex-1 px-4 py-6 overflow-y-auto">
+    <div class="max-w-4xl mx-auto">
+      {% if cached %}
+        <p class="text-sm text-slate-500 mb-4">Showing cached results for <span class="text-slate-300">"{{ query }}"</span>. <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&categories={{ categories_str|urlencode }}&force=1" class="text-cyan-400 hover:underline">Research again</a>.</p>
+        {% include "result_list.html" %}
+      {% else %}
+        <!-- SSE research stream -->
+        <div
+          hx-ext="sse"
+          sse-connect="/api/web/research/stream?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&categories={{ categories_str|urlencode }}"
+          sse-swap="message,progress,result,error,close"
+          class="space-y-4"
+        >
+          {% include "research_progress.html" %}
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

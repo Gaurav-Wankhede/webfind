@@ -12,19 +12,31 @@ surreal_data
 surreal-data
 memory
 :memory:
+.fastembed_cache/
+.cache/
 
 # OS / editor
 .DS_Store
-.vscode
-.idea
+.vscode/
+.idea/
 *.swp
 *.swo
+Thumbs.db
+.directory
 
 # Secrets / local config
 .env
+.env.*
 *.pem
 webfind.toml
 
 # Logs
 *.log
+
+# Frontend build artifacts
+assets/node_modules/
+assets/output.css
+assets/js/htmx.min.js
+assets/js/htmx-ext-sse.js
+
 

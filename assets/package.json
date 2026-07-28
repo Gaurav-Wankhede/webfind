@@ -1,0 +1,19 @@
+{
+  "name": "webfind-assets",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Frontend assets for the WebFind GUI (Tailwind CSS v4 + HTMX)",
+  "scripts": {
+    "build:css": "tailwindcss -i ./input.css -o ./output.css --minify",
+    "watch:css": "tailwindcss -i ./input.css -o ./output.css --watch",
+    "copy:js": "cp node_modules/htmx.org/dist/htmx.min.js js/htmx.min.js && cp node_modules/htmx-ext-sse/dist/sse.min.js js/htmx-ext-sse.js",
+    "build": "npm run build:css && npm run copy:js",
+    "postinstall": "npm run copy:js"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.0.0",
+    "htmx-ext-sse": "^2.2.4",
+    "htmx.org": "^2.0.10",
+    "tailwindcss": "^4.0.0"
+  }
+}

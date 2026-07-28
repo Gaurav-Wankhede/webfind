@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
+use super::bg_worker::BackgroundWorker;
 use super::crawl_graph::{CrawlGraphStore, DiscoverySource, InMemoryCrawlGraph, UrlNode};
 use super::device_profile::{DeviceProfile, SessionManager};
 use super::fetcher::Fetcher;
@@ -139,6 +140,7 @@ pub struct BulkDomainCrawler {
     max_pages: usize,
     respect_robots: bool,
     graph_store: Option<Arc<dyn CrawlGraphStore>>,
+    background_worker: Option<Arc<BackgroundWorker>>,
     follow_external: bool,
     min_depth: u32,
     max_depth: u32,
@@ -169,6 +171,7 @@ impl BulkDomainCrawler {
             max_pages,
             respect_robots: true,
             graph_store: None,
+            background_worker: None,
             follow_external,
             min_depth,
             max_depth,
@@ -184,6 +187,13 @@ impl BulkDomainCrawler {
     /// Attach a graph store (e.g. SurrealDB) for vector + link analysis.
     pub fn with_graph_store(mut self, store: Arc<dyn CrawlGraphStore>) -> Self {
         self.graph_store = Some(store);
+        self
+    }
+
+    /// Attach a background worker to persist full fetched content + embeddings
+    /// into the knowledge graph without blocking the crawl.
+    pub fn with_background_worker(mut self, worker: Arc<BackgroundWorker>) -> Self {
+        self.background_worker = Some(worker);
         self
     }
 
@@ -234,11 +244,23 @@ impl BulkDomainCrawler {
             state.policy = Some(blueprint.robots.clone());
         }
 
-        // Record seed in graph.
-        self.record_url(seed, &seed_domain, DiscoverySource::Seed, 0, 1.0, None, None)
-            .await;
+        // Record seed in graph unless it is already a crawled page.
+        let seed_already_crawled = if let Some(ref store) = self.graph_store {
+            store
+                .get_url(seed)
+                .await
+                .map(|n| n.crawled)
+                .unwrap_or(false)
+        } else {
+            false
+        };
 
-        // Seed queue from sitemap (highest priority first), then the user seed.
+        if !seed_already_crawled {
+            self.record_url(seed, &seed_domain, DiscoverySource::Seed, 0, 1.0, None, None)
+                .await;
+        }
+
+        // Seed queue from sitemap (highest priority first), then the user seed if new.
         let seed_relevance = score_relevance(seed, None, &self.topics);
         for entry in &blueprint.sitemap_urls {
             let relevance = score_relevance(&entry.url, None, &self.topics);
@@ -254,7 +276,9 @@ impl BulkDomainCrawler {
             .await;
             self.enqueue_url(&seed_domain, &entry.url, 1, relevance).await;
         }
-        self.enqueue_url(&seed_domain, seed, 0, seed_relevance).await;
+        if !seed_already_crawled {
+            self.enqueue_url(&seed_domain, seed, 0, seed_relevance).await;
+        }
 
         // Phase 1+2: DISCOVER + FETCH in interleaved BFS with depth tracking.
         let mut results: Vec<StructuredContent> = Vec::with_capacity(self.max_pages);
@@ -290,6 +314,16 @@ impl BulkDomainCrawler {
             };
 
             let domain = util::extract_domain(&url).unwrap_or_else(|| "unknown".to_string());
+
+            // /research should only discover and fetch URLs that are not already
+            // present in the knowledge graph as crawled pages.
+            if let Some(ref store) = self.graph_store {
+                if let Some(node) = store.get_url(&url).await {
+                    if node.crawled {
+                        continue;
+                    }
+                }
+            }
 
             // Wait for per-domain rate limit / backoff.
             self.wait_for_slot(&domain).await;
@@ -415,6 +449,19 @@ impl BulkDomainCrawler {
                     }
 
                     self.mark_url_crawled(&url).await;
+
+                    // Hand full content off to the background worker for KG + vector persistence.
+                    if let Some(ref worker) = self.background_worker {
+                        let content_url = url.clone();
+                        let content_clone = content.clone();
+                        let worker = worker.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = worker.persist(content_url, content_clone).await {
+                                tracing::warn!("failed to queue background persist: {}", e);
+                            }
+                        });
+                    }
+
                     results.push(content);
                 }
                 Err(e) => {

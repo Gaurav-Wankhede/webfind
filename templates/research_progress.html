@@ -1,0 +1,14 @@
+<div id="research-status" class="rounded-xl border border-slate-800 bg-slate-900/50 p-6 text-center">
+  <div class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-cyan-500/10 text-cyan-400 mb-4">
+    <svg class="w-6 h-6 animate-spin" fill="none" viewBox="0 0 24 24">
+      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+    </svg>
+  </div>
+  <h2 class="text-lg font-semibold text-slate-100 mb-1">Researching the web...</h2>
+  <p class="text-sm text-slate-400 mb-3">WebFind is crawling and indexing pages for <span class="text-slate-200">"{{ query }}"</span>.</p>
+  <div class="w-full max-w-md mx-auto bg-slate-800 rounded-full h-2 mb-2 overflow-hidden">
+    <div id="progress-bar" class="bg-gradient-to-r from-cyan-400 to-blue-500 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+  </div>
+  <p id="progress-text" class="text-xs text-slate-500">Waiting for first page...</p>
+</div>

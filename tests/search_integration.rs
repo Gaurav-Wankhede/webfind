@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use chrono::{TimeZone, Utc};
 use webfind::engine::indexer::Indexer;
 use webfind::engine::ranker::Ranker;
+use webfind::engine::search_engine::InMemorySearchEngine;
 use webfind::report::format_response;
 use webfind::schema::content::StructuredContent;
 use webfind::schema::request::{OutputFormat, SearchDepth, SearchRequest};
@@ -52,10 +55,9 @@ fn make_content(url: &str, title: &str, body: &str) -> StructuredContent {
     }
 }
 
-#[test]
-fn test_full_search_pipeline() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let mut indexer = Indexer::open(tmp.path()).unwrap();
+#[tokio::test]
+async fn test_full_search_pipeline() {
+    let indexer = Indexer::new(Arc::new(InMemorySearchEngine::new()));
 
     let docs = vec![
         make_content(
@@ -80,11 +82,11 @@ fn test_full_search_pipeline() {
         ),
     ];
 
-    let count = indexer.index_batch(&docs).unwrap();
+    let count = indexer.index_batch(&docs).await.unwrap();
     assert_eq!(count, 4);
 
     // Test BM25 search
-    let results = indexer.search_bm25("rust systems language", 10).unwrap();
+    let results = indexer.search_bm25("rust systems language", 10).await.unwrap();
     assert!(!results.is_empty());
     assert!(
         results[0].title.contains("Rust"),
@@ -112,7 +114,7 @@ fn test_full_search_pipeline() {
     assert_eq!(ranked.len(), 4);
 
     // Test report formatting
-    let meta = indexer.metadata(vec!["bm25".to_string()]).unwrap();
+    let meta = indexer.metadata(vec!["bm25".to_string()]).await.unwrap();
     let response = SearchResponse {
         request_id: "test-integration".to_string(),
         query: "rust systems language".to_string(),

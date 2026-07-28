@@ -2,10 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+
+use crate::schema::content::PageContentRecord;
 
 /// Where a discovered URL came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +47,16 @@ pub struct LinkEdge {
     pub anchor_text: Option<String>,
 }
 
+/// Durable background job for persisting crawled content + embeddings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrawlJob {
+    pub id: String,
+    pub url: String,
+    pub status: String,
+    pub attempts: i32,
+    pub error: Option<String>,
+}
+
 /// Trait for persistable crawl-graph backends.
 /// Implement this for SurrealDB (`storage::surreal_store`) to power
 /// graph-aware ranking and vector retrieval.
@@ -59,6 +72,22 @@ pub trait CrawlGraphStore: Send + Sync {
     async fn get_all_links(&self) -> Vec<LinkEdge>;
     /// Return a version token that changes whenever the graph is mutated.
     async fn graph_version(&self) -> String;
+
+    /// Persist full page content into the knowledge graph.
+    async fn record_page_content(&self, content: PageContentRecord) -> Result<()>;
+    /// Persist a dense embedding for semantic search.
+    async fn record_embedding(&self, url: &str, embedding: Vec<f32>) -> Result<()>;
+    /// Enqueue a URL for background content + embedding persistence.
+    async fn enqueue_crawl_job(&self, url: &str) -> Result<String>;
+    /// Dequeue up to `limit` pending crawl jobs.
+    async fn dequeue_crawl_jobs(&self, limit: usize) -> Result<Vec<CrawlJob>>;
+    /// Update the status of a crawl job.
+    async fn mark_crawl_job_status(
+        &self,
+        id: &str,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()>;
 }
 
 /// Direction for graph traversal.
@@ -174,6 +203,9 @@ pub struct InMemoryCrawlGraph {
     urls: DashMap<String, UrlNode>,
     edges_from: DashMap<String, Vec<LinkEdge>>,
     edges_to: DashMap<String, Vec<LinkEdge>>,
+    page_content: DashMap<String, PageContentRecord>,
+    embeddings: DashMap<String, Vec<f32>>,
+    jobs: DashMap<String, CrawlJob>,
     version: AtomicU64,
 }
 
@@ -183,6 +215,9 @@ impl InMemoryCrawlGraph {
             urls: DashMap::new(),
             edges_from: DashMap::new(),
             edges_to: DashMap::new(),
+            page_content: DashMap::new(),
+            embeddings: DashMap::new(),
+            jobs: DashMap::new(),
             version: AtomicU64::new(1),
         }
     }
@@ -245,6 +280,55 @@ impl CrawlGraphStore for InMemoryCrawlGraph {
 
     async fn graph_version(&self) -> String {
         self.version.load(Ordering::SeqCst).to_string()
+    }
+
+    async fn record_page_content(&self, content: PageContentRecord) -> Result<()> {
+        self.page_content
+            .insert(content.url_node.clone(), content);
+        Ok(())
+    }
+
+    async fn record_embedding(&self, url: &str, embedding: Vec<f32>) -> Result<()> {
+        self.embeddings.insert(url.to_string(), embedding);
+        Ok(())
+    }
+
+    async fn enqueue_crawl_job(&self, url: &str) -> Result<String> {
+        let id = format!("job-{}", self.jobs.len() + 1);
+        self.jobs.insert(
+            id.clone(),
+            CrawlJob {
+                id: id.clone(),
+                url: url.to_string(),
+                status: "pending".to_string(),
+                attempts: 0,
+                error: None,
+            },
+        );
+        Ok(id)
+    }
+
+    async fn dequeue_crawl_jobs(&self, _limit: usize) -> Result<Vec<CrawlJob>> {
+        Ok(self
+            .jobs
+            .iter()
+            .filter(|j| j.status == "pending")
+            .map(|j| j.value().clone())
+            .collect())
+    }
+
+    async fn mark_crawl_job_status(
+        &self,
+        id: &str,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        if let Some(mut job) = self.jobs.get_mut(id) {
+            job.status = status.to_string();
+            job.error = error.map(|s| s.to_string());
+            job.attempts += 1;
+        }
+        Ok(())
     }
 }
 

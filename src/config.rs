@@ -170,7 +170,7 @@ mod tests {
             graph_store = "surrealdb"
 
             [surreal]
-            url = "ws://localhost:8000"
+            url = "http://localhost:7790"
             user = "root"
             pass = "root"
             ns = "prod"
@@ -180,7 +180,7 @@ mod tests {
         assert_eq!(cfg.data_dir, Some(PathBuf::from("/var/webfind")));
         assert_eq!(cfg.graph_store, Some("surrealdb".to_string()));
         let s = cfg.surreal.unwrap();
-        assert_eq!(s.url, Some("ws://localhost:8000".to_string()));
+        assert_eq!(s.url, Some("http://localhost:7790".to_string()));
         assert_eq!(s.db, Some("prod".to_string()));
     }
 

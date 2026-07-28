@@ -9,14 +9,17 @@ use surrealdb::engine::any::{Any, connect};
 use surrealdb::opt::auth::Root;
 use surrealdb::types::Datetime;
 
-use crate::engine::crawl_graph::{CrawlGraphStore, DiscoverySource, LinkEdge, UrlNode};
+use crate::engine::crawl_graph::{CrawlGraphStore, CrawlJob, DiscoverySource, LinkEdge, UrlNode};
 use crate::engine::fingerprint::{Fingerprint, FingerprintAuditLog};
+use crate::schema::content::PageContentRecord;
 
 /// SurrealDB-backed graph store for crawl data.
 ///
-/// Persists discovered URLs as `url_node` records and inter-page links as
-/// `link_edge` graph relations, enabling graph traversal and vector-aware
-/// retrieval downstream.
+/// Persists discovered URLs as `url_node` records, inter-page links as
+/// `link_edge` graph relations, full page bodies in `page_content`, dense
+/// embeddings in `url_node.embedding`, and durable background jobs in
+/// `crawl_job` — enabling graph traversal, semantic search, and knowledge-
+/// graph memory shared with Kavach and AI models.
 pub struct SurrealStore {
     db: Surreal<Any>,
 }
@@ -52,6 +55,11 @@ impl SurrealStore {
         Ok(store)
     }
 
+    /// Return a clone of the underlying SurrealDB connection wrapped in Arc.
+    pub fn db(&self) -> Arc<Surreal<Any>> {
+        Arc::new(self.db.clone())
+    }
+
     /// Idempotent schema setup for graph storage.
     async fn init_schema(&self) -> Result<()> {
         self.db
@@ -73,6 +81,35 @@ impl SurrealStore {
                 DEFINE FIELD IF NOT EXISTS in         ON link_edge TYPE record<url_node>;
                 DEFINE FIELD IF NOT EXISTS out       ON link_edge TYPE record<url_node>;
                 DEFINE FIELD IF NOT EXISTS anchor_text ON link_edge TYPE option<string>;
+
+                DEFINE TABLE IF NOT EXISTS page_content SCHEMAFULL;
+                DEFINE FIELD IF NOT EXISTS url_node      ON page_content TYPE record<url_node>;
+                DEFINE FIELD IF NOT EXISTS content_text  ON page_content TYPE string;
+                DEFINE FIELD IF NOT EXISTS content_markdown ON page_content TYPE option<string>;
+                DEFINE FIELD IF NOT EXISTS content_html  ON page_content TYPE option<string>;
+                DEFINE FIELD IF NOT EXISTS excerpt       ON page_content TYPE option<string>;
+                DEFINE FIELD IF NOT EXISTS content_hash  ON page_content TYPE string;
+                DEFINE FIELD IF NOT EXISTS word_count    ON page_content TYPE option<int>;
+                DEFINE FIELD IF NOT EXISTS reading_time_seconds ON page_content TYPE option<int>;
+                DEFINE FIELD IF NOT EXISTS fetched_at    ON page_content TYPE datetime DEFAULT time::now();
+                DEFINE FIELD IF NOT EXISTS created_at    ON page_content TYPE datetime DEFAULT time::now();
+                DEFINE INDEX IF NOT EXISTS idx_page_content_url  ON page_content COLUMNS url_node UNIQUE;
+                DEFINE INDEX IF NOT EXISTS idx_page_content_hash ON page_content COLUMNS content_hash;
+
+                DEFINE TABLE IF NOT EXISTS crawl_job SCHEMAFULL;
+                DEFINE FIELD IF NOT EXISTS url      ON crawl_job TYPE string;
+                DEFINE FIELD IF NOT EXISTS status   ON crawl_job TYPE string DEFAULT 'pending';
+                DEFINE FIELD IF NOT EXISTS attempts ON crawl_job TYPE int DEFAULT 0;
+                DEFINE FIELD IF NOT EXISTS error    ON crawl_job TYPE option<string>;
+                DEFINE FIELD IF NOT EXISTS created_at ON crawl_job TYPE datetime DEFAULT time::now();
+                DEFINE FIELD IF NOT EXISTS updated_at ON crawl_job TYPE datetime DEFAULT time::now();
+                DEFINE INDEX IF NOT EXISTS idx_crawl_job_status ON crawl_job COLUMNS status, created_at;
+                DEFINE INDEX IF NOT EXISTS idx_crawl_job_url   ON crawl_job COLUMNS url UNIQUE;
+
+                DEFINE TABLE IF NOT EXISTS has_content SCHEMAFULL TYPE RELATION;
+                DEFINE FIELD IF NOT EXISTS in         ON has_content TYPE record<url_node>;
+                DEFINE FIELD IF NOT EXISTS out       ON has_content TYPE record<page_content>;
+                DEFINE FIELD IF NOT EXISTS created_at ON has_content TYPE datetime DEFAULT time::now();
 
                 DEFINE TABLE IF NOT EXISTS graph_meta SCHEMAFULL;
                 DEFINE FIELD IF NOT EXISTS value ON graph_meta TYPE number DEFAULT 0;
@@ -120,10 +157,8 @@ impl SurrealStore {
         let mut hasher = Sha256::new();
         hasher.update(url.as_bytes());
         let digest = hasher.finalize();
-        let hash = format!(
-            "{:016x}",
-            u128::from_be_bytes(digest[..16].try_into().unwrap())
-        );
+        let first16: [u8; 16] = digest[..16].try_into().unwrap_or([0u8; 16]);
+        let hash = format!("{:016x}", u128::from_be_bytes(first16));
         format!("url_node:{}", hash)
     }
 
@@ -148,7 +183,7 @@ impl SurrealStore {
     async fn bump_graph_version(&self) {
         let result = self
             .db
-            .query("UPSERT graph_meta:version SET value += 1")
+            .query("UPSERT graph_meta:version SET `value` += 1")
             .await;
         if let Err(e) = result {
             tracing::error!("failed to bump graph version: {}", e);
@@ -383,7 +418,7 @@ impl CrawlGraphStore for SurrealStore {
     }
 
     async fn graph_version(&self) -> String {
-        let mut response = match self.db.query("SELECT value FROM graph_meta:version").await {
+        let mut response = match self.db.query("SELECT `value` FROM graph_meta:version").await {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("failed to read graph version: {}", e);
@@ -402,6 +437,179 @@ impl CrawlGraphStore for SurrealStore {
             .and_then(|r| r.get("value").and_then(|v| v.as_i64()))
             .unwrap_or(0)
             .to_string()
+    }
+
+    async fn record_page_content(&self, content: PageContentRecord) -> Result<()> {
+        let url_node_id = content.url_node.clone();
+        let content_hash = content.content_hash.clone();
+
+        let query = format!(
+            "UPSERT page_content SET url_node = {}, content_text = $content_text, content_markdown = $content_markdown, content_html = $content_html, excerpt = $excerpt, content_hash = $content_hash, word_count = $word_count, reading_time_seconds = $reading_time_seconds, fetched_at = $fetched_at, created_at = $created_at",
+            url_node_id
+        );
+
+        let result = self
+            .db
+            .query(query)
+            .bind(("content_text", content.content_text))
+            .bind(("content_markdown", content.content_markdown))
+            .bind(("content_html", content.content_html))
+            .bind(("excerpt", content.excerpt))
+            .bind(("content_hash", content_hash.clone()))
+            .bind(("word_count", content.word_count.map(|v| v as i64)))
+            .bind(("reading_time_seconds", content.reading_time_seconds.map(|v| v as i64)))
+            .bind(("fetched_at", Datetime::from(content.fetched_at)))
+            .bind(("created_at", Datetime::from(content.created_at)))
+            .await;
+
+        match result {
+            Ok(response) => {
+                if let Err(e) = response.check() {
+                    tracing::error!("failed to record page content: {}", e);
+                    return Err(e.into());
+                }
+            }
+            Err(e) => {
+                tracing::error!("failed to record page content: {}", e);
+                return Err(e.into());
+            }
+        }
+
+        // Create has_content relation from url_node to page_content.
+        let relate_result = self
+            .db
+            .query(format!(
+                "RELATE {} -> has_content -> page_content:{}",
+                url_node_id, content_hash
+            ))
+            .await;
+        if let Err(e) = relate_result {
+            tracing::error!("failed to relate has_content: {}", e);
+            return Err(e.into());
+        }
+
+        Ok(())
+    }
+
+    async fn record_embedding(&self, url: &str, embedding: Vec<f32>) -> Result<()> {
+        let id = Self::url_id(url);
+        let result = self
+            .db
+            .query(format!(
+                "UPSERT {} SET embedding = $embedding",
+                id
+            ))
+            .bind(("embedding", embedding))
+            .await;
+        match result {
+            Ok(response) => {
+                if let Err(e) = response.check() {
+                    tracing::error!("failed to record embedding: {}", e);
+                    return Err(e.into());
+                }
+            }
+            Err(e) => {
+                tracing::error!("failed to record embedding: {}", e);
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
+    async fn enqueue_crawl_job(&self, url: &str) -> Result<String> {
+        let mut response = self
+            .db
+            .query("UPSERT crawl_job SET url = $url, status = 'pending', attempts = 0, created_at = time::now(), updated_at = time::now()")
+            .bind(("url", url.to_string()))
+            .await
+            .context("enqueue crawl job")?;
+        let rows: Vec<JsonValue> = response.take(0).context("deserialize crawl job id")?;
+        let id = rows
+            .into_iter()
+            .next()
+            .and_then(|v| {
+                v.get("id")
+                    .and_then(|id| id.get("id"))
+                    .and_then(|id| id.as_str())
+                    .or_else(|| v.get("id").and_then(|id| id.as_str()))
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| Self::url_id(url).replace("url_node:", ""));
+        Ok(id)
+    }
+
+    async fn dequeue_crawl_jobs(&self, limit: usize) -> Result<Vec<CrawlJob>> {
+        let mut response = self
+            .db
+            .query("SELECT * FROM crawl_job WHERE status = 'pending' ORDER BY created_at ASC LIMIT $limit")
+            .bind(("limit", limit as i64))
+            .await
+            .context("dequeue crawl jobs")?;
+        let rows: Vec<JsonValue> = response.take(0).context("deserialize crawl jobs")?;
+
+        let jobs: Vec<CrawlJob> = rows
+            .into_iter()
+            .filter_map(|v| {
+                let id = v
+                    .get("id")
+                    .and_then(|id| id.get("id"))
+                    .and_then(|id| id.as_str())
+                    .or_else(|| v.get("id").and_then(|id| id.as_str()))?
+                    .to_string();
+                let url = v.get("url").and_then(|u| u.as_str())?.to_string();
+                let status = v.get("status").and_then(|s| s.as_str())?.to_string();
+                let attempts = v.get("attempts").and_then(|a| a.as_i64()).unwrap_or(0) as i32;
+                let error = v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string());
+                Some(CrawlJob {
+                    id,
+                    url,
+                    status,
+                    attempts,
+                    error,
+                })
+            })
+            .collect();
+
+        // Mark selected jobs as processing.
+        for job in &jobs {
+            let local_id = job.id.strip_prefix("crawl_job:").unwrap_or(&job.id);
+            let _ = self
+                .db
+                .query("UPSERT type::record('crawl_job', $id) SET status = 'processing', updated_at = time::now()")
+                .bind(("id", local_id.to_string()))
+                .await;
+        }
+
+        Ok(jobs)
+    }
+
+    async fn mark_crawl_job_status(
+        &self,
+        id: &str,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let local_id = id.strip_prefix("crawl_job:").unwrap_or(id);
+        let result = self
+            .db
+            .query("UPSERT type::record('crawl_job', $id) SET status = $status, error = $error, attempts += 1, updated_at = time::now()")
+            .bind(("id", local_id.to_string()))
+            .bind(("status", status.to_string()))
+            .bind(("error", error.map(|s| s.to_string())))
+            .await;
+        match result {
+            Ok(response) => {
+                if let Err(e) = response.check() {
+                    tracing::error!("failed to mark crawl job status: {}", e);
+                    return Err(e.into());
+                }
+            }
+            Err(e) => {
+                tracing::error!("failed to mark crawl job status: {}", e);
+                return Err(e.into());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -437,6 +645,31 @@ impl CrawlGraphStore for Arc<SurrealStore> {
 
     async fn graph_version(&self) -> String {
         (**self).graph_version().await
+    }
+
+    async fn record_page_content(&self, content: PageContentRecord) -> Result<()> {
+        (**self).record_page_content(content).await
+    }
+
+    async fn record_embedding(&self, url: &str, embedding: Vec<f32>) -> Result<()> {
+        (**self).record_embedding(url, embedding).await
+    }
+
+    async fn enqueue_crawl_job(&self, url: &str) -> Result<String> {
+        (**self).enqueue_crawl_job(url).await
+    }
+
+    async fn dequeue_crawl_jobs(&self, limit: usize) -> Result<Vec<CrawlJob>> {
+        (**self).dequeue_crawl_jobs(limit).await
+    }
+
+    async fn mark_crawl_job_status(
+        &self,
+        id: &str,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        (**self).mark_crawl_job_status(id, status, error).await
     }
 }
 

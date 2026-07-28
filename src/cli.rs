@@ -63,7 +63,7 @@ pub enum Commands {
         #[arg(long, value_enum, env = "WEBFIND_GRAPH_STORE")]
         graph_store: Option<GraphStoreArg>,
 
-        /// SurrealDB connection URL (e.g. memory, ws://localhost:8000).
+        /// SurrealDB connection URL (e.g. memory, http://localhost:7790).
         #[arg(long)]
         surreal_url: Option<String>,
 
@@ -197,7 +197,7 @@ pub enum Commands {
         #[arg(long, value_enum)]
         graph_store: Option<GraphStoreArg>,
 
-        /// SurrealDB connection URL (e.g. memory, ws://localhost:8000).
+        /// SurrealDB connection URL (e.g. memory, http://localhost:7790).
         #[arg(long)]
         surreal_url: Option<String>,
 
@@ -234,7 +234,7 @@ pub enum Commands {
         follow_external: bool,
 
         /// Minimum hop depth to force-fetch (bypasses budget).
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value = "0")]
         min_depth: u32,
 
         /// Maximum hop depth from seed before stopping discovery.
@@ -265,7 +265,7 @@ pub enum Commands {
         #[arg(long, value_enum, default_value_t = DirectionArg::Both)]
         direction: DirectionArg,
 
-        /// SurrealDB connection URL (e.g. memory, ws://localhost:8000).
+        /// SurrealDB connection URL (e.g. memory, http://localhost:7790).
         #[arg(long)]
         surreal_url: Option<String>,
 
@@ -304,8 +304,8 @@ pub enum Commands {
 
     /// Crawl a seed URL and immediately search freshly indexed content.
     Research {
-        /// Seed URL to start crawling from.
-        seed: String,
+        /// Seed URL to start crawling from. If omitted, WebFind auto-discovers seeds.
+        seed: Option<String>,
 
         /// Query to run against the freshly indexed pages.
         query: String,
@@ -351,7 +351,7 @@ pub enum Commands {
         follow_external: bool,
 
         /// Minimum hop depth to force-fetch (bypasses budget).
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value = "0")]
         min_depth: u32,
 
         /// Maximum hop depth from seed before stopping discovery.
@@ -385,7 +385,7 @@ pub enum Commands {
         #[arg(long, value_enum, env = "WEBFIND_GRAPH_STORE")]
         graph_store: Option<GraphStoreArg>,
 
-        /// SurrealDB connection URL (e.g. memory, ws://localhost:8000).
+        /// SurrealDB connection URL (e.g. memory, http://localhost:7790).
         #[arg(long)]
         surreal_url: Option<String>,
 
@@ -412,6 +412,10 @@ pub enum Commands {
         /// Optional per-IP rate limit in requests per second (0 = disabled).
         #[arg(long, env = "WEBFIND_RATE_LIMIT")]
         rate_limit: Option<u32>,
+
+        /// Port for the HTML GUI server (default: 4749).
+        #[arg(long, default_value = "4749", env = "WEBFIND_GUI_PORT")]
+        gui_port: u16,
     },
 
     /// Show engine status
