@@ -96,8 +96,6 @@ pub async fn discover_seeds(
         .cloned()
         .collect();
 
-    let had_quality_seeds = final_seeds.len() >= MAX_SEEDS;
-
     // Layer 3: query-driven domain inference with a hard time ceiling.
     let generated = match tokio::time::timeout(
         std::time::Duration::from_secs(DISCOVERY_TIMEOUT_SECS),
@@ -130,6 +128,7 @@ pub async fn discover_seeds(
             }
         }
     } else {
+        // Merge query-derived candidates into the seed pool (dedup by URL).
         for seed in generated {
             if seen.insert(seed.url.clone()) {
                 final_seeds.push(seed);
@@ -140,18 +139,34 @@ pub async fn discover_seeds(
         }
     }
 
-    final_seeds.retain(|s| s.relevance >= MIN_RELEVANCE);
-
-    // If the existing index/graph produced no high-quality seeds, keep the best
-    // validated query-derived candidates rather than erroring.
-    if final_seeds.is_empty() && !had_quality_seeds {
-        let mut best: Vec<DiscoveredSeed> = seeds
-            .into_iter()
+    // Prefer high-quality seeds. If none reach the quality bar, fall back to
+    // the best query-derived candidates rather than erroring. The fallback
+    // seed above survives this filtering so an empty index still yields a
+    // crawlable URL.
+    let high_quality: Vec<DiscoveredSeed> = final_seeds
+        .iter()
+        .filter(|s| s.relevance >= MIN_RELEVANCE)
+        .cloned()
+        .collect();
+    if !high_quality.is_empty() {
+        final_seeds = high_quality;
+    } else {
+        let mut best: Vec<DiscoveredSeed> = final_seeds
+            .iter()
             .filter(|s| s.relevance >= FALLBACK_RELEVANCE)
+            .cloned()
             .collect();
-        best.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
-        best.truncate(MAX_SEEDS);
-        final_seeds = best;
+        if !best.is_empty() {
+            best.sort_by(|a, b| {
+                b.relevance
+                    .partial_cmp(&a.relevance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            best.truncate(MAX_SEEDS);
+            final_seeds = best;
+        }
+        // else: keep the fallback seed(s) so the caller can still attempt a
+        // crawl instead of receiving a hard "no seeds" error.
     }
 
     if final_seeds.is_empty() {
@@ -478,7 +493,7 @@ fn extract_keywords(query: &str) -> Vec<String> {
         .to_lowercase()
         .split_whitespace()
         .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
-        .filter(|s| !s.is_empty() && !stop_set.contains(s) && s.len() > 2)
+        .filter(|s| !s.is_empty() && !stop_set.contains(s) && s.len() > 1)
         .map(|s| s.to_string())
         .collect();
 
