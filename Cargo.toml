@@ -39,6 +39,7 @@ rand = "0.10.2"
 flate2 = "1"
 
 # Fetcher (content extraction + normalization)
+regex = "1"
 scraper = "0.27"
 html2text = "0.17"
 readability-rust = "0.1"

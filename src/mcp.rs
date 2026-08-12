@@ -700,6 +700,7 @@ impl WebfindMcpServer {
             "internal_links": if include_links { Some(&content.internal_links) } else { None as Option<&Vec<String>> },
             "external_links": if include_links { Some(&content.external_links) } else { None as Option<&Vec<String>> },
             "keywords": if include_keywords { Some(&content.keywords) } else { None as Option<&Vec<crate::schema::response::Keyword>> },
+            "entities": content.entities,
         }))
     }
 

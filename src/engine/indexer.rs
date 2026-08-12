@@ -151,6 +151,7 @@ mod tests {
             redirect_count: 0,
             is_paywalled: false,
             is_valid_content: true,
+            entities: crate::schema::content::Entities::default(),
         }
     }
 

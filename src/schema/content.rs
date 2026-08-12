@@ -48,6 +48,38 @@ pub struct StructuredContent {
     pub redirect_count: u8,
     pub is_paywalled: bool,
     pub is_valid_content: bool,
+    /// Deterministic regex-extracted entities from the clean text, available to
+    /// the LLM without calling an extraction model.
+    pub entities: Entities,
+}
+
+/// Structured entities extracted from page text via deterministic regex.
+/// Populated in the fetch pipeline before content reaches the LLM so models
+/// receive clean, machine-checkable facts instead of raw page text.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Entities {
+    pub emails: Vec<String>,
+    pub phones: Vec<String>,
+    pub addresses: Vec<String>,
+    pub urls: Vec<String>,
+    pub prices: Vec<String>,
+    pub dates: Vec<String>,
+    pub ip_addresses: Vec<String>,
+    pub social_handles: Vec<String>,
+}
+
+impl Entities {
+    /// True when no entities were extracted.
+    pub fn is_empty(&self) -> bool {
+        self.emails.is_empty()
+            && self.phones.is_empty()
+            && self.addresses.is_empty()
+            && self.urls.is_empty()
+            && self.prices.is_empty()
+            && self.dates.is_empty()
+            && self.ip_addresses.is_empty()
+            && self.social_handles.is_empty()
+    }
 }
 
 impl StructuredContent {

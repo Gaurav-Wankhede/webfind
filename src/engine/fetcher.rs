@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -15,7 +15,7 @@ use crate::engine::device_profile::{DeviceProfile, SessionManager};
 use crate::engine::fingerprint::{FingerprintAuditLog, FingerprintGenerator};
 use crate::engine::human_client::HumanClient;
 use crate::engine::proxy_pool::ProxyPool;
-use crate::schema::content::{ImageInfo, OpenGraph, StructuredContent, TwitterCard};
+use crate::schema::content::{Entities, ImageInfo, OpenGraph, StructuredContent, TwitterCard};
 use crate::schema::response::Keyword;
 
 const USER_AGENT: &str = "webfind/0.1 (+https://github.com/Gaurav-Wankhede/webfind)";
@@ -361,6 +361,9 @@ impl Fetcher {
         // 19. Normalize text
         let normalized_text = normalize_text(&content_text);
 
+        // 19b. Regex entity extraction — deterministic facts for the LLM.
+        let entities = extract_entities(&content_text);
+
         // Pre-compute values before moves
         let content_markdown = html_to_markdown(&content_html);
         let is_valid = !content_text.is_empty() && word_count > 50;
@@ -424,6 +427,7 @@ impl Fetcher {
             redirect_count: 0,
             is_paywalled,
             is_valid_content: is_valid,
+            entities,
         })
     }
 }
@@ -593,6 +597,7 @@ fn extract_from_text(
         redirect_count: 0,
         is_paywalled: false,
         is_valid_content: word_count > 50,
+        entities: Entities::default(),
     })
 }
 
@@ -647,6 +652,7 @@ fn make_invalid_content(
         redirect_count: 0,
         is_paywalled: false,
         is_valid_content: false,
+        entities: Entities::default(),
     }
 }
 
@@ -1038,6 +1044,141 @@ fn html_to_markdown(html: &str) -> String {
     html2text::from_read(html.as_bytes(), 120).unwrap_or_default()
 }
 
+// ── Regex entity extraction ───────────────────────────────────────────────
+//
+// Deterministic, zero-cost entity extraction (emails, phones, addresses, ...)
+// applied to the *clean* page text inside the fetch pipeline. This gives the
+// LLM machine-checkable facts instead of raw text and avoids paying tokens or
+// risking nondeterminism by asking a model to extract them. Regexes are
+// compiled once and reused via std LazyLock.
+
+/// Emails: standard local@domain[.tld], tolerant of a trailing period.
+static RE_EMAIL: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b",
+    )
+    .expect("valid email regex")
+});
+
+/// Phone numbers: E.164/US-centric — optional +country, then 7-15 digits
+/// separated by space/dash/dot. Requires at least 7 digits total so a date
+/// like `2017-05-13` (fewer digits) is not misclassified as a phone.
+static RE_PHONE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?:\+?\d{1,3}[\s\-\.]?)?\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]\d{4}\b",
+    )
+    .expect("valid phone regex")
+});
+
+/// Addresses: a leading number + street words, then a street suffix, then an
+/// optional city / state / ZIP tail (e.g. "Austin, TX 78701").
+static RE_ADDRESS: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?i)\b\d{1,6}\s+(?:[a-z0-9]+\.?[\s\-']+){1,6}(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|court|ct|way|place|pl|highway|hwy|parkway|pkwy|square|sq|suite|ste)\b[,\s]*(?:[a-z][a-z\s.]*?)?(?:[,]\s*[a-z]{2})?\s*\d{5}(?:-\d{4})?",
+    )
+    .expect("valid address regex")
+});
+
+/// URLs/URIs: http(s), ftp, mailto, www, or a bare domain with a path.
+/// Uses `[^\s<>]` (no quote chars in the class) so it stays a valid raw string.
+static RE_URL: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?i)\b(?:https?://|ftp://|mailto:|www\.)[^\s<>]+|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|org|net|io|ai|dev|app|co|edu|gov|info|me|us|uk|ca|de|fr|in)(?:/[^\s<>]*)?",
+    )
+    .expect("valid url regex")
+});
+
+/// Prices: currency symbol then digits (with optional cents), or digits then symbol.
+static RE_PRICE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?:\$\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?|(?:\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s?(?:USD|EUR|GBP|€|£))",
+    )
+    .expect("valid price regex")
+});
+
+/// Dates: ISO 8601, and common human dates (Month D, YYYY; D Month YYYY; MM/DD/YYYY).
+static RE_DATE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?ix)\b\d{4}-\d{1,2}-\d{1,2}\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s.,]+\d{1,2}[\s.,]*(?:,?\s*\d{2,4})?\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+    )
+    .expect("valid date regex")
+});
+
+/// IPv4 / IPv6 addresses.
+static RE_IP: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?:\b(?:25[0-5]|2[0-4][0-9]|1?[0-9][0-9]?)(?:\.(?:25[0-5]|2[0-4][0-9]|1?[0-9][0-9]?)){3}\b|(?i)\b(?:[a-f0-9]{1,4}:){2,7}[a-f0-9]{1,4}\b)",
+    )
+    .expect("valid ip regex")
+});
+
+/// Social handles: @username for Twitter/X, GitHub, etc. Must be preceded by
+/// whitespace or line start so an email local-part (`name@example.com`) is not
+/// mistaken for a handle.
+static RE_SOCIAL: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?:\A|\s)(@[a-zA-Z0-9_]{3,30})\b",
+    )
+    .expect("valid social regex")
+});
+
+/// Extract structured entities from cleaned page text.
+fn extract_entities(text: &str) -> Entities {
+    fn unique(v: Vec<String>) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        v.into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .filter(|s| seen.insert(s.to_lowercase()))
+            .collect()
+    }
+
+    let emails = unique(
+        RE_EMAIL
+            .find_iter(text)
+            .map(|m| m.as_str().trim_end_matches('.').to_string())
+            .collect(),
+    );
+    let phones = unique(RE_PHONE.find_iter(text).map(|m| m.as_str().trim().to_string()).collect());
+    let addresses = unique(
+        RE_ADDRESS
+            .find_iter(text)
+            .map(|m| m.as_str().trim().to_string())
+            .collect(),
+    );
+    let urls = unique(
+        RE_URL
+            .find_iter(text)
+            .map(|m| m.as_str().trim_end_matches(['.', ')', ';', ','].as_slice()).to_string())
+            .collect(),
+    );
+    let prices = unique(
+        RE_PRICE
+            .find_iter(text)
+            .map(|m| m.as_str().trim().to_string())
+            .collect(),
+    );
+    let dates = unique(RE_DATE.find_iter(text).map(|m| m.as_str().trim().to_string()).collect());
+    let ip_addresses =
+        unique(RE_IP.find_iter(text).map(|m| m.as_str().trim().to_string()).collect());
+    let social_handles = unique(
+        RE_SOCIAL
+            .captures_iter(text)
+            .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+            .collect(),
+    );
+
+    Entities {
+        emails,
+        phones,
+        addresses,
+        urls,
+        prices,
+        dates,
+        ip_addresses,
+        social_handles,
+    }
+}
+
 // ── Paywall Detection ───────────────────────────────────────────────────────
 
 fn detect_paywall(html: &str) -> bool {
@@ -1265,4 +1406,49 @@ mod tests {
         assert!(detect_paywall("This is premium content behind a paywall"));
         assert!(!detect_paywall("Normal article content"));
     }
+    fn test_extract_entities() {
+        let text = concat!(
+            "Contact support@example.com or sales@corp.io. ",
+            "Call +1 555-123-4567. ",
+            "Visit https://example.com/pricing or www.example.org. ",
+            "The product costs $1,299.00 (or 999 USD). ",
+            "Founded on 2024-03-15. Server at 192.168.0.1. ",
+            "Follow us @OpenCodeHQ. Office at 123 Main Street, Austin, TX 78701.",
+        );
+        let e = extract_entities(text);
+        assert!(e.emails.iter().any(|m| m == "support@example.com"));
+        assert!(e.emails.iter().any(|m| m == "sales@corp.io"));
+        assert!(e.phones.iter().any(|m| m.contains("555-123-4567")));
+        assert!(e.urls.iter().any(|m| m == "https://example.com/pricing"));
+        assert!(e.prices.iter().any(|m| m.contains("1,299")));
+        assert!(e.prices.iter().any(|m| m.contains("999")));
+        assert!(e.dates.iter().any(|m| m == "2024-03-15"));
+        assert!(e.ip_addresses.iter().any(|m| m == "192.168.0.1"));
+        assert!(e.social_handles.iter().any(|m| m == "@OpenCodeHQ"));
+        assert!(e.addresses.iter().any(|m| m.contains("123 Main Street")));
+        assert!(!e.is_empty());
+    }
+
+    #[test]
+    fn test_extract_entities_avoids_false_positives() {
+        // A date must not be classified as a phone; an email local-part must
+        // not be classified as a social handle.
+        let e = extract_entities("Released 2017-05-13. Reach sales@corp.io directly.");
+        assert!(e.phones.is_empty(), "date misclassified as phone: {:?}", e.phones);
+        assert!(
+            !e.social_handles.iter().any(|m| m.contains("corp")),
+            "email local-part misclassified as handle: {:?}",
+            e.social_handles
+        );
+        assert!(e.dates.iter().any(|m| m == "2017-05-13"));
+        assert!(e.emails.iter().any(|m| m == "sales@corp.io"));
+    }
+
+    #[test]
+    fn test_extract_entities_empty() {
+        let e = extract_entities("Just some plain text with no structured data here.");
+        assert!(e.is_empty());
+        assert!(e.emails.is_empty() && e.phones.is_empty());
+    }
+}
 }

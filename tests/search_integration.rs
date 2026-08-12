@@ -52,6 +52,7 @@ fn make_content(url: &str, title: &str, body: &str) -> StructuredContent {
         redirect_count: 0,
         is_paywalled: false,
         is_valid_content: true,
+        entities: webfind::schema::content::Entities::default(),
     }
 }
 
