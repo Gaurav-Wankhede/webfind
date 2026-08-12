@@ -27,6 +27,8 @@ pub struct WebfindConfig {
     pub graph_store: Option<String>,
     pub surreal: Option<SurrealConfig>,
     pub rate_limit: Option<u32>,
+    /// Storage budget / retention tuning for limited-disk deployments.
+    pub storage: Option<StorageConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -58,6 +60,57 @@ impl Default for ResolvedSurreal {
             db: "webfind".to_string(),
         }
     }
+}
+
+/// Storage budget & retention policy for the embedded database.
+///
+/// WebFind keeps a small, searchable core per page (embedding + excerpt +
+/// entities + link edges) and, when a budget is set, evicts the bulky full
+/// content (text/markdown/html) for the oldest / lowest-value pages. This
+/// bounds disk usage while preserving search recall — the core requirement for
+/// running a background crawl daemon on a machine with limited storage.
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct StorageConfig {
+    /// Hard cap on total database file size in bytes. When the on-disk size
+    /// exceeds this, the daemon/prune path evicts full content for the oldest
+    /// pages until the DB fits under the budget. `None` = unbounded.
+    pub max_bytes: Option<u64>,
+    /// Number of pages whose full content is kept before eviction kicks in.
+    /// `None` = unlimited full-content retention.
+    pub max_full_content_pages: Option<u64>,
+}
+
+/// Resolve the storage budget (bytes) from env → config → default (None = unbounded).
+pub fn resolve_storage_max_bytes(config: &WebfindConfig) -> Option<u64> {
+    std::env::var("WEBFIND_STORAGE_MAX_BYTES")
+        .ok()
+        .and_then(|s| parse_bytes(&s))
+        .or_else(|| config.storage.as_ref().and_then(|s| s.max_bytes))
+}
+
+/// Resolve the full-content page cap from env → config → default (None = unlimited).
+pub fn resolve_max_full_content_pages(config: &WebfindConfig) -> Option<u64> {
+    std::env::var("WEBFIND_STORAGE_MAX_FULL_CONTENT")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .or_else(|| config.storage.as_ref().and_then(|s| s.max_full_content_pages))
+}
+
+/// Parse a human-friendly byte size (e.g. "500MB", "2GB", "1500KB", "1048576").
+fn parse_bytes(s: &str) -> Option<u64> {
+    let s = s.trim().to_ascii_lowercase();
+    let (num, mult) = if let Some(n) = s.strip_suffix("gb") {
+        (n, 1024u64.pow(3))
+    } else if let Some(n) = s.strip_suffix("mb") {
+        (n, 1024u64.pow(2))
+    } else if let Some(n) = s.strip_suffix("kb") {
+        (n, 1024)
+    } else if let Some(n) = s.strip_suffix("b") {
+        (n, 1)
+    } else {
+        (s.as_str(), 1)
+    };
+    num.trim().parse::<f64>().ok().map(|v| (v * mult as f64) as u64)
 }
 
 /// Load configuration from disk, returning defaults if no file exists.
@@ -212,6 +265,29 @@ mod tests {
     fn test_resolve_graph_store_defaults() {
         let cfg = WebfindConfig::default();
         assert_eq!(resolve_graph_store(&cfg, None), "memory");
+    }
+
+    #[test]
+    fn test_parse_bytes() {
+        assert_eq!(parse_bytes("500MB"), Some(500 * 1024 * 1024));
+        assert_eq!(parse_bytes("2GB"), Some(2 * 1024 * 1024 * 1024));
+        assert_eq!(parse_bytes("1500KB"), Some(1500 * 1024));
+        assert_eq!(parse_bytes("1048576"), Some(1_048_576));
+        assert_eq!(parse_bytes("512B"), Some(512));
+        assert_eq!(parse_bytes("garbage"), None);
+    }
+
+    #[test]
+    fn test_resolve_storage_from_config() {
+        let cfg = WebfindConfig {
+            storage: Some(StorageConfig {
+                max_bytes: Some(500 * 1024 * 1024),
+                max_full_content_pages: Some(1000),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(resolve_storage_max_bytes(&cfg), Some(500 * 1024 * 1024));
+        assert_eq!(resolve_max_full_content_pages(&cfg), Some(1000));
     }
 
     #[test]
