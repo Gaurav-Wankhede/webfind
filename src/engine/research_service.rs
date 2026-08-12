@@ -2,15 +2,15 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use super::bg_worker::BackgroundWorker;
-use super::bulk_crawler::BulkDomainCrawler;
+use super::bulk_crawler::{BulkDomainCrawler, FollowExternalLinks, RespectRobots};
 use super::crawl_graph::{CrawlGraphStore, InMemoryCrawlGraph};
 use super::discovery;
 use super::embedder::{Embedder, FastembedEmbedder};
-use super::indexer::Indexer;
 use super::proxy_pool::{ProxyEndpoint, ProxyPool};
+use super::search_engine::SearchEngine;
 use crate::schema::content::StructuredContent;
 
 /// Progress update emitted during a research job.
@@ -53,12 +53,18 @@ pub enum ResearchError {
 /// Run the core research crawl and return the fetched content plus the graph store
 /// that was used to record discovered URLs and links.
 pub async fn execute_research<F>(
-    indexer: Arc<Mutex<Indexer>>,
+    indexer: Arc<RwLock<Arc<dyn SearchEngine + Send + Sync>>>,
     graph_store: Option<Arc<dyn CrawlGraphStore + Send + Sync>>,
     embedder: Option<Arc<dyn Embedder + Send + Sync>>,
     options: ResearchOptions,
     progress: F,
-) -> Result<(Vec<StructuredContent>, Arc<dyn CrawlGraphStore + Send + Sync>), ResearchError>
+) -> Result<
+    (
+        Vec<StructuredContent>,
+        Arc<dyn CrawlGraphStore + Send + Sync>,
+    ),
+    ResearchError,
+>
 where
     F: Fn(ResearchProgress) + Send + Sync + 'static,
 {
@@ -70,18 +76,29 @@ where
     });
 
     // Use provided embedder or create one for KG + vector persistence.
+    // When the real ONNX model is unavailable (first run, offline, CI), degrade
+    // to the deterministic dummy embedder instead of failing the whole research
+    // job. Production deployments with a loaded model keep real embeddings.
     let embedder: Arc<dyn Embedder> = match embedder {
         Some(e) => e,
-        None => FastembedEmbedder::new()
-            .map(Arc::new)
-            .map_err(ResearchError::Embedder)?,
+        None => match FastembedEmbedder::new() {
+            Ok(e) => Arc::new(e),
+            Err(e) => {
+                tracing::warn!("fastembed model unavailable, using dummy embedder: {}", e);
+                Arc::new(crate::engine::embedder::DummyEmbedder)
+            }
+        },
     };
 
     let graph: Arc<dyn CrawlGraphStore + Send + Sync> = graph_store
         .clone()
         .unwrap_or_else(|| Arc::new(InMemoryCrawlGraph::new()));
 
-    let background_worker = Arc::new(BackgroundWorker::new(graph.clone(), Some(embedder.clone()), 256));
+    let background_worker = Arc::new(BackgroundWorker::new(
+        graph.clone(),
+        Some(embedder.clone()),
+        256,
+    ));
 
     let topics: Vec<String> = options
         .topics
@@ -110,8 +127,10 @@ where
     }
 
     if all_seeds.is_empty() {
-        let indexer_guard = indexer.lock().await;
-        let discovered = discovery::discover_seeds(&indexer_guard, Some(graph.as_ref()), &options.query).await;
+        let indexer_guard = indexer.read().await;
+        let discovered =
+            discovery::discover_seeds(indexer_guard.as_ref(), Some(graph.as_ref()), &options.query)
+                .await;
         drop(indexer_guard);
 
         match discovered {
@@ -121,19 +140,23 @@ where
         }
     }
 
-    let follow_external = if auto_discover { true } else { options.follow_external };
+    let follow_external = if auto_discover {
+        true
+    } else {
+        options.follow_external
+    };
 
     let proxy_pool = ProxyPool::new();
     if let Some(proxies_str) = &options.proxies {
-    for url in proxies_str.split(',') {
-        let url = url.trim();
-        if url.is_empty() {
-            continue;
+        for url in proxies_str.split(',') {
+            let url = url.trim();
+            if url.is_empty() {
+                continue;
+            }
+            if let Ok(ep) = ProxyEndpoint::from_url(url) {
+                let _ = proxy_pool.add(ep);
+            }
         }
-        if let Ok(ep) = ProxyEndpoint::from_url(url) {
-            proxy_pool.add(ep);
-        }
-    }
     }
 
     let crawler = BulkDomainCrawler::new(
@@ -143,11 +166,15 @@ where
         options.delay_ms.max(100) as u64,
         1,
         options.max_pages.clamp(1, 500) as usize,
-        follow_external,
+        if follow_external {
+            FollowExternalLinks::Follow
+        } else {
+            FollowExternalLinks::Ignore
+        },
         options.min_depth,
         options.max_depth,
     )
-    .with_respect_robots(true)
+    .with_respect_robots(RespectRobots::Yes)
     .with_graph_store(graph.clone())
     .with_background_worker(background_worker.clone())
     .with_topics(topics);
@@ -167,7 +194,10 @@ where
             current_url: Some(seed_url.clone()),
         });
 
-        let crawled = crawler.crawl(seed_url).await.map_err(ResearchError::Crawl)?;
+        let crawled = crawler
+            .crawl(seed_url)
+            .await
+            .map_err(ResearchError::Crawl)?;
         for c in crawled {
             if seen_urls.insert(c.url.clone()) {
                 contents.push(c);

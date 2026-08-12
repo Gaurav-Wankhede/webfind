@@ -28,8 +28,31 @@ anyhow = "1"
 thiserror = "2"
 
 # Crawler
-spider = "2.52"
-reqwest = { version = "0.13", features = ["rustls", "gzip", "http2", "stream", "cookies"] }
+# NOTE: spider's default features pull `disk` -> sqlx -> libsqlite3-sys/bundled,
+# which links a 2nd static sqlite3 alongside libsql-ffi's bundled fork
+# ("ld: duplicate symbol _sqlite3_*"). We don't use spider's disk persistence
+# (WebFind has its own storage), so default-features = false and re-enable
+# everything except the disk-* features.
+spider = { version = "2.52", default-features = false, features = [
+    "sync",
+    "cookies",
+    "ua_generator",
+    "encoding",
+    "string_interner_buffer_backend",
+    "balance",
+    "real_browser",
+    "time",
+    "adaptive_concurrency",
+    "priority_frontier",
+    "dns_cache",
+    "rate_limit",
+    "request_coalesce",
+    "auto_throttle",
+    "etag_cache",
+    "warc",
+    "reqwest_native_tls_native_roots",
+] }
+reqwest = { version = "0.13", features = ["rustls", "gzip", "http2", "stream", "cookies", "json"] }
 reqwest-middleware = "0.5"
 reqwest-retry = "0.6"
 robotstxt = "0.3"
@@ -59,22 +82,41 @@ hnsw_rs = "0.3"
 fastembed = "4"
 
 # Storage
-surrealdb = { version = "3.2", features = ["kv-mem", "kv-surrealkv", "protocol-ws"] }
-sha2 = "0.10"
 blake3 = "1.8.5"
-hex = "0.4"
+bytes = "1"
 url = "2"
+
+# Vector index (DiskANN approximate nearest neighbor search, FR-1)
+anndists = "0.1"
+diskann-rs = "0.5"
+
+# Turso/libSQL (embedded storage backend, replaces SurrealDB)
+# The `encryption` feature enables SQLCipher encryption-at-rest support.
+libsql = { version = "0.6", features = ["core", "encryption"] }
 
 # MCP / HTTP API
 rmcp = { version = "2.2", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
+
+# Global allocator (P4.5): mimalloc provides better p99 latency than the
+# system allocator for the fetch/index workload (per 2026 benchmarks).
+mimalloc = { version = "0.1", features = ["secure"] }
 schemars = "1.0"
 axum = "0.8.9"
 tower = "0.5"
 tower_governor = "0.7"
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.6", features = ["fs", "limit", "cors", "trace"] }
 futures = "0.3.33"
 socket2 = "0.6.5"
 async-trait = "0.1"
+
+# OAuth 2.1 + PKCE (FR-11)
+oauth2 = { version = "5", features = ["pkce-plain", "reqwest"] }
+jsonwebtoken = "9"
+base64 = "0.22"
+urlencoding = "2.1"
+
+# Code Mode sandbox (FR-10)
+rquickjs = { version = "0.11", features = ["full-async"] }
 
 # Templating / GUI
 askama = "0.13"
@@ -91,9 +133,35 @@ optional = true
 [dev-dependencies]
 tempfile = "3"
 tokio-test = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+insta = { version = "1", features = ["json"] }
+# Benchmark-only SHA-256 to compare against BLAKE3 (FR-8 acceptance: URL ID
+# generation must be >=3x faster with BLAKE3). Kept out of [dependencies] so the
+# production binary stays free of sha2.
+sha2 = "0.10"
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+[[bench]]
+name = "score_scalar"
+harness = false
+
+[[bench]]
+name = "fingerprint_fast"
+harness = false
+
+[[bench]]
+name = "proxy_select"
+harness = false
+
+[[bench]]
+name = "content_deserialize"
+harness = false
+
+[[bench]]
+name = "url_id"
+harness = false

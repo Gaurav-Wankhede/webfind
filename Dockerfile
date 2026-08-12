@@ -29,7 +29,7 @@ RUN apt-get update \
     && node --version \
     && npm --version
 
-# Reduce release-build memory usage inside Docker so large crates (surrealdb-core) don't OOM.
+# Reduce release-build memory usage inside Docker so large crates don't OOM.
 # These overrides are intentionally conservative; they trade peak memory for longer compile times.
 ENV CARGO_PROFILE_RELEASE_LTO=false
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=64

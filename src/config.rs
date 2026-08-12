@@ -21,45 +21,22 @@ pub fn data_dir() -> PathBuf {
 /// Loaded from `webfind.toml` in the current directory, or from the path
 /// specified by `WEBFIND_CONFIG`. CLI flags and environment variables take
 /// precedence over config values.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct WebfindConfig {
     pub data_dir: Option<PathBuf>,
     pub graph_store: Option<String>,
-    pub surreal: Option<SurrealConfig>,
+    pub turso: Option<TursoConfig>,
     pub rate_limit: Option<u32>,
+    /// Maximum request body size in bytes (default: 1MB for API, 256KB for MCP)
+    pub body_limit: Option<usize>,
+    /// Comma-separated list of allowed CORS origins (default: none — must be explicitly configured)
+    pub cors_origins: Option<String>,
+    /// Comma-separated list of allowed MCP hosts (default: localhost)
+    pub mcp_allowed_hosts: Option<String>,
+    /// OAuth 2.1 configuration (FR-11)
+    pub oauth: Option<OAuthConfig>,
     /// Storage budget / retention tuning for limited-disk deployments.
     pub storage: Option<StorageConfig>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct SurrealConfig {
-    pub url: Option<String>,
-    pub user: Option<String>,
-    pub pass: Option<String>,
-    pub ns: Option<String>,
-    pub db: Option<String>,
-}
-
-/// Resolved SurrealDB connection settings with all fallbacks applied.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedSurreal {
-    pub url: String,
-    pub user: String,
-    pub pass: String,
-    pub ns: String,
-    pub db: String,
-}
-
-impl Default for ResolvedSurreal {
-    fn default() -> Self {
-        Self {
-            url: "memory".to_string(),
-            user: String::new(),
-            pass: String::new(),
-            ns: "webfind".to_string(),
-            db: "webfind".to_string(),
-        }
-    }
 }
 
 /// Storage budget & retention policy for the embedded database.
@@ -113,6 +90,38 @@ fn parse_bytes(s: &str) -> Option<u64> {
     num.trim().parse::<f64>().ok().map(|v| (v * mult as f64) as u64)
 }
 
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct OAuthConfig {
+    /// Enable OAuth 2.1 + PKCE for MCP (default: off for backwards compatibility)
+    pub enabled: Option<bool>,
+    /// OAuth issuer URL (e.g., https://auth.example.com)
+    pub issuer: Option<String>,
+    /// Client ID for this WebFind instance
+    pub client_id: Option<String>,
+    /// Client secret (for confidential clients)
+    pub client_secret: Option<String>,
+    /// Redirect URI for OAuth callback
+    pub redirect_uri: Option<String>,
+    /// Scopes to request (comma-separated)
+    pub scopes: Option<String>,
+    /// JWKS URI for token validation (defaults to issuer + /.well-known/jwks.json)
+    pub jwks_uri: Option<String>,
+    /// Token audience (for resource server validation)
+    pub audience: Option<String>,
+    /// Optional path to append FR-11 audit-log entries (JSONL). When unset, audit
+    /// entries are kept in memory only (bounded ring buffer).
+    pub audit_log_path: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct TursoConfig {
+    pub path: Option<String>,
+    /// Encryption key for the Turso/libSQL database at rest (SQLCipher AES-256-CBC).
+    /// When set, every Turso database opened by WebFind is encrypted with this key.
+    /// Expected as a raw UTF-8 passphrase (derived to a 256-bit key by SQLCipher).
+    pub encryption_key: Option<String>,
+}
+
 /// Load configuration from disk, returning defaults if no file exists.
 pub fn load() -> anyhow::Result<WebfindConfig> {
     let path = std::env::var("WEBFIND_CONFIG")
@@ -140,56 +149,32 @@ fn resolve(cli: Option<&str>, env_key: &str, config: Option<&str>, default: &str
         .unwrap_or_else(|| default.to_string())
 }
 
-/// Resolve SurrealDB connection settings.
-pub fn resolve_surreal(
-    config: &WebfindConfig,
-    cli_url: Option<&str>,
-    cli_user: Option<&str>,
-    cli_pass: Option<&str>,
-    cli_ns: Option<&str>,
-    cli_db: Option<&str>,
-) -> ResolvedSurreal {
-    let surreal = config.surreal.as_ref();
-    ResolvedSurreal {
-        url: resolve(
-            cli_url,
-            "WEBFIND_SURREAL_URL",
-            surreal.and_then(|s| s.url.as_deref()),
-            "memory",
-        ),
-        user: resolve(
-            cli_user,
-            "WEBFIND_SURREAL_USER",
-            surreal.and_then(|s| s.user.as_deref()),
-            "",
-        ),
-        pass: resolve(
-            cli_pass,
-            "WEBFIND_SURREAL_PASS",
-            surreal.and_then(|s| s.pass.as_deref()),
-            "",
-        ),
-        ns: resolve(
-            cli_ns,
-            "WEBFIND_SURREAL_NS",
-            surreal.and_then(|s| s.ns.as_deref()),
-            "webfind",
-        ),
-        db: resolve(
-            cli_db,
-            "WEBFIND_SURREAL_DB",
-            surreal.and_then(|s| s.db.as_deref()),
-            "webfind",
-        ),
-    }
+/// Resolve the Turso/libSQL database file path (CLI → env → config → default).
+pub fn resolve_turso(config: &WebfindConfig, cli_path: Option<&str>) -> String {
+    resolve(
+        cli_path,
+        "WEBFIND_TURSO_PATH",
+        config.turso.as_ref().and_then(|t| t.path.as_deref()),
+        "webfind.db",
+    )
 }
 
-/// Resolve the graph-store backend name. Defaults to `"memory"`.
-pub fn resolve_graph_store(config: &WebfindConfig, cli: Option<&str>) -> String {
-    cli.map(std::string::ToString::to_string)
-        .or_else(|| std::env::var("WEBFIND_GRAPH_STORE").ok())
-        .or_else(|| config.graph_store.clone())
-        .unwrap_or_else(|| "memory".to_string())
+use crate::cli::GraphStoreArg;
+
+/// Resolve the graph-store backend name. Defaults to Turso (embedded file).
+pub fn resolve_graph_store(config: &WebfindConfig, cli: Option<GraphStoreArg>) -> GraphStoreArg {
+    cli.or_else(|| {
+        std::env::var("WEBFIND_GRAPH_STORE")
+            .ok()
+            .and_then(|s| GraphStoreArg::from_str(&s))
+    })
+    .or_else(|| {
+        config
+            .graph_store
+            .as_ref()
+            .and_then(|s| GraphStoreArg::from_str(s))
+    })
+    .unwrap_or(GraphStoreArg::Turso)
 }
 
 /// Resolve the data directory path. Defaults to the current working directory.
@@ -212,6 +197,79 @@ pub fn resolve_rate_limit(config: &WebfindConfig, cli: Option<u32>) -> Option<No
         .and_then(NonZeroU32::new)
 }
 
+/// Resolve request body limit from env → config → default (1MB for API, 256KB for MCP).
+pub fn resolve_body_limit(config: &WebfindConfig, for_mcp: bool) -> usize {
+    std::env::var("WEBFIND_BODY_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .or_else(|| config.body_limit)
+        .unwrap_or_else(|| if for_mcp { 256 * 1024 } else { 1024 * 1024 })
+}
+
+/// Resolve CORS origins from env → config → default (empty = restrictive).
+pub fn resolve_cors_origins(config: &WebfindConfig) -> Vec<String> {
+    std::env::var("WEBFIND_CORS_ORIGINS")
+        .ok()
+        .or_else(|| config.cors_origins.clone())
+        .map(|s| {
+            s.split(',')
+                .map(|o| o.trim().to_string())
+                .filter(|o| !o.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Resolve MCP allowed hosts from env → config → default (localhost).
+pub fn resolve_mcp_allowed_hosts(config: &WebfindConfig) -> Vec<String> {
+    std::env::var("WEBFIND_MCP_ALLOWED_HOSTS")
+        .ok()
+        .or_else(|| config.mcp_allowed_hosts.clone())
+        .map(|s| {
+            s.split(',')
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty())
+                .collect()
+        })
+        .unwrap_or_else(|| vec!["localhost".to_string()])
+}
+
+/// Resolve OAuth configuration from env → config → defaults.
+pub fn resolve_oauth_config(config: &WebfindConfig) -> OAuthConfig {
+    let mut oauth = config.oauth.clone().unwrap_or_default();
+
+    // Env vars take precedence
+    if let Ok(v) = std::env::var("WEBFIND_AUTH_MODE") {
+        oauth.enabled = Some(v == "oauth2.1");
+    }
+    if let Ok(v) = std::env::var("WEBFIND_OAUTH_ISSUER") {
+        oauth.issuer = Some(v);
+    }
+    if let Ok(v) = std::env::var("WEBFIND_OAUTH_CLIENT_ID") {
+        oauth.client_id = Some(v);
+    }
+    if let Ok(v) = std::env::var("WEBFIND_OAUTH_CLIENT_SECRET") {
+        oauth.client_secret = Some(v);
+    }
+    if let Ok(v) = std::env::var("WEBFIND_OAUTH_REDIRECT_URI") {
+        oauth.redirect_uri = Some(v);
+    }
+    if let Ok(v) = std::env::var("WEBFIND_OAUTH_SCOPES") {
+        oauth.scopes = Some(v);
+    }
+    if let Ok(v) = std::env::var("WEBFIND_OAUTH_JWKS_URI") {
+        oauth.jwks_uri = Some(v);
+    }
+    if let Ok(v) = std::env::var("WEBFIND_OAUTH_AUDIENCE") {
+        oauth.audience = Some(v);
+    }
+    if let Ok(v) = std::env::var("WEBFIND_OAUTH_AUDIT_LOG") {
+        oauth.audit_log_path = Some(std::path::PathBuf::from(v));
+    }
+
+    oauth
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,51 +278,50 @@ mod tests {
     fn test_parse_config() {
         let text = r#"
             data_dir = "/var/webfind"
-            graph_store = "surrealdb"
+            graph_store = "turso"
 
-            [surreal]
-            url = "http://localhost:7790"
-            user = "root"
-            pass = "root"
-            ns = "prod"
-            db = "prod"
+            [turso]
+            path = "/var/webfind/webfind.db"
         "#;
         let cfg: WebfindConfig = toml::from_str(text).unwrap();
         assert_eq!(cfg.data_dir, Some(PathBuf::from("/var/webfind")));
-        assert_eq!(cfg.graph_store, Some("surrealdb".to_string()));
-        let s = cfg.surreal.unwrap();
-        assert_eq!(s.url, Some("http://localhost:7790".to_string()));
-        assert_eq!(s.db, Some("prod".to_string()));
+        assert_eq!(cfg.graph_store, Some("turso".to_string()));
+        let t = cfg.turso.unwrap();
+        assert_eq!(t.path, Some("/var/webfind/webfind.db".to_string()));
     }
 
     #[test]
-    fn test_resolve_surreal_priority_cli_over_config() {
+    fn test_resolve_turso_priority_cli_over_config() {
         let cfg = WebfindConfig {
-            surreal: Some(SurrealConfig {
-                url: Some("ws://config".to_string()),
-                user: None,
-                pass: None,
-                ns: Some("ns".to_string()),
-                db: Some("db".to_string()),
+            turso: Some(TursoConfig {
+                path: Some("/config/db".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         };
-        let resolved = resolve_surreal(&cfg, Some("ws://cli"), None, None, None, None);
-        assert_eq!(resolved.url, "ws://cli");
-        assert_eq!(resolved.ns, "ns");
-    }
-
-    #[test]
-    fn test_resolve_surreal_defaults() {
-        let cfg = WebfindConfig::default();
-        let resolved = resolve_surreal(&cfg, None, None, None, None, None);
-        assert_eq!(resolved, ResolvedSurreal::default());
+        assert_eq!(resolve_turso(&cfg, Some("/cli/db")), "/cli/db");
+        assert_eq!(resolve_turso(&cfg, None), "/config/db");
     }
 
     #[test]
     fn test_resolve_graph_store_defaults() {
         let cfg = WebfindConfig::default();
-        assert_eq!(resolve_graph_store(&cfg, None), "memory");
+        assert_eq!(resolve_graph_store(&cfg, None), GraphStoreArg::Turso);
+
+        // CLI arg overrides env var and config
+        assert_eq!(
+            resolve_graph_store(&cfg, Some(GraphStoreArg::Memory)),
+            GraphStoreArg::Memory
+        );
+    }
+
+    #[test]
+    fn test_resolve_data_dir_from_config() {
+        let cfg = WebfindConfig {
+            data_dir: Some(PathBuf::from("/tmp/webfind")),
+            ..Default::default()
+        };
+        assert_eq!(resolve_data_dir(&cfg), PathBuf::from("/tmp/webfind"));
     }
 
     #[test]
@@ -288,14 +345,5 @@ mod tests {
         };
         assert_eq!(resolve_storage_max_bytes(&cfg), Some(500 * 1024 * 1024));
         assert_eq!(resolve_max_full_content_pages(&cfg), Some(1000));
-    }
-
-    #[test]
-    fn test_resolve_data_dir_from_config() {
-        let cfg = WebfindConfig {
-            data_dir: Some(PathBuf::from("/tmp/webfind")),
-            ..Default::default()
-        };
-        assert_eq!(resolve_data_dir(&cfg), PathBuf::from("/tmp/webfind"));
     }
 }

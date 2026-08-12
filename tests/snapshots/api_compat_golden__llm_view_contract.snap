@@ -1,0 +1,47 @@
+---
+source: tests/api_compat_golden.rs
+expression: response.to_llm_value()
+---
+{
+  "graph": {
+    "domain_authority": [],
+    "inbound_links": [],
+    "outbound_links": [],
+    "related_domains": []
+  },
+  "metadata": {
+    "engine_version": "0.1.0",
+    "index_size": 128,
+    "searched_at": "2026-08-12T12:00:00Z",
+    "signals_used": [
+      "bm25",
+      "vector"
+    ]
+  },
+  "query": "rust systems language",
+  "results": [
+    {
+      "author": "Core Team",
+      "content": {
+        "excerpt": "Rust is a systems language",
+        "markdown": "# Rust",
+        "reading_time_seconds": 3,
+        "text": "Rust is a systems language focused on safety, speed, and concurrency.",
+        "word_count": 10
+      },
+      "domain": "rust-lang.org",
+      "excerpt": "Rust is a systems language focused on safety, speed, and concurrency.",
+      "language": "en",
+      "modified_at": null,
+      "published_at": "2026-08-12T12:00:00Z",
+      "rank": 1,
+      "reading_time_seconds": 3,
+      "site_name": "Rust",
+      "title": "The Rust Programming Language",
+      "url": "https://rust-lang.org",
+      "word_count": 10
+    }
+  ],
+  "returned": 1,
+  "total_results": 1
+}

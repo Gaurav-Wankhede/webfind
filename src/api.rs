@@ -8,26 +8,31 @@ use std::time::{Duration, Instant};
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderValue, Method, StatusCode},
     response::IntoResponse,
     routing::get,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
+use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 
+use crate::auth::{OAuthState, oauth_routes};
+use crate::config::resolve_oauth_config;
 use crate::engine::crawl_graph::CrawlGraphStore;
 use crate::engine::embedder::{Embedder, FastembedEmbedder};
-use crate::engine::fingerprint::FingerprintAuditLog;
 use crate::engine::fetcher::Fetcher;
+use crate::engine::fingerprint::FingerprintAuditLog;
 use crate::engine::graph_summary::build_graph_summary;
-use crate::engine::indexer::Indexer;
+use crate::engine::indexer::attach_content;
 use crate::engine::pagerank_cache::PageRankCache;
 use crate::engine::proxy_pool::ProxyPool;
 use crate::engine::ranker::Ranker;
+use crate::engine::search_engine::SearchEngine;
 use crate::mcp::WebfindMcpServer;
 use crate::report::format_response;
 use crate::schema::content::StructuredContent;
@@ -39,7 +44,7 @@ use rmcp::transport::streamable_http_server::{
 
 /// Shared application state for the HTTP API.
 pub struct ApiState {
-    indexer: Arc<Mutex<Indexer>>,
+    indexer: Arc<RwLock<Arc<dyn SearchEngine + Send + Sync>>>,
     graph_store: Option<Arc<dyn CrawlGraphStore + Send + Sync>>,
     audit_store: Option<Arc<dyn FingerprintAuditLog + Send + Sync>>,
     data_dir: PathBuf,
@@ -49,13 +54,13 @@ pub struct ApiState {
 
 impl ApiState {
     pub fn new(
-        indexer: Indexer,
+        indexer: Arc<dyn SearchEngine + Send>,
         graph_store: Option<Arc<dyn CrawlGraphStore + Send + Sync>>,
         audit_store: Option<Arc<dyn FingerprintAuditLog + Send + Sync>>,
         data_dir: PathBuf,
     ) -> Self {
         Self {
-            indexer: Arc::new(Mutex::new(indexer)),
+            indexer: Arc::new(RwLock::new(indexer)),
             graph_store,
             audit_store,
             data_dir,
@@ -80,7 +85,7 @@ impl ApiState {
         self
     }
 
-    pub fn indexer(&self) -> Arc<Mutex<Indexer>> {
+    pub fn indexer(&self) -> Arc<RwLock<Arc<dyn SearchEngine + Send + Sync>>> {
         self.indexer.clone()
     }
 
@@ -187,7 +192,7 @@ pub struct HealthResponse {
 }
 
 pub async fn health(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
-    let size = state.indexer.lock().await.doc_count().await.unwrap_or(0);
+    let size = state.indexer.read().await.doc_count().await.unwrap_or(0);
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
@@ -230,7 +235,7 @@ pub async fn search(
     let limit = params.limit as usize;
 
     // 1. Find known URLs in SurrealDB that match the query.
-    let mut db_results = match state.indexer.lock().await.search_bm25(query, limit).await {
+    let mut db_results = match state.indexer.read().await.search_bm25(query, limit).await {
         Ok(r) => r,
         Err(e) => {
             return (
@@ -248,13 +253,15 @@ pub async fn search(
             let url = url.trim();
             if !url.is_empty() {
                 if let Ok(ep) = crate::engine::proxy_pool::ProxyEndpoint::from_url(url) {
-                    proxy_pool.add(ep);
+                    if let Err(e) = proxy_pool.add(ep) {
+                        tracing::warn!("failed to add proxy: {e}");
+                    }
                 }
             }
         }
     }
 
-    let fetcher = if proxy_pool.is_empty() {
+    let fetcher = if proxy_pool.is_empty().unwrap_or(true) {
         match Fetcher::new() {
             Ok(f) => f,
             Err(e) => {
@@ -267,11 +274,19 @@ pub async fn search(
         }
     } else {
         let proxy_url = match proxy_pool.select(None) {
-            Some(p) => p.url,
-            None => {
+            Ok(Some(p)) => p.url,
+            Ok(None) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({"error": "proxy pool is empty"})),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::warn!("proxy select error: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "proxy selection failed"})),
                 )
                     .into_response();
             }
@@ -400,7 +415,7 @@ pub async fn search(
                 favicon: c.favicon.clone(),
                 thumbnail: None,
                 language: c.language.clone(),
-                content_type: ContentType::Any,
+                content_type: c.content_type.clone(),
             })
             .collect();
     }
@@ -437,7 +452,7 @@ pub async fn search(
     };
 
     let vector_scores: Option<HashMap<String, f64>> = if params.hybrid {
-        match state.indexer.lock().await.search_vector(query, limit).await {
+        match state.indexer.read().await.search_vector(query, limit).await {
             Ok(scores) => Some(scores),
             Err(e) => {
                 tracing::warn!("vector search failed: {}", e);
@@ -449,7 +464,12 @@ pub async fn search(
     };
 
     let ranker = Ranker::new();
-    let mut results = ranker.rank(results, &request, graph_scores.as_ref(), vector_scores.as_ref());
+    let mut results = ranker.rank(
+        results,
+        &request,
+        graph_scores.as_ref(),
+        vector_scores.as_ref(),
+    );
 
     results.truncate(limit);
 
@@ -469,16 +489,19 @@ pub async fn search(
     if graph_scores.is_some() {
         signals.push("graph".to_string());
     }
-    let meta = match state.indexer.lock().await.metadata(signals).await {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
+    let meta =
+        match crate::engine::indexer::build_metadata(state.indexer.read().await.as_ref(), signals)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+        };
 
     let response = SearchResponse {
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -535,14 +558,18 @@ pub async fn research(
 
     // Always generate embeddings for the knowledge graph / vector DB and reuse
     // the same embedder for the in-memory vector engine when hybrid is enabled.
+    // Degrade to a deterministic dummy embedder when the ONNX model cannot be
+    // loaded (e.g. first run before download, or offline test/CI). Embeddings
+    // still persist so the research pipeline functions; swap to the real model
+    // once it is available.
     let embedder: Arc<dyn Embedder> = match FastembedEmbedder::new() {
         Ok(e) => Arc::new(e),
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("failed to load embedder: {}", e)})),
-            )
-                .into_response();
+            tracing::warn!(
+                "fastembed model unavailable, using dummy embedder for research: {}",
+                e
+            );
+            Arc::new(crate::engine::embedder::DummyEmbedder)
         }
     };
 
@@ -603,12 +630,12 @@ pub async fn research(
 
     // Index the newly crawled pages using the shared indexer.
     {
-        let mut indexer = state.indexer.lock().await;
+        let mut indexer = state.indexer.write().await;
         if params.hybrid {
             // Swap in a vector-enabled engine using the same embedder.
             let vector_engine =
                 crate::engine::search_engine::InMemorySearchEngine::with_embedder(embedder);
-            *indexer = crate::engine::indexer::Indexer::new(Arc::new(vector_engine));
+            *indexer = Arc::new(vector_engine);
         }
         if let Err(e) = indexer.index_batch(&contents).await {
             return (
@@ -620,7 +647,7 @@ pub async fn research(
     }
 
     // Search the index.
-    let indexer = state.indexer.lock().await;
+    let indexer = state.indexer.read().await;
     let results = match indexer.search_bm25(query, limit).await {
         Ok(r) => r,
         Err(e) => {
@@ -665,7 +692,7 @@ pub async fn research(
     let mut results = ranker.rank(results, &request, None, vector_scores.as_ref());
 
     // Always attach full content for research responses.
-    Indexer::attach_content(&mut results, &contents);
+    attach_content(&mut results, &contents);
 
     // Fallback: if BM25 returned nothing, return the best crawled pages directly.
     if results.is_empty() && !contents.is_empty() {
@@ -725,7 +752,7 @@ pub async fn research(
                     favicon: c.favicon.clone(),
                     thumbnail: None,
                     language: c.language.clone(),
-                    content_type: ContentType::Any,
+                    content_type: c.content_type.clone(),
                 }
             })
             .collect();
@@ -744,7 +771,7 @@ pub async fn research(
         signals.push("vector".to_string());
     }
 
-    let meta = match indexer.metadata(signals).await {
+    let meta = match crate::engine::indexer::build_metadata(indexer.as_ref(), signals).await {
         Ok(m) => m,
         Err(e) => {
             return (
@@ -773,7 +800,11 @@ pub async fn research(
     (StatusCode::OK, body).into_response()
 }
 
-pub fn app(state: Arc<ApiState>, rate_limit: Option<NonZeroU32>) -> Router {
+pub fn app(
+    state: Arc<ApiState>,
+    rate_limit: Option<NonZeroU32>,
+    config: &crate::config::WebfindConfig,
+) -> Router {
     let mcp_state = state.clone();
     let mcp = StreamableHttpService::new(
         move || {
@@ -788,30 +819,92 @@ pub fn app(state: Arc<ApiState>, rate_limit: Option<NonZeroU32>) -> Router {
         StreamableHttpServerConfig::default()
             .with_stateful_mode(false)
             .with_json_response(true)
-            .disable_allowed_hosts()
+            .with_allowed_hosts(crate::config::resolve_mcp_allowed_hosts(config))
             .with_cancellation_token(CancellationToken::new()),
     );
 
-    let mut router = Router::new()
+    // Body size limit: configurable via WEBFIND_BODY_LIMIT (default 1MB for API)
+    let body_limit = crate::config::resolve_body_limit(config, false);
+
+    // CORS: configurable via WEBFIND_CORS_ORIGINS (default: restrictive — empty = no CORS)
+    let cors_origins = crate::config::resolve_cors_origins(config);
+    let cors_layer = if cors_origins.is_empty() {
+        // Restrictive: no CORS by default — must be explicitly configured
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::predicate(|_origin, _header| false))
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers([
+                axum::http::header::CONTENT_TYPE,
+                axum::http::header::AUTHORIZATION,
+            ])
+    } else {
+        let origins: Vec<HeaderValue> =
+            cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers([
+                axum::http::header::CONTENT_TYPE,
+                axum::http::header::AUTHORIZATION,
+            ])
+            .allow_credentials(true)
+    };
+
+    let router = Router::new()
         .route("/health", get(health))
         .route("/search", get(search))
         .route("/research", get(research))
-        .nest_service("/mcp", mcp)
-        .with_state(state);
+        .with_state(state.clone())
+        .layer(RequestBodyLimitLayer::new(body_limit))
+        .layer(cors_layer);
 
-    // Optional per-IP rate limiting. Off by default so local LLM agents are not throttled.
-    if let Some(rps) = rate_limit {
-        if let Some(governor_conf) = GovernorConfigBuilder::default()
-            .per_second(rps.get().into())
-            .burst_size(rps.get())
-            .finish()
-        {
-            router = router.layer(GovernorLayer {
-                config: Arc::new(governor_conf),
-            });
-        } else {
-            tracing::warn!("invalid governor config; rate limiting disabled");
+    // Add OAuth routes if enabled (FR-11). When enabled, the `/mcp` service is
+    // wrapped in a dedicated sub-router that enforces token validation +
+    // per-tool scope + audit logging — `/health`, `/search`, `/research` remain
+    // unauthenticated.
+    let oauth_config = resolve_oauth_config(config);
+    let mut router = if oauth_config.enabled.unwrap_or(false) {
+        match OAuthState::new(oauth_config) {
+            Ok(oauth_state) => {
+                let oauth_state = Arc::new(oauth_state);
+                // OAuth metadata endpoints (authorize, token, jwks).
+                let router = router.nest("/oauth", oauth_routes(oauth_state.clone()));
+                // MCP service protected by token validation + scope + audit.
+                let mcp_router = Router::new().nest_service("/mcp", mcp).route_layer(
+                    axum::middleware::from_fn_with_state(
+                        oauth_state,
+                        crate::auth::mcp_auth_middleware,
+                    ),
+                );
+                router.merge(mcp_router)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "OAuth enabled but configuration invalid ({}); MCP unprotected",
+                    e
+                );
+                router.nest_service("/mcp", mcp)
+            }
         }
+    } else {
+        // Auth disabled: MCP unprotected (single-tenant default).
+        router.nest_service("/mcp", mcp)
+    };
+
+    // Rate limiting enabled by default (60 req/s, burst 120) to protect the API.
+    let default_rate_limit = NonZeroU32::new(60).unwrap();
+    let effective_rate = rate_limit.unwrap_or(default_rate_limit);
+
+    if let Some(governor_conf) = GovernorConfigBuilder::default()
+        .per_second(effective_rate.get().into())
+        .burst_size(effective_rate.get() * 2)
+        .finish()
+    {
+        router = router.layer(GovernorLayer {
+            config: Arc::new(governor_conf),
+        });
+    } else {
+        tracing::warn!("invalid governor config; rate limiting disabled");
     }
 
     router
@@ -821,8 +914,9 @@ pub async fn run_server(
     state: Arc<ApiState>,
     rate_limit: Option<NonZeroU32>,
     port: u16,
+    config: crate::config::WebfindConfig,
 ) -> anyhow::Result<()> {
-    let app = app(state, rate_limit);
+    let app = app(state, rate_limit, &config);
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     axum::serve(
         listener,

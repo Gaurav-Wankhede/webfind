@@ -66,7 +66,10 @@ impl CacheStore {
     /// Open or create a cache store at `base/cache/urls.jsonl`.
     pub fn open(base: impl AsRef<Path>) -> Result<Self> {
         let path = base.as_ref().join("cache").join("urls.jsonl");
-        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::create_dir_all(
+            path.parent()
+                .ok_or_else(|| anyhow::anyhow!("cache path has no parent: {:?}", path))?,
+        )?;
         let mut store = Self {
             path,
             entries: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -114,13 +117,20 @@ impl CacheStore {
     /// Return the cached entry for a URL, if any.
     pub fn get(&self, url: &str) -> Option<CacheEntry> {
         let key = Self::normalize_url(url);
-        self.entries.lock().unwrap().get(&key).cloned()
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()
     }
 
     /// Insert or replace a cache entry and persist it.
     pub fn insert(&self, entry: CacheEntry) -> Result<()> {
         let key = Self::normalize_url(&entry.url);
-        self.entries.lock().unwrap().insert(key, entry);
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, entry);
         self.persist()
     }
 
@@ -154,7 +164,7 @@ impl CacheStore {
 
     /// Total cached URLs.
     pub fn len(&self) -> usize {
-        self.entries.lock().unwrap().len()
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Whether the cache is empty.
@@ -168,7 +178,7 @@ impl CacheStore {
         }
         let file = File::open(&self.path)?;
         let reader = BufReader::new(file);
-        let mut map = self.entries.lock().unwrap();
+        let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         for line in reader.lines() {
             let line = line?;
             if line.trim().is_empty() {
@@ -187,19 +197,13 @@ impl CacheStore {
             .truncate(true)
             .open(&self.path)?;
         let mut writer = std::io::LineWriter::new(file);
-        let map = self.entries.lock().unwrap();
+        let map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         for entry in map.values() {
             let line = serde_json::to_string(entry)?;
             writeln!(writer, "{}", line)?;
         }
         writer.flush()?;
         Ok(())
-    }
-}
-
-impl Default for CacheStore {
-    fn default() -> Self {
-        CacheStore::open(".").expect("default cache in current dir")
     }
 }
 

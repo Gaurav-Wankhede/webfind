@@ -109,6 +109,8 @@ impl Ranker {
             r.rank = (i + 1) as u32;
         }
 
+        Self::fix_snippets(&mut results);
+
         results
     }
 
@@ -128,7 +130,9 @@ impl Ranker {
             entry.1 += 1;
         }
         sums.into_iter()
-            .map(|(domain, (sum, count))| (domain, if count > 0 { sum / count as f64 } else { 0.0 }))
+            .map(|(domain, (sum, count))| {
+                (domain, if count > 0 { sum / count as f64 } else { 0.0 })
+            })
             .collect()
     }
 
@@ -151,6 +155,32 @@ impl Ranker {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         results
+    }
+
+    /// Ensure no result has an empty snippet — fall back to content excerpt or text.
+    fn fix_snippets(results: &mut [SearchResult]) {
+        for r in results.iter_mut() {
+            if !r.snippet.is_empty() {
+                continue;
+            }
+            if let Some(ref content) = r.content {
+                if !content.excerpt.is_empty() {
+                    r.snippet = content.excerpt.clone();
+                    continue;
+                }
+                if !content.text.is_empty() {
+                    let end = content
+                        .text
+                        .char_indices()
+                        .nth(200)
+                        .map(|(i, _)| i)
+                        .unwrap_or(content.text.len());
+                    r.snippet = format!("{}…", &content.text[..end]);
+                    continue;
+                }
+            }
+            r.snippet = r.title.clone();
+        }
     }
 
     /// Freshness score (0.0–1.0) based on page age.
@@ -284,7 +314,7 @@ mod tests {
             favicon: None,
             thumbnail: None,
             language: "en".to_string(),
-            content_type: ContentType::Any,
+            content_type: "text".to_string(),
         };
         let mut boosted = base.clone();
         boosted.url = "https://example.com/boosted".to_string();
@@ -361,7 +391,7 @@ mod tests {
             favicon: None,
             thumbnail: None,
             language: "en".to_string(),
-            content_type: ContentType::Any,
+            content_type: "text".to_string(),
         };
         let mut dup2 = dup.clone();
         dup2.url = "https://example.com/b".to_string();

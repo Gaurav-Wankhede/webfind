@@ -21,6 +21,13 @@ use crate::schema::response::Keyword;
 const USER_AGENT: &str = "webfind/0.1 (+https://github.com/Gaurav-Wankhede/webfind)";
 const FETCH_TIMEOUT_SECS: u64 = 30;
 
+/// Whether to rotate the User-Agent header per request.
+#[derive(Clone, Copy)]
+pub enum RotateUserAgent {
+    Rotate,
+    Fixed,
+}
+
 /// Fetcher: HTTP client + content extraction pipeline.
 pub struct Fetcher {
     client: Client,
@@ -52,14 +59,9 @@ impl Fetcher {
 
     /// Build a Fetcher from an existing reqwest client.
     pub fn from_client(client: Client) -> Result<Self> {
-        Ok(Self {
-            client,
-            human_client: None,
-            profile: None,
-            audit_log: None,
-            dynamic_fallback: false,
-            dynamic_wait_ms: 2000,
-        })
+        let mut fetcher = Self::new()?;
+        fetcher.client = client;
+        Ok(fetcher)
     }
 
     /// Attach a device profile so every request carries consistent headers.
@@ -72,25 +74,25 @@ impl Fetcher {
     pub fn new_human(
         proxy_pool: Option<ProxyPool>,
         session_manager: Option<SessionManager>,
-        rotate_ua: bool,
+        rotate_ua: RotateUserAgent,
         rps: u32,
     ) -> Result<Self> {
-        let rps = NonZeroU32::new(rps.max(1)).unwrap();
+        let rps = NonZeroU32::new(rps.max(1)).expect("rps.max(1) is always >= 1");
+        let ua_rotate = match rotate_ua {
+            RotateUserAgent::Rotate => true,
+            RotateUserAgent::Fixed => false,
+        };
         let mut builder = HumanClient::builder()
             .requests_per_second(rps)
             .burst_size(rps.get() * 3)
-            .rotate_ua(rotate_ua);
+            .rotate_ua(ua_rotate);
         if let Some(pool) = proxy_pool {
             builder = builder.proxy_pool(pool);
         }
         if let Some(mgr) = session_manager {
             builder = builder.session_manager(mgr);
         }
-        let fingerprint_generator = if std::env::var("WEBFIND_DISABLE_FINGERPRINT").is_ok() {
-            None
-        } else {
-            Some(FingerprintGenerator::new())
-        };
+        let fingerprint_generator = Some(FingerprintGenerator::new());
         if let Some(generator) = fingerprint_generator {
             builder = builder.fingerprint_generator(generator);
         }
@@ -161,7 +163,8 @@ impl Fetcher {
             .and_then(|v| v.to_str().ok())
             .map(String::from);
 
-        let (kind, _charset) = classify_content_type(content_type.as_deref());
+        let content_type_header = content_type.clone().unwrap_or_default();
+        let (kind, _charset) = parse_content_type_header(content_type.as_deref());
 
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -178,12 +181,17 @@ impl Fetcher {
             ));
         }
 
-        let body = response
-            .text()
+        // Zero-copy body read: `bytes()` borrows reqwest's internal buffer, and
+        // `from_utf8_lossy` borrows it again as `&str` when the body is valid
+        // UTF-8 (the common case), avoiding a full-body `String` allocation.
+        // Non-UTF-8 bodies are decoded lossily instead of erroring.
+        let body_bytes = response
+            .bytes()
             .await
             .context("failed to read response body")?;
+        let body = String::from_utf8_lossy(&body_bytes);
 
-        let content = match kind {
+        let mut content = match kind {
             ContentKind::Html => self.extract_from_html(
                 &body,
                 url,
@@ -206,6 +214,10 @@ impl Fetcher {
             ContentKind::Binary => unreachable!(),
         };
 
+        content.content_type_header = content_type_header.clone();
+        content.content_type =
+            super::content_classifier::classify_content_type(&content).to_string();
+
         // If static fetch yields no meaningful content and dynamic fallback is enabled,
         // render the page in Chromium and re-extract.
         if !content.is_valid_content && self.dynamic_fallback && kind == ContentKind::Html {
@@ -215,7 +227,7 @@ impl Fetcher {
                 let (rendered_html, dynamic_final_url) =
                     dynamic.render(url, self.dynamic_wait_ms).await?;
                 let ssl = dynamic_final_url.starts_with("https://");
-                return self.extract_from_html(
+                let mut dyn_content = self.extract_from_html(
                     &rendered_html,
                     url,
                     &dynamic_final_url,
@@ -223,7 +235,11 @@ impl Fetcher {
                     ssl,
                     elapsed + self.dynamic_wait_ms,
                     None,
-                );
+                )?;
+                dyn_content.content_type_header = content_type_header.clone();
+                dyn_content.content_type =
+                    super::content_classifier::classify_content_type(&dyn_content).to_string();
+                return Ok(dyn_content);
             }
             #[cfg(not(feature = "dynamic"))]
             {
@@ -292,11 +308,12 @@ impl Fetcher {
             .filter(|t| !t.trim().is_empty())
             .unwrap_or(fallback_text);
 
-        // 10. Content HTML
-        let content_html = article
+        // 10. Content HTML — cleaned for AI agent consumption
+        let raw_html = article
             .as_ref()
             .and_then(|a| a.content.clone())
             .unwrap_or_else(|| format!("<div>{}</div>", html_escape(&content_text)));
+        let content_html = clean_content_html(&raw_html);
 
         // 11. Excerpt
         let excerpt = article
@@ -425,16 +442,12 @@ impl Fetcher {
             encoding,
             ssl_valid,
             redirect_count: 0,
+            content_type: String::new(),
+            content_type_header: String::new(),
             is_paywalled,
             is_valid_content: is_valid,
             entities,
         })
-    }
-}
-
-impl Default for Fetcher {
-    fn default() -> Self {
-        Self::new().expect("failed to create default Fetcher")
     }
 }
 
@@ -450,7 +463,7 @@ enum ContentKind {
 }
 
 /// Classify a Content-Type header into a broad extraction strategy.
-fn classify_content_type(ct: Option<&str>) -> (ContentKind, Option<String>) {
+fn parse_content_type_header(ct: Option<&str>) -> (ContentKind, Option<String>) {
     let raw = ct.unwrap_or("text/html").to_lowercase();
     let mut parts = raw.split(';');
     let mime = parts.next().unwrap_or("text/html").trim();
@@ -595,6 +608,8 @@ fn extract_from_text(
         encoding: None,
         ssl_valid,
         redirect_count: 0,
+        content_type: String::new(),
+        content_type_header: String::new(),
         is_paywalled: false,
         is_valid_content: word_count > 50,
         entities: Entities::default(),
@@ -608,14 +623,14 @@ fn make_invalid_content(
     status_code: u16,
     ssl_valid: bool,
     fetch_duration_ms: u64,
-    content_type: Option<String>,
+    ct_header: Option<String>,
 ) -> StructuredContent {
     StructuredContent {
         url: original_url.to_string(),
         final_url: final_url.to_string(),
         status_code,
         title: title_from_url(final_url),
-        description: content_type.clone(),
+        description: ct_header.clone(),
         canonical_url: None,
         language: "en".to_string(),
         language_confidence: 0.0,
@@ -626,7 +641,9 @@ fn make_invalid_content(
         content_text: String::new(),
         content_html: String::new(),
         content_markdown: String::new(),
-        excerpt: content_type.unwrap_or_else(|| "Binary or unsupported content type".to_string()),
+        excerpt: ct_header
+            .clone()
+            .unwrap_or_else(|| "Binary or unsupported content type".to_string()),
         word_count: 0,
         char_count: 0,
         sentence_count: 0,
@@ -650,6 +667,8 @@ fn make_invalid_content(
         encoding: None,
         ssl_valid,
         redirect_count: 0,
+        content_type: String::new(),
+        content_type_header: ct_header.unwrap_or_default(),
         is_paywalled: false,
         is_valid_content: false,
         entities: Entities::default(),
@@ -1179,6 +1198,201 @@ fn extract_entities(text: &str) -> Entities {
     }
 }
 
+/// Strip web noise from HTML content using proper DOM traversal, retaining only
+/// semantic structural elements suitable for AI agent consumption.
+///
+/// Pipeline:
+///   1. Strip HTML comments (`<!-- ... -->`)
+///   2. Parse with HTML5 parser (handles malformed input gracefully)
+///   3. DOM tree traversal: only keep structural/semantic tags
+///   4. Normalize whitespace
+///
+/// Retains: h1-h6, p, div, span, a, ul, ol, li, table, pre, code, blockquote, etc.
+/// Removes: script, style, nav, header, footer, aside, form, input, iframe, etc.
+fn clean_content_html(html: &str) -> String {
+    // Step 1: strip HTML comments
+    let no_comments = strip_html_comments(html);
+    // Step 2: parse fragment via HTML5 spec parser
+    let doc = Html::parse_fragment(&no_comments);
+
+    // Step 3: traverse the body and rebuild clean HTML
+    let mut out = String::with_capacity(no_comments.len());
+    if let Ok(body_sel) = Selector::parse("body") {
+        if let Some(body) = doc.select(&body_sel).next() {
+            traverse_clean(body, &mut out);
+        }
+    }
+
+    // Step 4: normalize whitespace
+    normalize_html_whitespace(&out)
+}
+
+/// Tags whose entire subtree is kept (structural + semantic content).
+/// Matches PLAN.md spec: h1-h6, p, div, span, standard inline formatting.
+const CLEAN_KEEP: &[&str] = &[
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "p",
+    "div",
+    "span",
+    "a",
+    "ul",
+    "ol",
+    "li",
+    "table",
+    "tr",
+    "td",
+    "th",
+    "pre",
+    "code",
+    "blockquote",
+    "em",
+    "strong",
+    "i",
+    "b",
+    "u",
+    "br",
+    "hr",
+    "img",
+    "figure",
+    "figcaption",
+    "dl",
+    "dt",
+    "dd",
+    "abbr",
+    "cite",
+    "q",
+    "sub",
+    "sup",
+    "section",
+    "article",
+    "main",
+];
+
+/// Tags that are completely removed including their content.
+/// Matches PLAN.md spec: script, style, nav, header, footer, aside, form, button, head, noscript.
+const CLEAN_REMOVE: &[&str] = &[
+    "script", "style", "noscript", "iframe", "canvas", "svg", "nav", "header", "footer", "aside",
+    "form", "button", "input", "select", "textarea", "label", "option", "head", "link", "meta",
+];
+
+/// Recursive DOM traversal: rebuilds clean HTML from the scraper tree.
+fn traverse_clean(el: scraper::ElementRef, out: &mut String) {
+    let tag = el.value().name();
+    let tag_lower = tag.to_ascii_lowercase();
+
+    if CLEAN_REMOVE.contains(&tag_lower.as_str()) {
+        return;
+    }
+
+    // Void / self-closing elements — emit inline
+    if tag_lower == "br" {
+        out.push_str("<br>");
+        return;
+    }
+    if tag_lower == "hr" {
+        out.push_str("<hr>");
+        return;
+    }
+    if tag_lower == "img" {
+        if let Some(src) = el.value().attr("src") {
+            let alt = el.value().attr("alt").unwrap_or("");
+            out.push_str(&format!(
+                "<img src=\"{}\" alt=\"{}\">",
+                html_escape(src),
+                html_escape(alt)
+            ));
+        }
+        return;
+    }
+
+    // Unknown / custom elements — strip entirely (e.g. <div class="ad">, <tracking-widget>)
+    if !CLEAN_KEEP.contains(&tag_lower.as_str()) && !CLEAN_REMOVE.contains(&tag_lower.as_str()) {
+        // Unknown tag: skip it + its content
+        return;
+    }
+
+    // Open the tag with preserved attributes for critical elements
+    out.push('<');
+    out.push_str(tag_lower.as_str());
+
+    // Preserve href on links (traceability / citation)
+    if tag_lower == "a" {
+        if let Some(href) = el.value().attr("href") {
+            out.push_str(&format!(" href=\"{}\"", html_escape(href)));
+        }
+    }
+
+    out.push('>');
+
+    // Recursively process children
+    for child in el.children() {
+        if let Some(child_el) = scraper::ElementRef::wrap(child) {
+            traverse_clean(child_el, out);
+        } else if let Some(text) = child.value().as_text() {
+            out.push_str(text);
+        }
+    }
+
+    out.push_str("</");
+    out.push_str(tag_lower.as_str());
+    out.push('>');
+    out.push('\n');
+}
+
+/// Strip HTML comments (`<!-- ... -->`) from a string.
+fn strip_html_comments(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let bytes = html.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        // Check for <!--
+        if i + 3 < len
+            && bytes[i] == b'<'
+            && bytes[i + 1] == b'!'
+            && bytes[i + 2] == b'-'
+            && bytes[i + 3] == b'-'
+        {
+            // Skip until -->
+            i += 4;
+            while i + 2 < len && !(bytes[i] == b'-' && bytes[i + 1] == b'-' && bytes[i + 2] == b'>')
+            {
+                i += 1;
+            }
+            i += 3; // skip -->
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
+/// Collapse consecutive whitespace (including newlines) into single spaces,
+/// then trim leading/trailing whitespace.
+fn normalize_html_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(ch);
+            prev_space = false;
+        }
+    }
+    out.trim().to_string()
+}
+
 // ── Paywall Detection ───────────────────────────────────────────────────────
 
 fn detect_paywall(html: &str) -> bool {
@@ -1213,21 +1427,13 @@ fn extract_h1(doc: &Html) -> Option<String> {
 
 /// Strip scripts, styles, and noscript tags, then collect visible body text.
 fn fallback_body_text(doc: &Html) -> String {
-    let remove_selectors = ["script", "style", "noscript", "iframe", "canvas", "svg"];
     let mut text_parts = Vec::new();
-    for sel_str in &remove_selectors {
-        if let Ok(sel) = Selector::parse(sel_str) {
-            for el in doc.select(&sel) {
-                // Replace with a placeholder so we don't accidentally merge text across removed nodes.
-                let _ = el;
-            }
-        }
-    }
-    // Re-parse after removing is expensive; instead, walk body text nodes and skip
-    // any node inside a removed tag.
     if let Ok(body_sel) = Selector::parse("body") {
         if let Some(body) = doc.select(&body_sel).next() {
-            let skip_sel = Selector::parse("script,style,noscript,iframe,canvas,svg").ok();
+            let skip_sel = Selector::parse(
+                "script,style,noscript,iframe,canvas,svg,nav,header,footer,aside,form,button",
+            )
+            .ok();
             collect_text_nodes(body, &skip_sel, &mut text_parts);
         }
     }
@@ -1406,6 +1612,8 @@ mod tests {
         assert!(detect_paywall("This is premium content behind a paywall"));
         assert!(!detect_paywall("Normal article content"));
     }
+
+    #[test]
     fn test_extract_entities() {
         let text = concat!(
             "Contact support@example.com or sales@corp.io. ",
@@ -1450,5 +1658,4 @@ mod tests {
         assert!(e.is_empty());
         assert!(e.emails.is_empty() && e.phones.is_empty());
     }
-}
 }

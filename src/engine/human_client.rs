@@ -88,11 +88,17 @@ impl HumanClient {
         }
 
         // Select proxy for this domain/session.
-        let proxy_url = self
-            .proxy_pool
-            .as_ref()
-            .and_then(|pool| pool.select(Some(&domain)))
-            .map(|ep| ep.url);
+        let proxy_url =
+            self.proxy_pool
+                .as_ref()
+                .and_then(|pool| match pool.select(Some(&domain)) {
+                    Ok(Some(ep)) => Some(ep.url),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!("proxy select error for domain {}: {}", domain, e);
+                        None
+                    }
+                });
 
         // Select or reuse device profile for this domain.
         let profile = if let Some(ref mgr) = self.session_manager {
@@ -107,10 +113,20 @@ impl HumanClient {
         };
 
         // Generate a fresh privacy fingerprint per request when enabled.
-        let fingerprint = self
-            .fingerprint_generator
-            .as_ref()
-            .map(|generator| generator.generate_for_tool("request"));
+        // CPU-bound work is moved off the async reactor.
+        let fingerprint = if let Some(generator) = self.fingerprint_generator.as_ref() {
+            match tokio::task::spawn_blocking({
+                let generator = generator.clone();
+                move || generator.generate_for_tool("request").ok()
+            })
+            .await
+            {
+                Ok(fp) => fp,
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
 
         // Build a client for this specific proxy if one was selected.
         let client = if let Some(ref proxy_str) = proxy_url {
@@ -149,12 +165,15 @@ impl HumanClient {
         // Track success/failure in proxy pool.
         if let Some(ref pool) = self.proxy_pool {
             if let Some(ref pid) = proxy_url {
-                if resp.status().is_success() {
-                    pool.report_success(pid, 0);
+                let result = if resp.status().is_success() {
+                    pool.report_success(pid, 0)
                 } else if resp.status().as_u16() == 403 || resp.status().as_u16() == 429 {
-                    pool.report_banned(pid);
+                    pool.report_banned(pid)
                 } else {
-                    pool.report_failure(pid);
+                    pool.report_failure(pid)
+                };
+                if let Err(e) = result {
+                    tracing::warn!("failed to report proxy status: {e}");
                 }
             }
         }
@@ -175,7 +194,11 @@ impl HumanClient {
                     .log_fingerprint_use(
                         fp,
                         Some(status_code),
-                        if is_success { None } else { Some("non-success status") },
+                        if is_success {
+                            None
+                        } else {
+                            Some("non-success status")
+                        },
                     )
                     .await;
             }
@@ -266,7 +289,8 @@ impl HumanClientBuilder {
             .context("failed to build human client")?;
 
         let rate_limiter = self.requests_per_second.map(|rps| {
-            let burst = NonZeroU32::new(self.burst_size.max(1)).unwrap();
+            let burst =
+                NonZeroU32::new(self.burst_size.max(1)).expect("burst_size.max(1) is always >= 1");
             let quota = Quota::per_second(rps).allow_burst(burst);
             RateLimiter::keyed(quota)
         });

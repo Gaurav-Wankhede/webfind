@@ -155,7 +155,7 @@ mod tests {
             favicon: None,
             thumbnail: None,
             language: "en".to_string(),
-            content_type: crate::schema::request::ContentType::Any,
+            content_type: "text".to_string(),
         }];
 
         let summary = build_graph_summary(&graph, &results).await.unwrap();

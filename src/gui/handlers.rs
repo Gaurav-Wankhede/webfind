@@ -3,22 +3,23 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use askama::Template;
+use axum::response::sse::Event;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect, Sse},
 };
-use axum::response::sse::Event;
 use dashmap::DashMap;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::engine::embedder::FastembedEmbedder;
-use crate::engine::indexer::Indexer;
+use crate::engine::indexer::attach_content;
 use crate::engine::ranker::Ranker;
-use crate::engine::research_service::{execute_research, ResearchOptions, ResearchProgress};
+use crate::engine::research_service::{ResearchOptions, ResearchProgress, execute_research};
 use crate::engine::search_engine::InMemorySearchEngine;
+use crate::engine::search_engine::SearchEngine;
 use crate::gui::state::GuiState;
 use crate::gui::templates;
 use crate::schema::content::StructuredContent;
@@ -54,6 +55,9 @@ pub struct SearchForm {
     /// If "1", only include the specified categories in the response.
     #[serde(default)]
     pub filter_categories: Option<String>,
+    /// Content-type filter: "text", "images", "news", "videos", "documentation"
+    #[serde(rename = "type")]
+    pub r#type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,14 +88,20 @@ fn render<T: Template>(template: T) -> Html<String> {
         Ok(html) => Html(html),
         Err(e) => {
             tracing::error!("template render failed: {}", e);
-            Html("<p class=\"text-red-400 p-4\">Failed to render page. Please try again.</p>".to_string())
+            Html(
+                "<p class=\"text-red-400 p-4\">Failed to render page. Please try again.</p>"
+                    .to_string(),
+            )
         }
     }
 }
 
 /// Home page with the big search box.
 pub async fn home(State(_state): State<GuiState>) -> impl IntoResponse {
-    render(templates::HomeTemplate { query: String::new(), seed: String::new() })
+    render(templates::HomeTemplate {
+        query: String::new(),
+        seed: String::new(),
+    })
 }
 
 /// About page.
@@ -104,7 +114,10 @@ pub async fn about(State(_state): State<GuiState>) -> impl IntoResponse {
 /// If fresh cached results exist, renders them immediately. Otherwise renders the
 /// page shell with an SSE connection that will stream research progress and the
 /// final result list.
-pub async fn search(State(_state): State<GuiState>, Query(params): Query<SearchForm>) -> impl IntoResponse {
+pub async fn search(
+    State(_state): State<GuiState>,
+    Query(params): Query<SearchForm>,
+) -> impl IntoResponse {
     let query = params.q.trim().to_string();
     let max_pages = clamp_max_pages(params.max_pages);
     let seed_input = params.seed.as_ref().map(|s| s.trim().to_string());
@@ -125,30 +138,44 @@ pub async fn search(State(_state): State<GuiState>, Query(params): Query<SearchF
     }
 
     let seed_opt = seed_input.filter(|s| !s.is_empty());
-    let cache_key = (query.clone(), max_pages, seed_opt.clone(), categories.clone());
+    let cache_key = (
+        query.clone(),
+        max_pages,
+        seed_opt.clone(),
+        categories.clone(),
+    );
 
     let cached = QUERY_CACHE
         .get(&cache_key)
         .filter(|c| c.cached_at.elapsed() < CACHE_TTL && params.force == 0)
         .map(|c| c.results.clone());
+    let active_type = params.r#type.as_deref().unwrap_or("all").to_string();
+    let is_all_type = active_type == "all" || active_type.is_empty();
     let categories_str = categories.join(",");
 
     match cached {
-        Some(results) => render(templates::SearchTemplate {
-            query,
-            max_pages,
-            seed,
-            categories: categories.clone(),
-            categories_str: categories_str.clone(),
-            cached: true,
-            results,
-        }),
+        Some(results) => {
+            let results = filter_by_type(results, &active_type);
+            render(templates::SearchTemplate {
+                query,
+                max_pages,
+                seed,
+                categories: categories.clone(),
+                categories_str: categories_str.clone(),
+                active_type,
+                is_all_type,
+                cached: true,
+                results,
+            })
+        }
         None => render(templates::SearchTemplate {
             query,
             max_pages,
             seed,
             categories,
             categories_str,
+            active_type,
+            is_all_type,
             cached: false,
             results: Vec::new(),
         }),
@@ -160,7 +187,10 @@ pub async fn search(State(_state): State<GuiState>, Query(params): Query<SearchF
 /// Uses the query log service for next-word prediction (prefix completion
 /// from historical queries). Falls back to BM25 title search when the
 /// query log is not available.
-pub async fn suggest(State(state): State<GuiState>, Query(params): Query<SuggestParams>) -> impl IntoResponse {
+pub async fn suggest(
+    State(state): State<GuiState>,
+    Query(params): Query<SuggestParams>,
+) -> impl IntoResponse {
     let query = params.q.trim();
     if query.is_empty() || query.len() > 200 {
         return render(templates::SuggestionsTemplate {
@@ -177,7 +207,7 @@ pub async fn suggest(State(state): State<GuiState>, Query(params): Query<Suggest
             }
         }
     } else {
-        let indexer = state.indexer.lock().await;
+        let indexer = state.indexer.read().await;
         match indexer.search_bm25(query, 5).await {
             Ok(results) => results.into_iter().map(|r| r.title).collect(),
             Err(e) => {
@@ -247,7 +277,11 @@ pub async fn research_stream(
     let max_pages = clamp_max_pages(params.max_pages);
     let seed = params.seed.as_ref().and_then(|s| {
         let s = s.trim();
-        if s.is_empty() { None } else { Some(s.to_string()) }
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.to_string())
+        }
     });
     let categories: Vec<String> = params
         .categories
@@ -260,6 +294,7 @@ pub async fn research_stream(
         })
         .unwrap_or_default();
     let cache_key = (query.clone(), max_pages, seed.clone(), categories.clone());
+    let active_type = params.r#type.as_deref().unwrap_or("").to_string();
 
     let (tx, rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(32);
 
@@ -268,7 +303,7 @@ pub async fn research_stream(
         .get(&cache_key)
         .filter(|c| c.cached_at.elapsed() < CACHE_TTL && params.force == 0)
     {
-        let results = cached.results.clone();
+        let results = filter_by_type(cached.results.clone(), &active_type);
         let query2 = query.clone();
         tokio::spawn(async move {
             let _ = send_cached(&tx, &query2, &results).await;
@@ -278,7 +313,17 @@ pub async fn research_stream(
 
     tokio::spawn(async move {
         let start = Instant::now();
-        if let Err(e) = run_research_job(state.clone(), query.clone(), max_pages, seed, categories, tx.clone()).await {
+        if let Err(e) = run_research_job(
+            state.clone(),
+            query.clone(),
+            max_pages,
+            seed,
+            categories,
+            active_type,
+            tx.clone(),
+        )
+        .await
+        {
             let _ = tx
                 .send(Ok(Event::default()
                     .event("error")
@@ -324,7 +369,8 @@ async fn send_cached(
         }
     };
 
-    tx.send(Ok(Event::default().event("result").data(html))).await?;
+    tx.send(Ok(Event::default().event("result").data(html)))
+        .await?;
     Ok(())
 }
 
@@ -334,6 +380,7 @@ async fn run_research_job(
     max_pages: u32,
     seed: Option<String>,
     categories: Vec<String>,
+    active_type: String,
     tx: mpsc::Sender<Result<Event, std::convert::Infallible>>,
 ) -> Result<(), String> {
     let cache_seed = seed.clone();
@@ -376,17 +423,28 @@ async fn run_research_job(
 
     let results = rank_contents(&query, contents).await?;
 
-    // Cache the ranked results.
+    // Cache the ranked results (unfiltered so subsequent type filters hit cache).
     QUERY_CACHE.insert(
-        (query.clone(), max_pages, cache_seed.clone(), categories.clone()),
+        (
+            query.clone(),
+            max_pages,
+            cache_seed.clone(),
+            categories.clone(),
+        ),
         CachedResults {
             results: results.clone(),
             cached_at: Instant::now(),
         },
     );
 
-    let html = (templates::ResultListTemplate { query: &query, results: &results }).render()
-        .map_err(|e| format!("render results: {}", e))?;
+    let filtered = filter_by_type(results, &active_type);
+
+    let html = (templates::ResultListTemplate {
+        query: &query,
+        results: &filtered,
+    })
+    .render()
+    .map_err(|e| format!("render results: {}", e))?;
 
     tx.send(Ok(Event::default().event("result").data(html)))
         .await
@@ -416,7 +474,7 @@ async fn rank_contents(
         Some(e) => InMemorySearchEngine::with_embedder(e),
         None => InMemorySearchEngine::new(),
     };
-    let indexer = Indexer::new(Arc::new(engine));
+    let indexer = Arc::new(engine);
 
     indexer
         .index_batch(&contents)
@@ -454,7 +512,7 @@ async fn rank_contents(
 
     let ranker = Ranker::new();
     results = ranker.rank(results, &request, None, vector_scores.as_ref());
-    Indexer::attach_content(&mut results, &contents);
+    attach_content(&mut results, &contents);
 
     Ok(results)
 }
@@ -493,6 +551,18 @@ fn content_to_result(rank: u32, content: &StructuredContent) -> SearchResult {
         favicon: content.favicon.clone(),
         thumbnail: None,
         language: content.language.clone(),
-        content_type: ContentType::Any,
+        content_type: content.content_type.clone(),
     }
+}
+
+/// Filter search results by content type label.
+/// If `active_type` is empty or "all", returns all results unchanged.
+fn filter_by_type(results: Vec<SearchResult>, active_type: &str) -> Vec<SearchResult> {
+    if active_type.is_empty() || active_type == "all" {
+        return results;
+    }
+    results
+        .into_iter()
+        .filter(|r| r.content_type == active_type)
+        .collect()
 }

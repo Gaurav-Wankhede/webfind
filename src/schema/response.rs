@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::request::{ContentType, SearchDepth};
+use super::request::SearchDepth;
 
 /// Top-level search response
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,7 +41,7 @@ pub struct SearchResult {
     pub favicon: Option<String>,
     pub thumbnail: Option<String>,
     pub language: String,
-    pub content_type: ContentType,
+    pub content_type: String,
 }
 
 /// Score breakdown by ranking signal

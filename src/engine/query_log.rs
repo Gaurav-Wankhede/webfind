@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use libsql::{Connection, params};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 use tokio::sync::Mutex;
 use tracing::warn;
 
@@ -27,33 +27,62 @@ const MAX_NGRAM_LEN: u32 = 3;
 const MAX_SUGGESTIONS: usize = 10;
 const NGRAM_MIN_COUNT: u64 = 2;
 
-/// Query log service for autocomplete
+/// Query log service for autocomplete, backed by the Turso/libSQL database.
+///
+/// Replaces the SurrealDB-backed implementation; uses the same table names
+/// (`query_log`, `query_ngram`) so the schema is portable. The `Connection`
+/// is cheaply cloneable and `Send + Sync`, so the background ngram-flush task
+/// shares it safely.
 pub struct QueryLogService {
-    db: Arc<surrealdb::Surreal<surrealdb::engine::any::Any>>,
+    conn: Connection,
     project: String,
     buffer: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl QueryLogService {
-    pub fn new(
-        db: Arc<surrealdb::Surreal<surrealdb::engine::any::Any>>,
-        project: String,
-    ) -> Self {
+    pub async fn new(conn: Connection, project: String) -> Self {
+        // Idempotent schema for the log + ngram tables.
+        if let Err(e) = conn
+            .execute_batch(
+                r#"
+            CREATE TABLE IF NOT EXISTS query_log (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                project          TEXT NOT NULL,
+                session_id       TEXT NOT NULL DEFAULT '',
+                query            TEXT NOT NULL,
+                normalized_query TEXT NOT NULL,
+                result_count     INTEGER NOT NULL DEFAULT 0,
+                latency_ms       INTEGER NOT NULL DEFAULT 0,
+                created_at       TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS query_ngram (
+                ngram     TEXT PRIMARY KEY,
+                ngram_len INTEGER NOT NULL,
+                count     INTEGER NOT NULL DEFAULT 0,
+                last_seen TEXT NOT NULL
+            );
+            "#,
+            )
+            .await
+        {
+            warn!("failed to ensure query_log schema: {}", e);
+        }
+
         let service = Self {
-            db: db.clone(),
+            conn: conn.clone(),
             project: project.clone(),
             buffer: Arc::new(Mutex::new(HashMap::new())),
         };
 
         // Start background flush task
         let buf = service.buffer.clone();
-        let db = db.clone();
+        let conn = conn;
         let project = project.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                if let Err(e) = Self::flush_buffer(&db, &project, &buf).await {
+                if let Err(e) = Self::flush_buffer(&conn, &project, &buf).await {
                     warn!("failed to flush ngram buffer: {}", e);
                 }
             }
@@ -75,30 +104,26 @@ impl QueryLogService {
             return Ok(());
         }
 
-        // Insert query log entry via CREATE
-        let sql = r#"
-            CREATE query_log CONTENT {
-                project: $project,
-                session_id: $session_id,
-                query: $query,
-                normalized_query: $normalized,
-                result_count: $result_count,
-                latency_ms: $latency_ms,
-                created_at: time::now()
-            }
-        "#;
-
-        let _: Vec<JsonValue> = self
-            .db
-            .query(sql)
-            .bind(("project", format!("project:{}", self.project)))
-            .bind(("session_id", session_id.to_string()))
-            .bind(("query", query.to_string()))
-            .bind(("normalized", normalized.clone()))
-            .bind(("result_count", result_count as i64))
-            .bind(("latency_ms", latency_ms as i64))
-            .await?
-            .take(0)?;
+        self.conn
+            .execute(
+                r#"
+                INSERT INTO query_log
+                    (project, session_id, query, normalized_query, result_count,
+                     latency_ms, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    self.project.as_str(),
+                    session_id,
+                    query,
+                    normalized.clone(),
+                    result_count as i64,
+                    latency_ms as i64,
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )
+            .await
+            .context("log query")?;
 
         // Extract and buffer n-grams for async update
         let ngrams = Self::extract_ngrams(&normalized);
@@ -132,7 +157,10 @@ impl QueryLogService {
 
         // 2. Query log prefix match (good for full queries)
         if suggestions.len() < limit {
-            match self.get_log_suggestions(&normalized, limit - suggestions.len()).await {
+            match self
+                .get_log_suggestions(&normalized, limit - suggestions.len())
+                .await
+            {
                 Ok(s) => suggestions.extend(s),
                 Err(e) => warn!("log suggestions failed: {}", e),
             }
@@ -147,7 +175,11 @@ impl QueryLogService {
         }
 
         // Deduplicate and sort by score
-        suggestions.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        suggestions.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         suggestions.dedup_by(|a, b| a.text == b.text);
         suggestions.truncate(limit);
 
@@ -155,73 +187,75 @@ impl QueryLogService {
     }
 
     async fn get_ngram_suggestions(&self, prefix: &str, limit: usize) -> Result<Vec<Suggestion>> {
-        let sql = r#"
-            SELECT ngram, count FROM query_ngram
-            WHERE ngram_len <= $max_len
-            AND string::starts_with(ngram, $prefix)
-            AND count >= $min_count
-            ORDER BY count DESC, ngram_len ASC
-            LIMIT $limit
-        "#;
+        let mut rows = self
+            .conn
+            .query(
+                r#"
+                SELECT ngram, count, ngram_len FROM query_ngram
+                WHERE ngram_len <= ?1 AND ngram LIKE ?2 AND count >= ?3
+                ORDER BY count DESC, ngram_len ASC
+                LIMIT ?4
+                "#,
+                params![
+                    MAX_NGRAM_LEN as i64,
+                    format!("{}%", prefix),
+                    NGRAM_MIN_COUNT as i64,
+                    limit as i64,
+                ],
+            )
+            .await
+            .context("query ngram suggestions")?;
 
-        let mut response = self
-            .db
-            .query(sql)
-            .bind(("max_len", MAX_NGRAM_LEN as i64))
-            .bind(("prefix", prefix.to_string()))
-            .bind(("min_count", NGRAM_MIN_COUNT as i64))
-            .bind(("limit", limit as i64))
-            .await?;
-
-        let rows: Vec<JsonValue> = response.take(0)?;
         let mut suggestions = Vec::new();
-
-        for row in rows {
-            let ngram = Self::extract_string(&row, "ngram");
-            let count = Self::extract_number(&row, "count");
-            let len = Self::extract_number(&row, "ngram_len");
-
+        loop {
+            let row = match rows.next().await {
+                Ok(Some(r)) => r,
+                Ok(None) => break,
+                Err(e) => return Err(e).context("iterate ngram suggestions"),
+            };
+            let ngram: String = row.get(0).unwrap_or_default();
+            let count: i64 = row.get(1).unwrap_or(0);
+            let len: i64 = row.get(2).unwrap_or(0);
             if ngram.is_empty() {
                 continue;
             }
-
             let score = (count as f64).ln().max(0.0) * 1.5
                 + (MAX_NGRAM_LEN as f64 - len as f64).max(0.0) * 0.1;
-
             suggestions.push(Suggestion {
                 text: ngram,
                 score,
                 source: SuggestionSource::Ngram,
             });
         }
-
         Ok(suggestions)
     }
 
     async fn get_log_suggestions(&self, prefix: &str, limit: usize) -> Result<Vec<Suggestion>> {
-        let sql = r#"
-            SELECT normalized_query, count() AS freq FROM query_log
-            WHERE string::starts_with(normalized_query, $prefix)
-            AND project = $project
-            GROUP BY normalized_query
-            ORDER BY freq DESC
-            LIMIT $limit
-        "#;
+        let mut rows = self
+            .conn
+            .query(
+                r#"
+                SELECT normalized_query, COUNT(*) AS freq
+                FROM query_log
+                WHERE normalized_query LIKE ?1 AND project = ?2
+                GROUP BY normalized_query
+                ORDER BY freq DESC
+                LIMIT ?3
+                "#,
+                params![format!("{}%", prefix), self.project.as_str(), limit as i64],
+            )
+            .await
+            .context("query log suggestions")?;
 
-        let mut response = self
-            .db
-            .query(sql)
-            .bind(("prefix", prefix.to_string()))
-            .bind(("project", format!("project:{}", self.project)))
-            .bind(("limit", limit as i64))
-            .await?;
-
-        let rows: Vec<JsonValue> = response.take(0)?;
         let mut suggestions = Vec::new();
-
-        for row in rows {
-            let text = Self::extract_string(&row, "normalized_query");
-            let freq = Self::extract_number(&row, "freq");
+        loop {
+            let row = match rows.next().await {
+                Ok(Some(r)) => r,
+                Ok(None) => break,
+                Err(e) => return Err(e).context("iterate log suggestions"),
+            };
+            let text: String = row.get(0).unwrap_or_default();
+            let freq: i64 = row.get(1).unwrap_or(0);
             if text.is_empty() {
                 continue;
             }
@@ -231,32 +265,35 @@ impl QueryLogService {
                 source: SuggestionSource::QueryLog,
             });
         }
-
         Ok(suggestions)
     }
 
     async fn get_popular_queries(&self, limit: usize) -> Result<Vec<Suggestion>> {
-        let sql = r#"
-            SELECT normalized_query, count() AS freq FROM query_log
-            WHERE project = $project
-            GROUP BY normalized_query
-            ORDER BY freq DESC
-            LIMIT $limit
-        "#;
+        let mut rows = self
+            .conn
+            .query(
+                r#"
+                SELECT normalized_query, COUNT(*) AS freq
+                FROM query_log
+                WHERE project = ?1
+                GROUP BY normalized_query
+                ORDER BY freq DESC
+                LIMIT ?2
+                "#,
+                params![self.project.as_str(), limit as i64],
+            )
+            .await
+            .context("query popular queries")?;
 
-        let mut response = self
-            .db
-            .query(sql)
-            .bind(("project", format!("project:{}", self.project)))
-            .bind(("limit", limit as i64))
-            .await?;
-
-        let rows: Vec<JsonValue> = response.take(0)?;
         let mut suggestions = Vec::new();
-
-        for row in rows {
-            let text = Self::extract_string(&row, "normalized_query");
-            let freq = Self::extract_number(&row, "freq");
+        loop {
+            let row = match rows.next().await {
+                Ok(Some(r)) => r,
+                Ok(None) => break,
+                Err(e) => return Err(e).context("iterate popular queries"),
+            };
+            let text: String = row.get(0).unwrap_or_default();
+            let freq: i64 = row.get(1).unwrap_or(0);
             if text.is_empty() {
                 continue;
             }
@@ -266,7 +303,6 @@ impl QueryLogService {
                 source: SuggestionSource::PopularQuery,
             });
         }
-
         Ok(suggestions)
     }
 
@@ -297,41 +333,8 @@ impl QueryLogService {
         ngrams
     }
 
-    fn extract_string(value: &JsonValue, key: &str) -> String {
-        if let JsonValue::Object(obj) = value {
-            if let Some(v) = obj.get(key) {
-                if let JsonValue::String(s) = v {
-                    return s.clone();
-                }
-            }
-        }
-        if let JsonValue::Array(arr) = value {
-            if let Some(first) = arr.first() {
-                return Self::extract_string(first, key);
-            }
-        }
-        String::new()
-    }
-
-    fn extract_number(value: &JsonValue, key: &str) -> i64 {
-        if let JsonValue::Object(obj) = value {
-            if let Some(v) = obj.get(key) {
-                return match v {
-                    JsonValue::Number(n) => n.as_i64().unwrap_or(0),
-                    _ => 0,
-                };
-            }
-        }
-        if let JsonValue::Array(arr) = value {
-            if let Some(first) = arr.first() {
-                return Self::extract_number(first, key);
-            }
-        }
-        0
-    }
-
     async fn flush_buffer(
-        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        conn: &Connection,
         _project: &str,
         buffer: &Arc<Mutex<HashMap<String, u64>>>,
     ) -> Result<()> {
@@ -340,27 +343,22 @@ impl QueryLogService {
             return Ok(());
         }
 
-        // Batch upsert ngrams using UPSERT with count increment
+        let now = chrono::Utc::now().to_rfc3339();
         for (ngram, count) in buf.drain() {
-            let words: Vec<&str> = ngram.split_whitespace().collect();
-            let len = words.len() as u32;
-
-            // UPSERT pattern: if record exists, increment count; otherwise create with count.
-            let sql = r#"
-                UPSERT query_ngram SET
-                    ngram = $ngram,
-                    ngram_len = $len,
-                    count += $count,
-                    last_seen = time::now()
-            "#;
-
-            if let Err(e) = db
-                .query(sql)
-                .bind(("ngram", ngram))
-                .bind(("len", len as i64))
-                .bind(("count", count as i64))
-                .await
-            {
+            let len = ngram.split_whitespace().count() as i64;
+            let result = conn
+                .execute(
+                    r#"
+                    INSERT INTO query_ngram (ngram, ngram_len, count, last_seen)
+                    VALUES (?1, ?2, ?3, ?4)
+                    ON CONFLICT(ngram) DO UPDATE SET
+                        count     = query_ngram.count + excluded.count,
+                        last_seen = excluded.last_seen
+                    "#,
+                    params![ngram, len, count as i64, now.as_str()],
+                )
+                .await;
+            if let Err(e) = result {
                 warn!("failed to upsert ngram: {}", e);
             }
         }
@@ -375,8 +373,14 @@ mod tests {
 
     #[test]
     fn test_normalize_query() {
-        assert_eq!(QueryLogService::normalize_query("Rust Programming"), "rust programming");
-        assert_eq!(QueryLogService::normalize_query("  Hello,   World!  "), "hello world");
+        assert_eq!(
+            QueryLogService::normalize_query("Rust Programming"),
+            "rust programming"
+        );
+        assert_eq!(
+            QueryLogService::normalize_query("  Hello,   World!  "),
+            "hello world"
+        );
         assert_eq!(QueryLogService::normalize_query("rust-lang"), "rustlang");
         assert_eq!(QueryLogService::normalize_query(""), "");
     }
@@ -413,5 +417,30 @@ mod tests {
         let ngrams = QueryLogService::extract_ngrams("rust");
         assert_eq!(ngrams.len(), 1);
         assert_eq!(ngrams[0], "rust");
+    }
+
+    #[tokio::test]
+    async fn test_log_and_suggest() {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .expect("open db");
+        let conn = db.connect().expect("connect");
+        let svc = QueryLogService::new(conn, "test".to_string()).await;
+
+        svc.log_query("rust programming", "s1", 5, 10)
+            .await
+            .expect("log query");
+        svc.log_query("rust tools", "s1", 3, 8)
+            .await
+            .expect("log query");
+
+        // Log-sourced suggestion by prefix.
+        let s = svc.get_suggestions("rust", 5).await.expect("suggestions");
+        assert!(
+            !s.is_empty(),
+            "expected suggestions for prefix `rust`, got {:?}",
+            s
+        );
     }
 }

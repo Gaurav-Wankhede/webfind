@@ -35,26 +35,22 @@ async fn run_webfind(
 }
 
 #[tokio::test]
-async fn test_cli_bulk_crawl_persists_to_surrealdb_and_graph_traverses() {
+async fn test_cli_bulk_crawl_persists_to_turso_and_graph_traverses() {
     let (_server, base_url) = common::start_test_server().await;
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path();
-    let surreal_path = data_dir.join("graph.surrealkv");
-    let surreal_url = format!("surrealkv://{}", surreal_path.display());
+    let turso_path = data_dir.join("graph.db");
+    let turso_path_arg = turso_path.to_str().unwrap().to_string();
 
-    // Bulk crawl with SurrealDB graph store.
+    // Bulk crawl with the Turso graph store.
     let crawl = run_webfind(
         vec![
             "crawl".to_string(),
             "--bulk".to_string(),
             "--graph-store".to_string(),
-            "surrealdb".to_string(),
-            "--surreal-url".to_string(),
-            surreal_url.clone(),
-            "--surreal-ns".to_string(),
-            "webfind_test".to_string(),
-            "--surreal-db".to_string(),
-            "webfind_test".to_string(),
+            "turso".to_string(),
+            "--turso-path".to_string(),
+            turso_path_arg.clone(),
             "--seed".to_string(),
             base_url.clone(),
             "--max-pages".to_string(),
@@ -95,12 +91,10 @@ async fn test_cli_bulk_crawl_persists_to_surrealdb_and_graph_traverses() {
             "outbound".to_string(),
             "--depth".to_string(),
             "2".to_string(),
-            "--surreal-url".to_string(),
-            surreal_url,
-            "--surreal-ns".to_string(),
-            "webfind_test".to_string(),
-            "--surreal-db".to_string(),
-            "webfind_test".to_string(),
+            "--graph-store".to_string(),
+            "turso".to_string(),
+            "--turso-path".to_string(),
+            turso_path_arg,
         ],
         vec![],
     )

@@ -156,7 +156,7 @@ impl SiteExplorer {
         if !robots.sitemap_urls.is_empty() {
             let mut fetches = Vec::new();
             for url in &robots.sitemap_urls {
-                fetches.push(self.fetch_sitemap(url.clone(), 0));
+                fetches.push(self.fetch_sitemap(url, 0));
             }
             let nested = futures::future::join_all(fetches).await;
             for urls in nested.into_iter().flatten() {
@@ -272,13 +272,14 @@ impl SiteExplorer {
         Ok(RobotsPolicy::parse(&text))
     }
 
-    async fn fetch_sitemap(&self, url: String, depth: usize) -> Result<Vec<SitemapUrl>> {
+    async fn fetch_sitemap(&self, url: impl AsRef<str>, depth: usize) -> Result<Vec<SitemapUrl>> {
+        let url = url.as_ref();
         if depth > self.max_sitemap_depth {
             debug!("sitemap depth limit reached for {}", url);
             return Ok(Vec::new());
         }
 
-        let response = self.client.get(&url).send().await;
+        let response = self.client.get(url).send().await;
         let bytes = match response {
             Ok(r) if r.status().is_success() => r.bytes().await.context("read sitemap body")?,
             Ok(r) => {
@@ -300,7 +301,7 @@ impl SiteExplorer {
             String::from_utf8_lossy(&bytes).to_string()
         };
 
-        let (mut urls, nested) = Self::parse_sitemap_body(&body, &url)?;
+        let (mut urls, nested) = Self::parse_sitemap_body(&body, url)?;
         self.resolve_nested_sitemaps(&mut urls, nested, depth).await;
         Ok(urls)
     }

@@ -1,18 +1,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use crate::api::ApiState;
 use crate::engine::categories::CategoryService;
 use crate::engine::crawl_graph::CrawlGraphStore;
-use crate::engine::indexer::Indexer;
 use crate::engine::query_log::QueryLogService;
+use crate::engine::search_engine::SearchEngine;
 
 /// Shared state for the GUI server.
 #[derive(Clone)]
 pub struct GuiState {
-    pub indexer: Arc<Mutex<Indexer>>,
+    pub indexer: Arc<RwLock<Arc<dyn SearchEngine + Send + Sync>>>,
     pub graph_store: Option<Arc<dyn CrawlGraphStore + Send + Sync>>,
     pub data_dir: PathBuf,
     pub query_log: Option<Arc<QueryLogService>>,
@@ -21,12 +21,12 @@ pub struct GuiState {
 
 impl GuiState {
     pub fn new(
-        indexer: Indexer,
+        indexer: Arc<dyn SearchEngine + Send + Sync>,
         graph_store: Option<Arc<dyn CrawlGraphStore + Send + Sync>>,
         data_dir: PathBuf,
     ) -> Self {
         Self {
-            indexer: Arc::new(Mutex::new(indexer)),
+            indexer: Arc::new(RwLock::new(indexer)),
             graph_store,
             data_dir,
             query_log: None,

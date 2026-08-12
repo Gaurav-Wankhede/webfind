@@ -46,6 +46,8 @@ pub struct StructuredContent {
     pub encoding: Option<String>,
     pub ssl_valid: bool,
     pub redirect_count: u8,
+    pub content_type: String,
+    pub content_type_header: String,
     pub is_paywalled: bool,
     pub is_valid_content: bool,
     /// Deterministic regex-extracted entities from the clean text, available to

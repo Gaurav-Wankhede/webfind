@@ -18,7 +18,7 @@ use tokio::sync::Semaphore;
 
 use crate::engine::crawl_graph::CrawlGraphStore;
 use crate::engine::fetcher::Fetcher;
-use crate::engine::indexer::Indexer;
+use crate::engine::search_engine::SearchEngine;
 use crate::schema::content::StructuredContent;
 
 /// Minimum relevance score (0.0–1.0) for an auto-discovered seed to be accepted.
@@ -53,27 +53,158 @@ const TLDS: &[&str] = &[
 
 /// Stop words removed from query keywords.
 const STOP_WORDS: &[&str] = &[
-    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
-    "from", "as", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
-    "do", "does", "did", "will", "would", "could", "should", "may", "might", "must", "shall",
-    "can", "need", "dare", "ought", "used", "this", "that", "these", "those", "i", "you",
-    "he", "she", "it", "we", "they", "what", "which", "who", "when", "where", "why", "how",
-    "all", "any", "both", "each", "few", "more", "most", "other", "some", "such", "no",
-    "nor", "not", "only", "own", "same", "so", "than", "too", "very", "just", "now", "then",
-    "also", "about", "up", "out", "if", "because", "until", "while", "during", "before",
-    "after", "above", "below", "between", "into", "through", "over", "under", "again",
-    "further", "once", "here", "there", "everywhere", "anywhere", "somewhere", "get", "me",
-    "my", "your", "his", "her", "its", "our", "their", "what's", "how's", "where's", "who's",
-    "when's", "why's", "latest", "new", "best", "top", "guide", "overview", "introduction",
-    "vs", "versus", "compare", "comparison", "difference", "between", "2020", "2021", "2022",
-    "2023", "2024", "2025", "2026", "2027",
+    "a",
+    "an",
+    "the",
+    "and",
+    "or",
+    "but",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "of",
+    "with",
+    "by",
+    "from",
+    "as",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "could",
+    "should",
+    "may",
+    "might",
+    "must",
+    "shall",
+    "can",
+    "need",
+    "dare",
+    "ought",
+    "used",
+    "this",
+    "that",
+    "these",
+    "those",
+    "i",
+    "you",
+    "he",
+    "she",
+    "it",
+    "we",
+    "they",
+    "what",
+    "which",
+    "who",
+    "when",
+    "where",
+    "why",
+    "how",
+    "all",
+    "any",
+    "both",
+    "each",
+    "few",
+    "more",
+    "most",
+    "other",
+    "some",
+    "such",
+    "no",
+    "nor",
+    "not",
+    "only",
+    "own",
+    "same",
+    "so",
+    "than",
+    "too",
+    "very",
+    "just",
+    "now",
+    "then",
+    "also",
+    "about",
+    "up",
+    "out",
+    "if",
+    "because",
+    "until",
+    "while",
+    "during",
+    "before",
+    "after",
+    "above",
+    "below",
+    "between",
+    "into",
+    "through",
+    "over",
+    "under",
+    "again",
+    "further",
+    "once",
+    "here",
+    "there",
+    "everywhere",
+    "anywhere",
+    "somewhere",
+    "get",
+    "me",
+    "my",
+    "your",
+    "his",
+    "her",
+    "its",
+    "our",
+    "their",
+    "what's",
+    "how's",
+    "where's",
+    "who's",
+    "when's",
+    "why's",
+    "latest",
+    "new",
+    "best",
+    "top",
+    "guide",
+    "overview",
+    "introduction",
+    "vs",
+    "versus",
+    "compare",
+    "comparison",
+    "difference",
+    "between",
+    "2020",
+    "2021",
+    "2022",
+    "2023",
+    "2024",
+    "2025",
+    "2026",
+    "2027",
 ];
 
 /// Discover high-quality seed URLs for a query.
 ///
 /// Returns an error if no seed reaches the relevance threshold.
 pub async fn discover_seeds(
-    indexer: &Indexer,
+    indexer: &(dyn SearchEngine + Send + Sync),
     graph: Option<&(dyn CrawlGraphStore + Send + Sync)>,
     query: &str,
 ) -> Result<Vec<String>> {
@@ -109,7 +240,10 @@ pub async fn discover_seeds(
             Vec::new()
         }
         Err(_) => {
-            tracing::warn!("query-driven seed discovery timed out after {}s", DISCOVERY_TIMEOUT_SECS);
+            tracing::warn!(
+                "query-driven seed discovery timed out after {}s",
+                DISCOVERY_TIMEOUT_SECS
+            );
             Vec::new()
         }
     };
@@ -186,7 +320,10 @@ struct DiscoveredSeed {
 }
 
 /// Discover seeds from the existing WebFind index.
-async fn discover_from_index(indexer: &Indexer, query: &str) -> Result<Vec<DiscoveredSeed>> {
+async fn discover_from_index(
+    indexer: &(dyn SearchEngine + Send + Sync),
+    query: &str,
+) -> Result<Vec<DiscoveredSeed>> {
     let mut results = Vec::new();
 
     // BM25 search.
@@ -199,7 +336,6 @@ async fn discover_from_index(indexer: &Indexer, query: &str) -> Result<Vec<Disco
         results.push(DiscoveredSeed {
             url: r.url,
             relevance,
-
         });
     }
 
@@ -210,11 +346,7 @@ async fn discover_from_index(indexer: &Indexer, query: &str) -> Result<Vec<Disco
         .unwrap_or_default();
     for (url, score) in vector {
         let relevance = (score / (score + 1.0)).clamp(0.0, 1.0);
-        results.push(DiscoveredSeed {
-            url,
-            relevance,
-
-        });
+        results.push(DiscoveredSeed { url, relevance });
     }
 
     // Deduplicate by URL, keeping highest relevance.
@@ -231,7 +363,11 @@ async fn discover_from_index(indexer: &Indexer, query: &str) -> Result<Vec<Disco
     }
 
     let mut seeds: Vec<DiscoveredSeed> = by_url.into_values().collect();
-    seeds.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
+    seeds.sort_by(|a, b| {
+        b.relevance
+            .partial_cmp(&a.relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     seeds.truncate(MAX_SEEDS * 2);
     Ok(seeds)
 }
@@ -260,13 +396,12 @@ async fn discover_from_graph(graph: &dyn CrawlGraphStore, query: &str) -> Vec<Di
             .to_lowercase();
             let relevance = keyword_relevance(&keywords, &text);
             if relevance > 0.0 {
-                let authority = (*inbound.get(&node.url).unwrap_or(&0) as f64)
-                    / (links.len().max(1) as f64);
+                let authority =
+                    (*inbound.get(&node.url).unwrap_or(&0) as f64) / (links.len().max(1) as f64);
                 let combined = (relevance * 0.7 + authority * 0.3).clamp(0.0, 1.0);
                 Some(DiscoveredSeed {
                     url: node.url,
                     relevance: combined,
-
                 })
             } else {
                 None
@@ -274,7 +409,11 @@ async fn discover_from_graph(graph: &dyn CrawlGraphStore, query: &str) -> Vec<Di
         })
         .collect();
 
-    seeds.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
+    seeds.sort_by(|a, b| {
+        b.relevance
+            .partial_cmp(&a.relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     seeds.truncate(MAX_SEEDS * 2);
     seeds
 }
@@ -349,17 +488,17 @@ async fn discover_from_query(
         }
     }
 
-    validated.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
+    validated.sort_by(|a, b| {
+        b.relevance
+            .partial_cmp(&a.relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     validated.truncate(MAX_SEEDS);
     Ok(validated)
 }
 
 /// Validate a candidate URL by fetching it and computing relevance to the query.
-async fn validate_url(
-    fetcher: &Fetcher,
-    url: &str,
-    keywords: &[String],
-) -> Option<DiscoveredSeed> {
+async fn validate_url(fetcher: &Fetcher, url: &str, keywords: &[String]) -> Option<DiscoveredSeed> {
     let content = fetcher.fetch_url(url).await.ok()?;
 
     if !content.is_valid_content {
@@ -370,7 +509,6 @@ async fn validate_url(
     Some(DiscoveredSeed {
         url: content.final_url,
         relevance,
-
     })
 }
 
@@ -558,7 +696,9 @@ async fn dns_resolves(host: &str) -> bool {
 
 /// Extract host from URL.
 fn extract_host(url: &str) -> Option<String> {
-    url::Url::parse(url).ok().map(|u| u.host_str().unwrap_or("").to_string())
+    url::Url::parse(url)
+        .ok()
+        .map(|u| u.host_str().unwrap_or("").to_string())
 }
 
 #[cfg(test)]
@@ -587,7 +727,9 @@ mod tests {
             final_url: "https://rust-lang.org".to_string(),
             status_code: 200,
             title: "Rust Programming Language".to_string(),
-            description: Some("A language empowering everyone to build reliable software.".to_string()),
+            description: Some(
+                "A language empowering everyone to build reliable software.".to_string(),
+            ),
             canonical_url: None,
             language: "en".to_string(),
             language_confidence: 0.95,
@@ -624,6 +766,9 @@ mod tests {
             redirect_count: 0,
             is_paywalled: false,
             is_valid_content: true,
+            content_type: "text/html".to_string(),
+            content_type_header: "text/html".to_string(),
+            entities: crate::schema::content::Entities::default(),
         };
         let relevance = compute_page_relevance(&content, &["rust".to_string()]);
         assert!(relevance > 0.5, "relevance should be high for Rust content");

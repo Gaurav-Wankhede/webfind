@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -10,94 +9,55 @@ use super::search_engine::SearchEngine;
 
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// High-level indexer that wraps a SearchEngine trait object.
-pub struct Indexer {
-    engine: Arc<dyn SearchEngine>,
+/// Build search metadata from a search engine.
+pub async fn build_metadata(
+    engine: &(dyn SearchEngine + Send + Sync),
+    signals: Vec<String>,
+) -> Result<SearchMetadata> {
+    let count = engine.doc_count().await?;
+    Ok(SearchMetadata {
+        index_version: "1".to_string(),
+        index_size: count,
+        engine_version: ENGINE_VERSION.to_string(),
+        searched_at: chrono::Utc::now(),
+        signals_used: signals,
+        index_freshness: IndexFreshness {
+            oldest_page: None,
+            newest_page: None,
+            avg_age_days: 0.0,
+        },
+    })
 }
 
-impl Indexer {
-    /// Create an indexer with a search engine.
-    pub fn new(engine: Arc<dyn SearchEngine>) -> Self {
-        Self { engine }
+/// Attach full content blocks to search results when the caller has the
+/// raw structured content available (e.g. after a fresh crawl).
+/// Content is truncated to `MAX_CONTENT_CHARS` per result to keep responses
+/// within context-window limits.
+pub fn attach_content(results: &mut [SearchResult], contents: &[StructuredContent]) {
+    const MAX_CONTENT_CHARS: usize = 64 * 1024;
+    let mut by_url: HashMap<&str, &StructuredContent> = HashMap::with_capacity(contents.len());
+    for c in contents {
+        by_url.insert(c.url.as_str(), c);
     }
-
-    /// Index a single document.
-    pub async fn index_one(&self, content: &StructuredContent) -> Result<()> {
-        self.engine.index_one(content).await
-    }
-
-    /// Index a batch of documents and commit once.
-    pub async fn index_batch(&self, items: &[StructuredContent]) -> Result<u64> {
-        self.engine.index_batch(items).await
-    }
-
-    /// Search with BM25 and return ranked results.
-    pub async fn search_bm25(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.engine.search_bm25(query, limit).await
-    }
-
-    /// Attach full content blocks to search results when the caller has the
-    /// raw structured content available (e.g. after a fresh crawl).
-    /// Content is truncated to `MAX_CONTENT_CHARS` per result to keep responses
-    /// within context-window limits.
-    pub fn attach_content(results: &mut [SearchResult], contents: &[StructuredContent]) {
-        const MAX_CONTENT_CHARS: usize = 64 * 1024;
-        let mut by_url: HashMap<&str, &StructuredContent> = HashMap::with_capacity(contents.len());
-        for c in contents {
-            by_url.insert(c.url.as_str(), c);
-        }
-        for r in results {
-            if let Some(c) = by_url.get(r.url.as_str()) {
-                let mut block = c.to_content_block();
-                if block.text.chars().count() > MAX_CONTENT_CHARS {
-                    let truncated: String = block.text.chars().take(MAX_CONTENT_CHARS).collect();
-                    block.text = truncated;
-                    block.markdown = block.markdown.map(|m| {
-                        if m.chars().count() > MAX_CONTENT_CHARS {
-                            m.chars().take(MAX_CONTENT_CHARS).collect()
-                        } else {
-                            m
-                        }
-                    });
-                }
-                r.content = Some(block);
-                r.modified_at = c.modified_at;
-                r.author = c.author.clone();
-                r.site_name = c.site_name.clone();
+    for r in results {
+        if let Some(c) = by_url.get(r.url.as_str()) {
+            let mut block = c.to_content_block();
+            if block.text.chars().count() > MAX_CONTENT_CHARS {
+                let truncated: String = block.text.chars().take(MAX_CONTENT_CHARS).collect();
+                block.text = truncated;
+                block.markdown = block.markdown.map(|m| {
+                    if m.chars().count() > MAX_CONTENT_CHARS {
+                        m.chars().take(MAX_CONTENT_CHARS).collect()
+                    } else {
+                        m
+                    }
+                });
             }
+            r.content = Some(block);
+            r.modified_at = c.modified_at;
+            r.author = c.author.clone();
+            r.site_name = c.site_name.clone();
         }
-    }
-
-    /// Dense vector search for `query`. Returns an empty map if no vector engine is attached.
-    pub async fn search_vector(&self, query: &str, limit: usize) -> Result<HashMap<String, f64>> {
-        self.engine.search_vector(query, limit).await
-    }
-
-    /// Total indexed documents.
-    pub async fn doc_count(&self) -> Result<u64> {
-        self.engine.doc_count().await
-    }
-
-    /// Build search metadata for responses.
-    pub async fn metadata(&self, signals: Vec<String>) -> Result<SearchMetadata> {
-        let count = self.doc_count().await?;
-        Ok(SearchMetadata {
-            index_version: "1".to_string(),
-            index_size: count,
-            engine_version: ENGINE_VERSION.to_string(),
-            searched_at: chrono::Utc::now(),
-            signals_used: signals,
-            index_freshness: IndexFreshness {
-                oldest_page: None,
-                newest_page: None,
-                avg_age_days: 0.0,
-            },
-        })
-    }
-
-    /// Optimize the index (force merge segments).
-    pub async fn optimize(&self) -> Result<()> {
-        self.engine.optimize().await
     }
 }
 
@@ -107,6 +67,7 @@ mod tests {
     use crate::engine::search_engine::InMemorySearchEngine;
     use crate::schema::content::StructuredContent;
     use chrono::{TimeZone, Utc};
+    use std::sync::Arc;
 
     fn sample(url: &str, title: &str, body: &str) -> StructuredContent {
         StructuredContent {
@@ -151,6 +112,8 @@ mod tests {
             redirect_count: 0,
             is_paywalled: false,
             is_valid_content: true,
+            content_type: "text/html".to_string(),
+            content_type_header: "text/html".to_string(),
             entities: crate::schema::content::Entities::default(),
         }
     }
@@ -158,7 +121,6 @@ mod tests {
     #[tokio::test]
     async fn test_indexer_search_roundtrip() {
         let engine = Arc::new(InMemorySearchEngine::new());
-        let indexer = Indexer::new(engine);
 
         let docs = vec![
             sample(
@@ -178,24 +140,21 @@ mod tests {
             ),
         ];
 
-        let count = indexer.index_batch(&docs).await.unwrap();
+        let count = engine.index_batch(&docs).await.unwrap();
         assert_eq!(count, 3);
 
-        let results = indexer.search_bm25("systems language", 10).await.unwrap();
+        let results = engine.search_bm25("systems language", 10).await.unwrap();
         assert!(!results.is_empty());
         assert!(results[0].title.contains("Rust"));
 
-        let meta = indexer.metadata(vec!["bm25".to_string()]).await.unwrap();
-        assert_eq!(meta.index_size, 3);
+        let count = engine.doc_count().await.unwrap();
+        assert_eq!(count, 3);
     }
 
     #[tokio::test]
     async fn test_indexer_vector_roundtrip() {
         use crate::engine::embedder::DummyEmbedder;
-        let engine = Arc::new(InMemorySearchEngine::with_embedder(Arc::new(
-            DummyEmbedder,
-        )));
-        let indexer = Indexer::new(engine);
+        let engine = Arc::new(InMemorySearchEngine::with_embedder(Arc::new(DummyEmbedder)));
 
         let docs = vec![
             sample(
@@ -209,11 +168,8 @@ mod tests {
                 "Go is a simple language for building fast concurrent software.",
             ),
         ];
-        indexer.index_batch(&docs).await.unwrap();
-        let hits = indexer
-            .search_vector("systems language", 5)
-            .await
-            .unwrap();
+        engine.index_batch(&docs).await.unwrap();
+        let hits = engine.search_vector("systems language", 5).await.unwrap();
         assert!(hits.contains_key("https://rust-lang.org"));
     }
 }

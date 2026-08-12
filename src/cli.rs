@@ -1,15 +1,23 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
+use crate::schema::request::{OutputFormat, SearchDepth};
+use crate::storage::cache_store::ReCrawlPolicy;
+
 #[derive(Parser)]
 #[command(
     name = "webfind",
     about = "Self-hosted native search engine for AI agents — CLI + MCP, zero cost",
     version,
-    next_display_order = None
+    next_display_order = None,
+    subcommand_required = false
 )]
 pub struct Cli {
+    /// Print the AI agent skills reference (progressive disclosure, ~800 tokens) and exit
+    #[arg(long, hide = true)]
+    pub print_skills: bool,
+
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -63,25 +71,9 @@ pub enum Commands {
         #[arg(long, value_enum, env = "WEBFIND_GRAPH_STORE")]
         graph_store: Option<GraphStoreArg>,
 
-        /// SurrealDB connection URL (e.g. memory, http://localhost:7790).
+        /// Path to the Turso/libSQL database file (when --graph-store turso).
         #[arg(long)]
-        surreal_url: Option<String>,
-
-        /// SurrealDB username.
-        #[arg(long)]
-        surreal_user: Option<String>,
-
-        /// SurrealDB password.
-        #[arg(long)]
-        surreal_pass: Option<String>,
-
-        /// SurrealDB namespace.
-        #[arg(long)]
-        surreal_ns: Option<String>,
-
-        /// SurrealDB database.
-        #[arg(long)]
-        surreal_db: Option<String>,
+        turso_path: Option<String>,
     },
 
     /// Fetch and extract content from a URL
@@ -197,25 +189,9 @@ pub enum Commands {
         #[arg(long, value_enum)]
         graph_store: Option<GraphStoreArg>,
 
-        /// SurrealDB connection URL (e.g. memory, http://localhost:7790).
+        /// Path to the Turso/libSQL database file (when --graph-store turso).
         #[arg(long)]
-        surreal_url: Option<String>,
-
-        /// SurrealDB username.
-        #[arg(long)]
-        surreal_user: Option<String>,
-
-        /// SurrealDB password.
-        #[arg(long)]
-        surreal_pass: Option<String>,
-
-        /// SurrealDB namespace.
-        #[arg(long)]
-        surreal_ns: Option<String>,
-
-        /// SurrealDB database.
-        #[arg(long)]
-        surreal_db: Option<String>,
+        turso_path: Option<String>,
 
         /// Pages per session before rotating identity (bulk mode).
         #[arg(long, default_value = "100")]
@@ -265,25 +241,13 @@ pub enum Commands {
         #[arg(long, value_enum, default_value_t = DirectionArg::Both)]
         direction: DirectionArg,
 
-        /// SurrealDB connection URL (e.g. memory, http://localhost:7790).
-        #[arg(long)]
-        surreal_url: Option<String>,
+        /// Graph store backend to traverse.
+        #[arg(long, value_enum)]
+        graph_store: Option<GraphStoreArg>,
 
-        /// SurrealDB username.
+        /// Path to the Turso/libSQL database file (when --graph-store turso).
         #[arg(long)]
-        surreal_user: Option<String>,
-
-        /// SurrealDB password.
-        #[arg(long)]
-        surreal_pass: Option<String>,
-
-        /// SurrealDB namespace.
-        #[arg(long)]
-        surreal_ns: Option<String>,
-
-        /// SurrealDB database.
-        #[arg(long)]
-        surreal_db: Option<String>,
+        turso_path: Option<String>,
     },
 
     /// Start local forward proxy server with rotating egress IPs
@@ -305,6 +269,7 @@ pub enum Commands {
     /// Crawl a seed URL and immediately search freshly indexed content.
     Research {
         /// Seed URL to start crawling from. If omitted, WebFind auto-discovers seeds.
+        #[arg(long)]
         seed: Option<String>,
 
         /// Query to run against the freshly indexed pages.
@@ -385,25 +350,9 @@ pub enum Commands {
         #[arg(long, value_enum, env = "WEBFIND_GRAPH_STORE")]
         graph_store: Option<GraphStoreArg>,
 
-        /// SurrealDB connection URL (e.g. memory, http://localhost:7790).
+        /// Path to the Turso/libSQL database file (when --graph-store turso).
         #[arg(long)]
-        surreal_url: Option<String>,
-
-        /// SurrealDB username.
-        #[arg(long)]
-        surreal_user: Option<String>,
-
-        /// SurrealDB password.
-        #[arg(long)]
-        surreal_pass: Option<String>,
-
-        /// SurrealDB namespace.
-        #[arg(long)]
-        surreal_ns: Option<String>,
-
-        /// SurrealDB database.
-        #[arg(long)]
-        surreal_db: Option<String>,
+        turso_path: Option<String>,
 
         /// Enable BM25 + vector hybrid re-ranking by default.
         #[arg(long, default_value = "false")]
@@ -416,6 +365,17 @@ pub enum Commands {
         /// Port for the HTML GUI server (default: 4749).
         #[arg(long, default_value = "4749", env = "WEBFIND_GUI_PORT")]
         gui_port: u16,
+    },
+
+    /// Migrate a legacy SurrealDB JSON export into a fresh Turso database
+    Migrate {
+        /// Path to the JSON export file (url_nodes + link_edges).
+        #[arg(long, value_name = "EXPORT_JSON")]
+        from: std::path::PathBuf,
+
+        /// Destination Turso/libSQL database file (created or overwritten).
+        #[arg(long, value_name = "TURSO_DB")]
+        to: std::path::PathBuf,
     },
 
     /// Show engine status
@@ -441,17 +401,25 @@ pub enum IndexAction {
     Optimize,
 }
 
-#[derive(ValueEnum, Clone, Debug)]
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
 pub enum GraphStoreArg {
     Memory,
-    Surrealdb,
+    Turso,
 }
 
 impl GraphStoreArg {
     pub fn as_str(&self) -> &'static str {
         match self {
             GraphStoreArg::Memory => "memory",
-            GraphStoreArg::Surrealdb => "surrealdb",
+            GraphStoreArg::Turso => "turso",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "turso" => Some(GraphStoreArg::Turso),
+            "memory" => Some(GraphStoreArg::Memory),
+            _ => None,
         }
     }
 }
@@ -470,6 +438,16 @@ pub enum ReCrawlPolicyArg {
     Adaptive,
 }
 
+impl ReCrawlPolicyArg {
+    pub fn to_policy(&self, days: u32) -> ReCrawlPolicy {
+        match self {
+            ReCrawlPolicyArg::Never => ReCrawlPolicy::Never,
+            ReCrawlPolicyArg::Fixed => ReCrawlPolicy::FixedDays(days),
+            ReCrawlPolicyArg::Adaptive => ReCrawlPolicy::Adaptive,
+        }
+    }
+}
+
 #[derive(ValueEnum, Clone, Debug)]
 pub enum DepthArg {
     Shallow,
@@ -478,11 +456,32 @@ pub enum DepthArg {
     Comprehensive,
 }
 
+impl From<DepthArg> for SearchDepth {
+    fn from(d: DepthArg) -> Self {
+        match d {
+            DepthArg::Shallow => SearchDepth::Shallow,
+            DepthArg::Standard => SearchDepth::Standard,
+            DepthArg::Deep => SearchDepth::Deep,
+            DepthArg::Comprehensive => SearchDepth::Comprehensive,
+        }
+    }
+}
+
 #[derive(ValueEnum, Clone, Debug)]
 pub enum OutputArg {
     Json,
     Report,
     Markdown,
+}
+
+impl From<OutputArg> for OutputFormat {
+    fn from(o: OutputArg) -> Self {
+        match o {
+            OutputArg::Json => OutputFormat::Json,
+            OutputArg::Report => OutputFormat::Report,
+            OutputArg::Markdown => OutputFormat::Markdown,
+        }
+    }
 }
 
 #[derive(ValueEnum, Clone, Debug)]

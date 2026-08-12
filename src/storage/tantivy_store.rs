@@ -34,6 +34,7 @@ pub struct WebfindFields {
     pub schema_type: Field,
     pub is_paywalled: Field,
     pub ssl_valid: Field,
+    pub content_type: Field,
 }
 
 impl WebfindFields {
@@ -91,6 +92,9 @@ impl WebfindFields {
             ssl_valid: schema
                 .get_field("ssl_valid")
                 .context("missing 'ssl_valid' field in schema")?,
+            content_type: schema
+                .get_field("content_type")
+                .context("missing 'content_type' field in schema")?,
         })
     }
 }
@@ -119,6 +123,7 @@ pub fn build_schema() -> (Schema, WebfindFields) {
     let schema_type = builder.add_text_field("schema_type", STRING | STORED);
     let is_paywalled = builder.add_bool_field("is_paywalled", STORED);
     let ssl_valid = builder.add_bool_field("ssl_valid", STORED);
+    let content_type = builder.add_text_field("content_type", STRING | STORED);
 
     let schema = builder.build();
     let fields = WebfindFields {
@@ -139,6 +144,7 @@ pub fn build_schema() -> (Schema, WebfindFields) {
         schema_type,
         is_paywalled,
         ssl_valid,
+        content_type,
     };
 
     (schema, fields)
@@ -178,9 +184,8 @@ impl TantivyStore {
                         format!("failed to remove old index backup: {}", backup.display())
                     })?;
                 }
-                std::fs::rename(&path, &backup).with_context(|| {
-                    format!("failed to back up old index: {}", path.display())
-                })?;
+                std::fs::rename(&path, &backup)
+                    .with_context(|| format!("failed to back up old index: {}", path.display()))?;
                 std::fs::create_dir_all(&path)
                     .with_context(|| format!("failed to recreate index dir: {}", path.display()))?;
                 Index::create_in_dir(&path, schema).context("failed to create fresh index")?
@@ -210,7 +215,10 @@ impl TantivyStore {
                 .context("failed to create index writer")?;
             self.writer = Some(w);
         }
-        Ok(self.writer.as_mut().unwrap())
+        Ok(self
+            .writer
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("index writer not initialized"))?)
     }
 
     /// Commit pending documents to disk.
@@ -274,6 +282,7 @@ impl TantivyStore {
         }
         doc.add_bool(fields.is_paywalled, content.is_paywalled);
         doc.add_bool(fields.ssl_valid, content.ssl_valid);
+        doc.add_text(fields.content_type, &content.content_type);
 
         writer.add_document(doc)?;
         Ok(())
@@ -395,6 +404,12 @@ impl TantivyStore {
                 .and_then(|v| v.as_str())
                 .map(String::from);
 
+            let content_type = doc
+                .get_first(fields.content_type)
+                .and_then(|v| v.as_str())
+                .unwrap_or("text")
+                .to_string();
+
             hits.push(Bm25Hit {
                 url,
                 title,
@@ -411,6 +426,7 @@ impl TantivyStore {
                 reading_ease,
                 grade_level,
                 bm25_score: score as f64,
+                content_type,
             });
         }
 
@@ -457,6 +473,7 @@ pub struct Bm25Hit {
     pub reading_ease: f64,
     pub grade_level: f64,
     pub bm25_score: f64,
+    pub content_type: String,
 }
 
 impl Bm25Hit {
@@ -507,7 +524,7 @@ impl Bm25Hit {
             favicon: None,
             thumbnail: None,
             language: self.language,
-            content_type: crate::schema::request::ContentType::Any,
+            content_type: self.content_type,
         }
     }
 }
@@ -564,6 +581,8 @@ mod tests {
             encoding: None,
             ssl_valid: true,
             redirect_count: 0,
+            content_type: String::new(),
+            content_type_header: String::new(),
             is_paywalled: false,
             is_valid_content: true,
             entities: crate::schema::content::Entities::default(),

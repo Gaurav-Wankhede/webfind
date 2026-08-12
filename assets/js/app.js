@@ -53,6 +53,52 @@
     return div.innerHTML;
   }
 
+  /**
+   * Initialize a research SSE stream. Connects to the given URL and routes
+   * progress / result / error / close events to the appropriate DOM elements.
+   */
+  window.initResearchStream = function (streamUrl) {
+    var statusEl = document.getElementById('research-status');
+    var resultsEl = document.getElementById('results-list');
+    var errorEl = document.getElementById('error-message');
+    if (!statusEl || !resultsEl) return;
+
+    var es = new EventSource(streamUrl);
+
+    es.addEventListener('progress', function (e) {
+      var bar = document.getElementById('progress-bar');
+      var text = document.getElementById('progress-text');
+      if (bar && e.data) {
+        try {
+          var d = JSON.parse(e.data);
+          if (d.stage === 'cached') {
+            if (text) text.textContent = 'Loading cached results...';
+          } else {
+            if (text) text.textContent = (d.crawled || 0) + ' / ' + (d.total || 0) + ' pages crawled';
+            if (d.total > 0) bar.style.width = Math.min(100, (d.crawled / d.total) * 100) + '%';
+          }
+        } catch (_) {}
+      }
+    });
+
+    es.addEventListener('result', function (e) {
+      if (statusEl) statusEl.style.display = 'none';
+      resultsEl.innerHTML = e.data;
+    });
+
+    es.addEventListener('error', function (e) {
+      if (statusEl) statusEl.style.display = 'none';
+      if (errorEl) {
+        errorEl.classList.remove('hidden');
+        errorEl.textContent = e.data || 'An error occurred during research.';
+      }
+    });
+
+    es.addEventListener('close', function () {
+      es.close();
+    });
+  };
+
   // Record searches on form submit
   document.addEventListener('submit', (e) => {
     const form = e.target.closest('form[action="/web/search"]');

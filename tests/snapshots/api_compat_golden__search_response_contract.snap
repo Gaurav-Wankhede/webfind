@@ -1,0 +1,92 @@
+---
+source: tests/api_compat_golden.rs
+expression: value
+---
+{
+  "depth": "standard",
+  "graph": {
+    "domain_authority": [],
+    "inbound_links": [],
+    "outbound_links": [],
+    "related_domains": []
+  },
+  "latency_ms": 42,
+  "metadata": {
+    "engine_version": "0.1.0",
+    "index_freshness": {
+      "avg_age_days": 1.5,
+      "newest_page": "2026-08-12T12:00:00Z",
+      "oldest_page": "2026-08-12T12:00:00Z"
+    },
+    "index_size": 128,
+    "index_version": "1",
+    "searched_at": "2026-08-12T12:00:00Z",
+    "signals_used": [
+      "bm25",
+      "vector"
+    ]
+  },
+  "query": "rust systems language",
+  "related": [
+    "go concurrency"
+  ],
+  "request_id": "golden-test-1",
+  "results": [
+    {
+      "author": "Core Team",
+      "content": {
+        "excerpt": "Rust is a systems language",
+        "html": "<p>Rust</p>",
+        "markdown": "# Rust",
+        "reading_time_seconds": 3,
+        "text": "Rust is a systems language focused on safety, speed, and concurrency.",
+        "word_count": 10
+      },
+      "content_type": "text/html",
+      "crawled_at": "2026-08-12T12:00:00Z",
+      "domain": "rust-lang.org",
+      "favicon": "https://rust-lang.org/favicon.ico",
+      "keywords": [
+        {
+          "rank": 1,
+          "text": "rust",
+          "tfidf_score": 0.8
+        }
+      ],
+      "language": "en",
+      "metrics": {
+        "avg_words_per_sentence": 10.0,
+        "fog_index": 10.0,
+        "grade_level": 8.0,
+        "has_structured_data": false,
+        "language": "en",
+        "language_confidence": 0.99,
+        "reading_ease": 65.0,
+        "schema_type": null,
+        "sentence_count": 1
+      },
+      "modified_at": null,
+      "published_at": "2026-08-12T12:00:00Z",
+      "rank": 1,
+      "score": 12.5,
+      "scores": {
+        "bm25": 10.0,
+        "final_score": 12.5,
+        "freshness": 0.5,
+        "graph": 1.0,
+        "quality": 0.0,
+        "vector": 2.5
+      },
+      "site_name": "Rust",
+      "snippet": "Rust is a systems language focused on safety, speed, and concurrency.",
+      "thumbnail": null,
+      "title": "The Rust Programming Language",
+      "url": "https://rust-lang.org"
+    }
+  ],
+  "returned": 1,
+  "suggestions": [
+    "rust ownership"
+  ],
+  "total_results": 1
+}

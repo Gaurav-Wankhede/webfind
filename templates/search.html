@@ -3,26 +3,67 @@
 {% block title %}{{ query }} — WebFind{% endblock %}
 
 {% block content %}
-<!-- Sidebar: categories + history -->
-<aside class="w-64 border-r border-slate-800 bg-slate-900/50 hidden md:flex flex-col">
-  <!-- Categories panel -->
-  <div class="p-4 border-b border-slate-800">
-    <h2 class="text-sm font-semibold text-slate-300 flex items-center gap-2 mb-3">
-      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4h18M3 10h18M3 16h18"></path></svg>
-      Categories
-    </h2>
-    <div
-      id="categories-panel"
-      hx-get="/api/web/categories?q={{ query|urlencode }}"
-      hx-trigger="load, every 30s"
-      hx-swap="innerHTML"
-      class="text-xs"
-    >
-      <p class="text-xs text-slate-500 p-2">Loading categories...</p>
-    </div>
-  </div>
+<!-- Content-type filter chips -->
+<div class="border-b border-slate-800 bg-slate-950/95 px-4 py-2 sticky top-14 z-40">
+  <div class="max-w-4xl mx-auto flex items-center gap-1 flex-wrap">
+    <!-- All chip -->
+    {% if is_all_type %}
+    <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&categories={{ categories_str|urlencode }}"
+       class="px-4 py-1.5 text-sm rounded-full transition bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">All</a>
+    {% else %}
+    <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&categories={{ categories_str|urlencode }}"
+       class="px-4 py-1.5 text-sm rounded-full transition text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-transparent">All</a>
+    {% endif %}
 
-  <!-- History panel -->
+    <!-- Text chip -->
+    {% if active_type == "text" %}
+    <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&type=text&categories={{ categories_str|urlencode }}"
+       class="px-4 py-1.5 text-sm rounded-full transition bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">Text</a>
+    {% else %}
+    <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&type=text&categories={{ categories_str|urlencode }}"
+       class="px-4 py-1.5 text-sm rounded-full transition text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-transparent">Text</a>
+    {% endif %}
+
+    <!-- Images chip -->
+    {% if active_type == "images" %}
+    <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&type=images&categories={{ categories_str|urlencode }}"
+       class="px-4 py-1.5 text-sm rounded-full transition bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">Images</a>
+    {% else %}
+    <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&type=images&categories={{ categories_str|urlencode }}"
+       class="px-4 py-1.5 text-sm rounded-full transition text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-transparent">Images</a>
+    {% endif %}
+
+    <!-- News chip -->
+    {% if active_type == "news" %}
+    <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&type=news&categories={{ categories_str|urlencode }}"
+       class="px-4 py-1.5 text-sm rounded-full transition bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">News</a>
+    {% else %}
+    <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&type=news&categories={{ categories_str|urlencode }}"
+       class="px-4 py-1.5 text-sm rounded-full transition text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-transparent">News</a>
+    {% endif %}
+
+    <!-- Videos chip -->
+    {% if active_type == "videos" %}
+    <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&type=videos&categories={{ categories_str|urlencode }}"
+       class="px-4 py-1.5 text-sm rounded-full transition bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">Videos</a>
+    {% else %}
+    <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&type=videos&categories={{ categories_str|urlencode }}"
+       class="px-4 py-1.5 text-sm rounded-full transition text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-transparent">Videos</a>
+    {% endif %}
+
+    <!-- Documentation chip -->
+    {% if active_type == "documentation" %}
+    <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&type=documentation&categories={{ categories_str|urlencode }}"
+       class="px-4 py-1.5 text-sm rounded-full transition bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">Documentation</a>
+    {% else %}
+    <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&type=documentation&categories={{ categories_str|urlencode }}"
+       class="px-4 py-1.5 text-sm rounded-full transition text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-transparent">Documentation</a>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Sidebar: history only -->
+<aside class="w-64 border-r border-slate-800 bg-slate-900/50 hidden md:flex flex-col">
   <div class="p-4 border-b border-slate-800 flex-1 flex flex-col">
     <h2 class="text-sm font-semibold text-slate-300 flex items-center gap-2 mb-2">
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
@@ -38,7 +79,7 @@
 <!-- Results area -->
 <div class="flex-1 flex flex-col min-w-0">
   <!-- Top search bar -->
-  <div class="border-b border-slate-800 bg-slate-950/80 backdrop-blur px-4 py-3 sticky top-14 z-40">
+  <div class="border-b border-slate-800 bg-slate-950/80 backdrop-blur px-4 py-3">
     <div class="max-w-4xl flex items-center gap-4">
       <a href="/" class="text-xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-blue-500 shrink-0">
         WebFind
@@ -102,17 +143,25 @@
         <p class="text-sm text-slate-500 mb-4">Showing cached results for <span class="text-slate-300">"{{ query }}"</span>. <a href="/web/search?q={{ query|urlencode }}&max_pages={{ max_pages }}&categories={{ categories_str|urlencode }}&force=1" class="text-cyan-400 hover:underline">Research again</a>.</p>
         {% include "result_list.html" %}
       {% else %}
-        <!-- SSE research stream -->
-        <div
-          hx-ext="sse"
-          sse-connect="/api/web/research/stream?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&categories={{ categories_str|urlencode }}"
-          sse-swap="message,progress,result,error,close"
-          class="space-y-4"
-        >
+        <div id="research-status">
           {% include "research_progress.html" %}
         </div>
+        <div id="results-list" class="space-y-4"></div>
+        <div id="error-message" class="text-red-400 hidden"></div>
       {% endif %}
     </div>
   </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  if (window.initResearchStream) {
+    var streamUrl = '/api/web/research/stream?q={{ query|urlencode }}&max_pages={{ max_pages }}&seed={{ seed|urlencode }}&categories={{ categories_str|urlencode }}';
+    {% if !is_all_type %}streamUrl += '&type={{ active_type|urlencode }}';{% endif %}
+    window.initResearchStream(streamUrl);
+  }
+});
+</script>
 {% endblock %}

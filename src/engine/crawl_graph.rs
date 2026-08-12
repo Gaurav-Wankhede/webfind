@@ -24,7 +24,8 @@ pub enum DiscoverySource {
 }
 
 /// A URL node in the crawl graph.
-/// This maps directly to a SurrealDB graph record for vector + link analysis.
+/// This maps directly to a Turso/libSQL `url_nodes` record for vector + link
+/// analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UrlNode {
     pub url: String,
@@ -58,8 +59,8 @@ pub struct CrawlJob {
 }
 
 /// Trait for persistable crawl-graph backends.
-/// Implement this for SurrealDB (`storage::surreal_store`) to power
-/// graph-aware ranking and vector retrieval.
+/// Implement this for Turso (`storage::turso_store`) or an in-memory store to
+/// power graph-aware ranking and vector retrieval.
 #[async_trait]
 pub trait CrawlGraphStore: Send + Sync {
     async fn record_url(&self, node: UrlNode);
@@ -88,6 +89,60 @@ pub trait CrawlGraphStore: Send + Sync {
         status: &str,
         error: Option<&str>,
     ) -> Result<()>;
+
+    /// Traverse the graph from `start` up to `max_depth` hops in `direction`,
+    /// returning the set of reachable URLs (including `start`).
+    ///
+    /// The default implementation walks edges with an in-memory BFS. Backends
+    /// that can express this more efficiently — e.g. Turso/libSQL recursive
+    /// CTEs — override it for a single-query traversal.
+    async fn traverse(
+        &self,
+        start: &str,
+        max_depth: u32,
+        direction: TraversalDirection,
+    ) -> Vec<String> {
+        let mut visited = HashSet::new();
+        let mut current = vec![start.to_string()];
+        visited.insert(start.to_string());
+
+        for _ in 0..max_depth {
+            let mut next = Vec::new();
+            for url in &current {
+                let edges: Vec<LinkEdge> = match direction {
+                    TraversalDirection::Inbound => self.get_links_to(url).await,
+                    TraversalDirection::Outbound => self.get_links_from(url).await,
+                    TraversalDirection::Both => {
+                        let mut e = self.get_links_from(url).await;
+                        e.extend(self.get_links_to(url).await);
+                        e
+                    }
+                };
+                for edge in edges {
+                    let neighbor = match direction {
+                        TraversalDirection::Inbound => edge.from,
+                        TraversalDirection::Outbound => edge.to,
+                        TraversalDirection::Both => {
+                            if edge.from == *url {
+                                edge.to
+                            } else {
+                                edge.from
+                            }
+                        }
+                    };
+                    if visited.insert(neighbor.clone()) {
+                        next.push(neighbor);
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            current = next;
+        }
+
+        visited.into_iter().collect()
+    }
 }
 
 /// Direction for graph traversal.
@@ -100,52 +155,16 @@ pub enum TraversalDirection {
 
 /// Breadth-first traversal of the crawl graph up to `max_depth`.
 /// Returns the set of URLs reachable from `start` (including the start URL).
+///
+/// Delegates to [`CrawlGraphStore::traverse`], so backends that provide a
+/// native implementation (e.g. a recursive CTE) are used automatically.
 pub async fn traverse_graph(
     store: Arc<dyn CrawlGraphStore>,
     start: &str,
     max_depth: u32,
     direction: TraversalDirection,
 ) -> Vec<String> {
-    let mut visited = HashSet::new();
-    let mut current = vec![start.to_string()];
-    visited.insert(start.to_string());
-
-    for _ in 0..max_depth {
-        let mut next = Vec::new();
-        for url in &current {
-            let edges: Vec<LinkEdge> = match direction {
-                TraversalDirection::Inbound => store.get_links_to(url).await,
-                TraversalDirection::Outbound => store.get_links_from(url).await,
-                TraversalDirection::Both => {
-                    let mut e = store.get_links_from(url).await;
-                    e.extend(store.get_links_to(url).await);
-                    e
-                }
-            };
-            for edge in edges {
-                let neighbor = match direction {
-                    TraversalDirection::Inbound => edge.from,
-                    TraversalDirection::Outbound => edge.to,
-                    TraversalDirection::Both => {
-                        if edge.from == *url {
-                            edge.to
-                        } else {
-                            edge.from
-                        }
-                    }
-                };
-                if visited.insert(neighbor.clone()) {
-                    next.push(neighbor);
-                }
-            }
-        }
-        if next.is_empty() {
-            break;
-        }
-        current = next;
-    }
-
-    visited.into_iter().collect()
+    store.traverse(start, max_depth, direction).await
 }
 
 /// Compute PageRank-style centrality scores for every URL in the graph.
@@ -283,8 +302,7 @@ impl CrawlGraphStore for InMemoryCrawlGraph {
     }
 
     async fn record_page_content(&self, content: PageContentRecord) -> Result<()> {
-        self.page_content
-            .insert(content.url_node.clone(), content);
+        self.page_content.insert(content.url_node.clone(), content);
         Ok(())
     }
 

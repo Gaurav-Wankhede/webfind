@@ -17,6 +17,8 @@ pub struct SearchTemplate {
     pub seed: String,
     pub categories: Vec<String>,
     pub categories_str: String,
+    pub active_type: String,
+    pub is_all_type: bool,
     pub cached: bool,
     pub results: Vec<crate::schema::response::SearchResult>,
 }

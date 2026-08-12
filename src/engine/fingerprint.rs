@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 
@@ -13,7 +14,7 @@ use super::util;
 
 /// Async sink for fingerprint usage audit events.
 ///
-/// Implementations (e.g. `SurrealStore`) persist one row per request that used a
+/// Implementations (e.g. `TursoStore`) persist one row per request that used a
 /// generated privacy fingerprint, including the response status or error.
 #[async_trait]
 pub trait FingerprintAuditLog: Send + Sync {
@@ -51,8 +52,7 @@ pub enum GeoRegion {
 impl GeoRegion {
     pub fn timezone(&self) -> &'static str {
         match self {
-            GeoRegion::UsNortheast
-            | GeoRegion::UsSoutheast => "America/New_York",
+            GeoRegion::UsNortheast | GeoRegion::UsSoutheast => "America/New_York",
             GeoRegion::UsMidwest => "America/Chicago",
             GeoRegion::UsWest => "America/Los_Angeles",
             GeoRegion::UsSouthwest => "America/Denver",
@@ -60,15 +60,11 @@ impl GeoRegion {
             | GeoRegion::UkManchester
             | GeoRegion::UkEdinburgh
             | GeoRegion::UkBirmingham => "Europe/London",
-            GeoRegion::DeBerlin
-            | GeoRegion::DeMunich
-            | GeoRegion::DeHamburg => "Europe/Berlin",
-            GeoRegion::JpTokyo
-            | GeoRegion::JpOsaka
-            | GeoRegion::JpNagoya => "Asia/Tokyo",
-            GeoRegion::AuSydney
-            | GeoRegion::AuMelbourne
-            | GeoRegion::AuBrisbane => "Australia/Sydney",
+            GeoRegion::DeBerlin | GeoRegion::DeMunich | GeoRegion::DeHamburg => "Europe/Berlin",
+            GeoRegion::JpTokyo | GeoRegion::JpOsaka | GeoRegion::JpNagoya => "Asia/Tokyo",
+            GeoRegion::AuSydney | GeoRegion::AuMelbourne | GeoRegion::AuBrisbane => {
+                "Australia/Sydney"
+            }
         }
     }
 
@@ -83,9 +79,15 @@ impl GeoRegion {
             | GeoRegion::UkManchester
             | GeoRegion::UkEdinburgh
             | GeoRegion::UkBirmingham => "en-US,en;q=0.9",
-            GeoRegion::DeBerlin | GeoRegion::DeMunich | GeoRegion::DeHamburg => "de-DE,de;q=0.9,en;q=0.8",
-            GeoRegion::JpTokyo | GeoRegion::JpOsaka | GeoRegion::JpNagoya => "ja-JP,ja;q=0.9,en;q=0.8",
-            GeoRegion::AuSydney | GeoRegion::AuMelbourne | GeoRegion::AuBrisbane => "en-AU,en;q=0.9",
+            GeoRegion::DeBerlin | GeoRegion::DeMunich | GeoRegion::DeHamburg => {
+                "de-DE,de;q=0.9,en;q=0.8"
+            }
+            GeoRegion::JpTokyo | GeoRegion::JpOsaka | GeoRegion::JpNagoya => {
+                "ja-JP,ja;q=0.9,en;q=0.8"
+            }
+            GeoRegion::AuSydney | GeoRegion::AuMelbourne | GeoRegion::AuBrisbane => {
+                "en-AU,en;q=0.9"
+            }
         }
     }
 }
@@ -137,11 +139,24 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS7922".into(),
             country: "US".into(),
             cidrs: vec![
-                "24.0.0.0/12", "24.30.0.0/17", "24.34.0.0/16", "24.40.0.0/18",
-                "24.60.0.0/14", "24.91.0.0/16", "24.98.0.0/15", "24.118.0.0/16",
-                "24.125.0.0/16", "24.126.0.0/15", "24.128.0.0/16", "24.129.0.0/17",
-                "24.130.0.0/15", "24.147.0.0/16", "24.218.0.0/16", "24.245.0.0/18",
-                "66.176.0.0/15", "73.0.0.0/8",
+                "24.0.0.0/12",
+                "24.30.0.0/17",
+                "24.34.0.0/16",
+                "24.40.0.0/18",
+                "24.60.0.0/14",
+                "24.91.0.0/16",
+                "24.98.0.0/15",
+                "24.118.0.0/16",
+                "24.125.0.0/16",
+                "24.126.0.0/15",
+                "24.128.0.0/16",
+                "24.129.0.0/17",
+                "24.130.0.0/15",
+                "24.147.0.0/16",
+                "24.218.0.0/16",
+                "24.245.0.0/18",
+                "66.176.0.0/15",
+                "73.0.0.0/8",
             ],
             weight: 0.16,
             regions: vec![
@@ -157,10 +172,22 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS7018".into(),
             country: "US".into(),
             cidrs: vec![
-                "12.0.0.0/8", "12.56.0.0/13", "12.76.0.0/14", "12.80.0.0/12",
-                "12.112.0.0/12", "12.128.0.0/9", "23.112.0.0/12", "32.0.0.0/9",
-                "32.224.0.0/13", "45.16.0.0/12", "63.192.0.0/12", "63.240.0.0/15",
-                "64.108.0.0/15", "64.148.0.0/15", "64.160.0.0/12", "64.216.0.0/14",
+                "12.0.0.0/8",
+                "12.56.0.0/13",
+                "12.76.0.0/14",
+                "12.80.0.0/12",
+                "12.112.0.0/12",
+                "12.128.0.0/9",
+                "23.112.0.0/12",
+                "32.0.0.0/9",
+                "32.224.0.0/13",
+                "45.16.0.0/12",
+                "63.192.0.0/12",
+                "63.240.0.0/15",
+                "64.108.0.0/15",
+                "64.148.0.0/15",
+                "64.160.0.0/12",
+                "64.216.0.0/14",
             ],
             weight: 0.10,
             regions: vec![
@@ -176,9 +203,20 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS701".into(),
             country: "US".into(),
             cidrs: vec![
-                "4.0.0.0/8", "63.0.0.0/8", "64.0.0.0/6", "66.0.0.0/8", "67.0.0.0/8",
-                "68.0.0.0/6", "69.0.0.0/8", "70.0.0.0/7", "71.0.0.0/8", "72.0.0.0/5",
-                "76.0.0.0/5", "96.0.0.0/3", "104.0.0.0/5", "108.0.0.0/7",
+                "4.0.0.0/8",
+                "63.0.0.0/8",
+                "64.0.0.0/6",
+                "66.0.0.0/8",
+                "67.0.0.0/8",
+                "68.0.0.0/6",
+                "69.0.0.0/8",
+                "70.0.0.0/7",
+                "71.0.0.0/8",
+                "72.0.0.0/5",
+                "76.0.0.0/5",
+                "96.0.0.0/3",
+                "104.0.0.0/5",
+                "108.0.0.0/7",
             ],
             weight: 0.08,
             regions: vec![
@@ -193,8 +231,12 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS20115".into(),
             country: "US".into(),
             cidrs: vec![
-                "16.203.0.0/17", "16.203.128.0/18", "23.84.0.0/16", "23.87.0.0/16",
-                "24.107.0.0/17", "24.151.0.0/17",
+                "16.203.0.0/17",
+                "16.203.128.0/18",
+                "23.84.0.0/16",
+                "23.87.0.0/16",
+                "24.107.0.0/17",
+                "24.151.0.0/17",
             ],
             weight: 0.04,
             regions: vec![
@@ -209,14 +251,15 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS22773".into(),
             country: "US".into(),
             cidrs: vec![
-                "68.0.0.0/12", "68.96.0.0/12", "68.112.0.0/12", "68.128.0.0/12",
-                "68.144.0.0/12", "68.160.0.0/12",
+                "68.0.0.0/12",
+                "68.96.0.0/12",
+                "68.112.0.0/12",
+                "68.128.0.0/12",
+                "68.144.0.0/12",
+                "68.160.0.0/12",
             ],
             weight: 0.02,
-            regions: vec![
-                GeoRegion::UsSoutheast,
-                GeoRegion::UsSouthwest,
-            ],
+            regions: vec![GeoRegion::UsSoutheast, GeoRegion::UsSouthwest],
         },
         // United Kingdom — British Telecom (AS6871)
         IspRange {
@@ -224,9 +267,17 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS6871".into(),
             country: "UK".into(),
             cidrs: vec![
-                "31.125.0.0/16", "146.90.0.0/16", "194.75.80.0/20", "195.99.32.0/19",
-                "147.147.0.0/16", "212.56.64.0/18", "87.114.0.0/16", "213.31.0.0/16",
-                "143.159.0.0/16", "146.198.0.0/16", "146.66.32.0/19",
+                "31.125.0.0/16",
+                "146.90.0.0/16",
+                "194.75.80.0/20",
+                "195.99.32.0/19",
+                "147.147.0.0/16",
+                "212.56.64.0/18",
+                "87.114.0.0/16",
+                "213.31.0.0/16",
+                "143.159.0.0/16",
+                "146.198.0.0/16",
+                "146.66.32.0/19",
             ],
             weight: 0.08,
             regions: vec![
@@ -242,8 +293,14 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS5089".into(),
             country: "UK".into(),
             cidrs: vec![
-                "82.1.0.0/16", "82.2.0.0/15", "82.4.0.0/14", "82.8.0.0/13",
-                "82.16.0.0/12", "82.32.0.0/11", "82.64.0.0/10", "82.128.0.0/9",
+                "82.1.0.0/16",
+                "82.2.0.0/15",
+                "82.4.0.0/14",
+                "82.8.0.0/13",
+                "82.16.0.0/12",
+                "82.32.0.0/11",
+                "82.64.0.0/10",
+                "82.128.0.0/9",
             ],
             weight: 0.06,
             regions: vec![
@@ -258,8 +315,12 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS5607".into(),
             country: "UK".into(),
             cidrs: vec![
-                "81.1.0.0/16", "81.2.0.0/15", "81.4.0.0/14", "81.8.0.0/13",
-                "81.16.0.0/12", "81.32.0.0/11",
+                "81.1.0.0/16",
+                "81.2.0.0/15",
+                "81.4.0.0/14",
+                "81.8.0.0/13",
+                "81.16.0.0/12",
+                "81.32.0.0/11",
             ],
             weight: 0.04,
             regions: vec![
@@ -274,8 +335,12 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS13285".into(),
             country: "UK".into(),
             cidrs: vec![
-                "5.1.0.0/16", "5.2.0.0/15", "5.4.0.0/14", "5.8.0.0/13",
-                "5.16.0.0/12", "5.32.0.0/11",
+                "5.1.0.0/16",
+                "5.2.0.0/15",
+                "5.4.0.0/14",
+                "5.8.0.0/13",
+                "5.16.0.0/12",
+                "5.32.0.0/11",
             ],
             weight: 0.02,
             regions: vec![
@@ -290,10 +355,23 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS3320".into(),
             country: "DE".into(),
             cidrs: vec![
-                "31.0.0.0/8", "37.0.0.0/8", "46.0.0.0/8", "62.0.0.0/8", "77.0.0.0/8",
-                "78.0.0.0/7", "80.0.0.0/5", "88.0.0.0/5", "91.0.0.0/8", "93.0.0.0/8",
-                "95.0.0.0/8", "176.0.0.0/5", "185.0.0.0/8", "188.0.0.0/5",
-                "193.0.0.0/8", "194.0.0.0/7", "212.0.0.0/5",
+                "31.0.0.0/8",
+                "37.0.0.0/8",
+                "46.0.0.0/8",
+                "62.0.0.0/8",
+                "77.0.0.0/8",
+                "78.0.0.0/7",
+                "80.0.0.0/5",
+                "88.0.0.0/5",
+                "91.0.0.0/8",
+                "93.0.0.0/8",
+                "95.0.0.0/8",
+                "176.0.0.0/5",
+                "185.0.0.0/8",
+                "188.0.0.0/5",
+                "193.0.0.0/8",
+                "194.0.0.0/7",
+                "212.0.0.0/5",
             ],
             weight: 0.06,
             regions: vec![
@@ -308,8 +386,15 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS3209".into(),
             country: "DE".into(),
             cidrs: vec![
-                "2.0.0.0/8", "5.0.0.0/8", "34.0.0.0/8", "45.0.0.0/8", "51.0.0.0/8",
-                "62.0.0.0/8", "77.0.0.0/8", "78.0.0.0/7", "80.0.0.0/5",
+                "2.0.0.0/8",
+                "5.0.0.0/8",
+                "34.0.0.0/8",
+                "45.0.0.0/8",
+                "51.0.0.0/8",
+                "62.0.0.0/8",
+                "77.0.0.0/8",
+                "78.0.0.0/7",
+                "80.0.0.0/5",
             ],
             weight: 0.045,
             regions: vec![
@@ -324,7 +409,11 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS8560".into(),
             country: "DE".into(),
             cidrs: vec![
-                "84.0.0.0/8", "85.0.0.0/8", "86.0.0.0/7", "88.0.0.0/5", "91.0.0.0/8",
+                "84.0.0.0/8",
+                "85.0.0.0/8",
+                "86.0.0.0/7",
+                "88.0.0.0/5",
+                "91.0.0.0/8",
                 "93.0.0.0/8",
             ],
             weight: 0.03,
@@ -340,20 +429,35 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS4725".into(),
             country: "JP".into(),
             cidrs: vec![
-                "1.5.0.0/16", "157.78.0.0/17", "157.78.128.0/18", "157.78.192.0/19",
-                "157.78.224.0/20", "157.78.240.0/21", "157.78.248.0/21", "165.76.0.0/17",
-                "182.158.64.0/19", "182.158.128.0/19", "182.158.224.0/20", "182.159.16.0/20",
-                "182.159.32.0/19", "182.159.64.0/18", "182.159.144.0/20", "182.159.160.0/19",
-                "182.159.192.0/20", "210.169.128.0/17", "210.174.184.0/21", "210.175.0.0/17",
-                "210.188.0.0/17", "210.189.249.0/24", "210.197.0.0/16", "210.228.128.0/17",
-                "211.121.0.0/16", "211.131.0.0/16",
+                "1.5.0.0/16",
+                "157.78.0.0/17",
+                "157.78.128.0/18",
+                "157.78.192.0/19",
+                "157.78.224.0/20",
+                "157.78.240.0/21",
+                "157.78.248.0/21",
+                "165.76.0.0/17",
+                "182.158.64.0/19",
+                "182.158.128.0/19",
+                "182.158.224.0/20",
+                "182.159.16.0/20",
+                "182.159.32.0/19",
+                "182.159.64.0/18",
+                "182.159.144.0/20",
+                "182.159.160.0/19",
+                "182.159.192.0/20",
+                "210.169.128.0/17",
+                "210.174.184.0/21",
+                "210.175.0.0/17",
+                "210.188.0.0/17",
+                "210.189.249.0/24",
+                "210.197.0.0/16",
+                "210.228.128.0/17",
+                "211.121.0.0/16",
+                "211.131.0.0/16",
             ],
             weight: 0.06,
-            regions: vec![
-                GeoRegion::JpTokyo,
-                GeoRegion::JpOsaka,
-                GeoRegion::JpNagoya,
-            ],
+            regions: vec![GeoRegion::JpTokyo, GeoRegion::JpOsaka, GeoRegion::JpNagoya],
         },
         // Japan — NTT (AS2914)
         IspRange {
@@ -361,16 +465,21 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS2914".into(),
             country: "JP".into(),
             cidrs: vec![
-                "1.0.0.0/8", "13.0.0.0/8", "14.0.0.0/8", "15.0.0.0/8", "16.0.0.0/8",
-                "17.0.0.0/8", "18.0.0.0/8", "19.0.0.0/8", "20.0.0.0/8", "21.0.0.0/8",
-                "22.0.0.0/8", "23.0.0.0/8",
+                "1.0.0.0/8",
+                "13.0.0.0/8",
+                "14.0.0.0/8",
+                "15.0.0.0/8",
+                "16.0.0.0/8",
+                "17.0.0.0/8",
+                "18.0.0.0/8",
+                "19.0.0.0/8",
+                "20.0.0.0/8",
+                "21.0.0.0/8",
+                "22.0.0.0/8",
+                "23.0.0.0/8",
             ],
             weight: 0.045,
-            regions: vec![
-                GeoRegion::JpOsaka,
-                GeoRegion::JpTokyo,
-                GeoRegion::JpNagoya,
-            ],
+            regions: vec![GeoRegion::JpOsaka, GeoRegion::JpTokyo, GeoRegion::JpNagoya],
         },
         // Japan — KDDI (AS2516)
         IspRange {
@@ -378,15 +487,15 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS2516".into(),
             country: "JP".into(),
             cidrs: vec![
-                "1.0.0.0/8", "13.0.0.0/8", "14.0.0.0/8", "15.0.0.0/8", "16.0.0.0/8",
+                "1.0.0.0/8",
+                "13.0.0.0/8",
+                "14.0.0.0/8",
+                "15.0.0.0/8",
+                "16.0.0.0/8",
                 "17.0.0.0/8",
             ],
             weight: 0.03,
-            regions: vec![
-                GeoRegion::JpNagoya,
-                GeoRegion::JpTokyo,
-                GeoRegion::JpOsaka,
-            ],
+            regions: vec![GeoRegion::JpNagoya, GeoRegion::JpTokyo, GeoRegion::JpOsaka],
         },
         // Australia — Telstra (AS1221)
         IspRange {
@@ -394,8 +503,15 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS1221".into(),
             country: "AU".into(),
             cidrs: vec![
-                "1.0.0.0/8", "13.0.0.0/8", "14.0.0.0/8", "15.0.0.0/8", "16.0.0.0/8",
-                "17.0.0.0/8", "18.0.0.0/8", "19.0.0.0/8", "20.0.0.0/8",
+                "1.0.0.0/8",
+                "13.0.0.0/8",
+                "14.0.0.0/8",
+                "15.0.0.0/8",
+                "16.0.0.0/8",
+                "17.0.0.0/8",
+                "18.0.0.0/8",
+                "19.0.0.0/8",
+                "20.0.0.0/8",
             ],
             weight: 0.04,
             regions: vec![
@@ -410,7 +526,11 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             asn: "AS7474".into(),
             country: "AU".into(),
             cidrs: vec![
-                "1.0.0.0/8", "13.0.0.0/8", "14.0.0.0/8", "15.0.0.0/8", "16.0.0.0/8",
+                "1.0.0.0/8",
+                "13.0.0.0/8",
+                "14.0.0.0/8",
+                "15.0.0.0/8",
+                "16.0.0.0/8",
                 "17.0.0.0/8",
             ],
             weight: 0.03,
@@ -425,9 +545,7 @@ pub fn default_isp_ranges() -> Vec<IspRange> {
             name: "TPG".into(),
             asn: "AS7545".into(),
             country: "AU".into(),
-            cidrs: vec![
-                "1.0.0.0/8", "13.0.0.0/8", "14.0.0.0/8",
-            ],
+            cidrs: vec!["1.0.0.0/8", "13.0.0.0/8", "14.0.0.0/8"],
             weight: 0.02,
             regions: vec![
                 GeoRegion::AuBrisbane,
@@ -649,7 +767,8 @@ pub struct FingerprintHealth {
     pub discarded_at: Option<DateTime<Utc>>,
 }
 
-/// In-memory store for fingerprint health. Persistent storage is provided by SurrealDB
+/// In-memory store for fingerprint health. Persistent storage is provided by
+/// the Turso/libSQL backend (`TursoStore`).
 /// in production; this is the hot cache used while crawling.
 #[derive(Debug, Default)]
 pub struct FingerprintHealthStore {
@@ -662,7 +781,7 @@ impl FingerprintHealthStore {
     }
 
     pub fn record_success(&self, fp: &Fingerprint) {
-        let mut health = self.health.lock().unwrap();
+        let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(h) = health.iter_mut().find(|h| h.ip == fp.ip) {
             h.working = true;
             h.success_count += 1;
@@ -691,7 +810,7 @@ impl FingerprintHealthStore {
     }
 
     pub fn record_failure(&self, fp: &Fingerprint, error: &str) {
-        let mut health = self.health.lock().unwrap();
+        let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(h) = health.iter_mut().find(|h| h.ip == fp.ip) {
             h.failure_count += 1;
             h.last_used = Some(Utc::now());
@@ -724,14 +843,14 @@ impl FingerprintHealthStore {
     }
 
     pub fn is_discarded(&self, ip: &str) -> bool {
-        let health = self.health.lock().unwrap();
+        let health = self.health.lock().unwrap_or_else(|e| e.into_inner());
         health
             .iter()
             .any(|h| h.ip == ip && !h.working && h.discarded_at.is_some())
     }
 
     pub fn working_ips(&self) -> Vec<String> {
-        let health = self.health.lock().unwrap();
+        let health = self.health.lock().unwrap_or_else(|e| e.into_inner());
         health
             .iter()
             .filter(|h| h.working && h.success_count > 0)
@@ -740,9 +859,27 @@ impl FingerprintHealthStore {
     }
 
     pub fn all(&self) -> Vec<FingerprintHealth> {
-        self.health.lock().unwrap().clone()
+        self.health
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
+
+#[derive(Debug)]
+pub enum FingerprintError {
+    Exhausted(String),
+}
+
+impl fmt::Display for FingerprintError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FingerprintError::Exhausted(msg) => write!(f, "fingerprint exhausted: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for FingerprintError {}
 
 /// Generates per-request / per-tool-call fingerprints for privacy protection.
 ///
@@ -779,19 +916,14 @@ impl FingerprintGenerator {
     ///
     /// Fallback chain: (1) reuse a known-working IP, (2) generate from a random ISP range,
     /// (3) try the next ISP range if the current one is exhausted.
-    pub fn generate_for_tool(&self, _tool_name: &str) -> Fingerprint {
+    pub fn generate_for_tool(&self, _tool_name: &str) -> Result<Fingerprint, FingerprintError> {
         let mut rng = rand::rng();
 
         // 1. Try to reuse a working IP.
         let working = self.health.working_ips();
         if !working.is_empty() {
             if let Some(ip) = working.choose(&mut rng) {
-                if let Some(h) = self
-                    .health
-                    .all()
-                    .into_iter()
-                    .find(|h| &h.ip == ip)
-                {
+                if let Some(h) = self.health.all().into_iter().find(|h| &h.ip == ip) {
                     let fingerprint = Fingerprint {
                         id: h.fingerprint_id.clone(),
                         ip: h.ip.clone(),
@@ -810,7 +942,7 @@ impl FingerprintGenerator {
                         geo_region: GeoRegion::UsNortheast, // placeholder; full region not stored
                         created_at: Utc::now(),
                     };
-                    return fingerprint;
+                    return Ok(fingerprint);
                 }
             }
         }
@@ -835,8 +967,12 @@ impl FingerprintGenerator {
                 if let Ok(ip) = random_ip_from_cidr(cidr) {
                     if !is_reserved_ip(&ip) && !self.health.is_discarded(&ip) && self.mark_used(&ip)
                     {
-                        let region = *isp.regions.choose(&mut rng).unwrap_or(&GeoRegion::UsNortheast);
-                        let (device_class, os, browser) = pick_device_profile(isp, region, &mut rng);
+                        let region = *isp
+                            .regions
+                            .choose(&mut rng)
+                            .unwrap_or(&GeoRegion::UsNortheast);
+                        let (device_class, os, browser) =
+                            pick_device_profile(isp, region, &mut rng);
                         let (chrome_major, firefox_major, safari_major) = (
                             rng.random_range(120u16..=131),
                             rng.random_range(120u16..=131),
@@ -860,7 +996,7 @@ impl FingerprintGenerator {
                             &format!("{:?}", region),
                             &Utc::now().to_rfc3339(),
                         );
-                        return Fingerprint {
+                        return Ok(Fingerprint {
                             id,
                             ip,
                             user_agent,
@@ -870,17 +1006,19 @@ impl FingerprintGenerator {
                             isp: isp.clone(),
                             geo_region: region,
                             created_at: Utc::now(),
-                        };
+                        });
                     }
                 }
             }
         }
 
-        panic!("FingerprintGenerator exhausted all ISP ranges without producing a valid IP");
+        Err(FingerprintError::Exhausted(
+            "all ISP ranges exhausted without producing a valid IP".into(),
+        ))
     }
 
     fn mark_used(&self, ip: &str) -> bool {
-        let mut used = self.used_ips.lock().unwrap();
+        let mut used = self.used_ips.lock().unwrap_or_else(|e| e.into_inner());
         if used.contains(ip) {
             false
         } else {
@@ -907,14 +1045,13 @@ impl Default for FingerprintGenerator {
 fn build_accept_from_browser(browser: Browser) -> String {
     match browser {
         Browser::Chrome | Browser::Edge => {
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8".into()
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+                .into()
         }
         Browser::Firefox => {
             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into()
         }
-        Browser::Safari => {
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into()
-        }
+        Browser::Safari => "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into(),
     }
 }
 
@@ -924,7 +1061,8 @@ fn build_accept_from_ua(user_agent: &str) -> String {
     } else if user_agent.contains("Safari") && !user_agent.contains("Chrome") {
         "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into()
     } else {
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8".into()
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+            .into()
     }
 }
 
@@ -957,17 +1095,25 @@ mod tests {
     #[test]
     fn test_generate_fingerprint() {
         let generator = FingerprintGenerator::new();
-        let fp = generator.generate_for_tool("research");
+        let fp = generator
+            .generate_for_tool("research")
+            .expect("fingerprint generation should succeed");
         assert!(!fp.ip.is_empty());
         assert!(!fp.user_agent.is_empty());
         assert!(!fp.id.is_empty());
-        assert!(fp.accept_language.starts_with("en") || fp.accept_language.starts_with("de") || fp.accept_language.starts_with("ja"));
+        assert!(
+            fp.accept_language.starts_with("en")
+                || fp.accept_language.starts_with("de")
+                || fp.accept_language.starts_with("ja")
+        );
     }
 
     #[test]
     fn test_fingerprint_headers() {
         let generator = FingerprintGenerator::new();
-        let fp = generator.generate_for_tool("fetch");
+        let fp = generator
+            .generate_for_tool("fetch")
+            .expect("fingerprint generation should succeed");
         let headers = fingerprint_headers(&fp);
         assert!(headers.contains_key("user-agent"));
         assert!(headers.contains_key("x-forwarded-for"));
@@ -976,7 +1122,9 @@ mod tests {
     #[test]
     fn test_health_store_discards_blocked_ip() {
         let generator = FingerprintGenerator::new();
-        let fp = generator.generate_for_tool("fetch");
+        let fp = generator
+            .generate_for_tool("fetch")
+            .expect("fingerprint generation should succeed");
         generator.report_failure(&fp, "403 Forbidden");
         assert!(generator.health.is_discarded(&fp.ip));
     }

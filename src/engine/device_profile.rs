@@ -86,11 +86,11 @@ impl DeviceProfile {
         let mut rng = rand::rng();
         let os = *[Os::Windows, Os::MacOs, Os::Linux, Os::Android, Os::Ios]
             .choose(&mut rng)
-            .unwrap();
+            .expect("os array non-empty");
         let device_class = match os {
             Os::Android | Os::Ios => *[DeviceClass::Mobile, DeviceClass::Tablet]
                 .choose(&mut rng)
-                .unwrap(),
+                .expect("mobile/tablet array non-empty"),
             _ => DeviceClass::Desktop,
         };
         let browser = *[
@@ -100,7 +100,7 @@ impl DeviceProfile {
             Browser::Edge,
         ]
         .choose(&mut rng)
-        .unwrap();
+        .expect("browser array non-empty");
 
         let (chrome_major, firefox_major, safari_major) = (
             rng.random_range(120u16..=131),
@@ -127,13 +127,26 @@ impl DeviceProfile {
         let sec_ch_ua_platform = Some(format!("\"{}\"", platform_string(os)));
         let viewport = random_viewport(device_class);
         let device_pixel_ratio = match device_class {
-            DeviceClass::Desktop => *[1.0f32, 1.25, 1.5, 2.0].choose(&mut rng).unwrap(),
-            DeviceClass::Tablet => *[1.0f32, 2.0].choose(&mut rng).unwrap(),
-            DeviceClass::Mobile => *[2.0f32, 2.625, 3.0].choose(&mut rng).unwrap(),
+            DeviceClass::Desktop => *[1.0f32, 1.25, 1.5, 2.0]
+                .choose(&mut rng)
+                .expect("dpr desktop array non-empty"),
+            DeviceClass::Tablet => *[1.0f32, 2.0]
+                .choose(&mut rng)
+                .expect("dpr tablet array non-empty"),
+            DeviceClass::Mobile => *[2.0f32, 2.625, 3.0]
+                .choose(&mut rng)
+                .expect("dpr mobile array non-empty"),
         };
-        let timezone = TIMEZONES.choose(&mut rng).unwrap().to_string();
-        let hardware_concurrency = *[2u8, 4, 6, 8, 10, 12, 16].choose(&mut rng).unwrap();
-        let device_memory = *[2u8, 4, 6, 8, 16, 32].choose(&mut rng).unwrap();
+        let timezone = TIMEZONES
+            .choose(&mut rng)
+            .expect("TIMEZONES array non-empty")
+            .to_string();
+        let hardware_concurrency = *[2u8, 4, 6, 8, 10, 12, 16]
+            .choose(&mut rng)
+            .expect("concurrency array non-empty");
+        let device_memory = *[2u8, 4, 6, 8, 16, 32]
+            .choose(&mut rng)
+            .expect("memory array non-empty");
         let dnt = rng.random::<bool>();
 
         let id = format!(
@@ -340,7 +353,10 @@ fn build_accept_language() -> String {
         "ja-JP,ja;q=0.9,en;q=0.5",
         "zh-CN,zh;q=0.9,en;q=0.5",
     ];
-    locales.choose(&mut rand::rng()).unwrap().to_string()
+    locales
+        .choose(&mut rand::rng())
+        .expect("locales array non-empty")
+        .to_string()
 }
 
 fn build_accept_encoding(browser: Browser) -> String {
@@ -381,7 +397,7 @@ fn random_viewport(device_class: DeviceClass) -> Viewport {
                 (1280, 720),
             ]
             .choose(&mut rng)
-            .unwrap();
+            .expect("desktop viewport array non-empty");
             Viewport {
                 width: w,
                 height: h,
@@ -390,7 +406,7 @@ fn random_viewport(device_class: DeviceClass) -> Viewport {
         DeviceClass::Tablet => {
             let (w, h) = *[(1024u16, 1366u16), (834, 1194), (810, 1080), (768, 1024)]
                 .choose(&mut rng)
-                .unwrap();
+                .expect("tablet viewport array non-empty");
             Viewport {
                 width: w,
                 height: h,
@@ -406,7 +422,7 @@ fn random_viewport(device_class: DeviceClass) -> Viewport {
                 (375, 812),
             ]
             .choose(&mut rng)
-            .unwrap();
+            .expect("mobile viewport array non-empty");
             Viewport {
                 width: w,
                 height: h,
@@ -416,7 +432,9 @@ fn random_viewport(device_class: DeviceClass) -> Viewport {
 }
 
 fn android_version() -> String {
-    let v = ["12", "13", "14", "15"].choose(&mut rand::rng()).unwrap();
+    let v = ["12", "13", "14", "15"]
+        .choose(&mut rand::rng())
+        .expect("android versions non-empty");
     v.to_string()
 }
 
@@ -442,12 +460,18 @@ fn random_phone_model() -> String {
         "Redmi Note 13",
         "OnePlus 12",
     ];
-    models.choose(&mut rand::rng()).unwrap().to_string()
+    models
+        .choose(&mut rand::rng())
+        .expect("phone models non-empty")
+        .to_string()
 }
 
 fn random_tablet_model() -> String {
     let models = ["SM-X910", "SM-X810", "iPad", "Lenovo TB350FU"];
-    models.choose(&mut rand::rng()).unwrap().to_string()
+    models
+        .choose(&mut rand::rng())
+        .expect("tablet models non-empty")
+        .to_string()
 }
 
 fn browser_string(b: Browser) -> &'static str {
@@ -502,18 +526,33 @@ pub struct SessionManager {
     sticky: bool,
 }
 
+/// Whether sessions should stick to the same UA+proxy for a given domain.
+#[derive(Clone, Copy)]
+pub enum StickySessions {
+    Sticky,
+    PerRequest,
+}
+
 impl SessionManager {
-    pub fn new(sticky: bool) -> Self {
+    pub fn new(sticky: StickySessions) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
-            sticky,
+            sticky: match sticky {
+                StickySessions::Sticky => true,
+                StickySessions::PerRequest => false,
+            },
         }
     }
 
     /// Get or create a session for a domain.
     pub fn session_for(&self, domain: &str, proxy_url: Option<String>) -> Session {
         if self.sticky {
-            if let Some(session) = self.sessions.lock().unwrap().get(domain) {
+            if let Some(session) = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(domain)
+            {
                 return session.clone();
             }
         }
@@ -528,24 +567,30 @@ impl SessionManager {
         if self.sticky {
             self.sessions
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .insert(domain.to_string(), session.clone());
         }
         session
     }
 
     pub fn clear(&self) {
-        self.sessions.lock().unwrap().clear();
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     pub fn session_count(&self) -> usize {
-        self.sessions.lock().unwrap().len()
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 }
 
 impl Default for SessionManager {
     fn default() -> Self {
-        Self::new(true)
+        Self::new(StickySessions::Sticky)
     }
 }
 
@@ -566,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_session_sticky() {
-        let mgr = SessionManager::new(true);
+        let mgr = SessionManager::new(StickySessions::Sticky);
         let s1 = mgr.session_for("example.com", Some("http://p1".to_string()));
         let s2 = mgr.session_for("example.com", Some("http://p2".to_string()));
         assert_eq!(s1.profile.user_agent, s2.profile.user_agent);
@@ -574,7 +619,7 @@ mod tests {
 
     #[test]
     fn test_session_non_sticky() {
-        let mgr = SessionManager::new(false);
+        let mgr = SessionManager::new(StickySessions::PerRequest);
         let s1 = mgr.session_for("example.com", None);
         let s2 = mgr.session_for("example.com", None);
         assert_eq!(s1.domain, s2.domain);

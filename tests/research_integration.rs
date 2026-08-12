@@ -4,21 +4,32 @@ use std::time::Duration;
 
 use axum::{Router, response::Html, routing::get};
 use tokio::net::TcpListener;
-use webfind::engine::indexer::Indexer;
 use webfind::engine::search_engine::InMemorySearchEngine;
 
 #[tokio::test]
 async fn test_research_endpoint_crawls_seed_and_returns_results() {
     let tmp = tempfile::TempDir::new().unwrap();
     let data_dir = tmp.path().to_path_buf();
-    let indexer = Indexer::new(Arc::new(InMemorySearchEngine::new()));
-    let state = Arc::new(webfind::api::ApiState::new(indexer, None, None, data_dir.clone()));
-    let app = webfind::api::app(state, None);
+    let indexer = InMemorySearchEngine::new();
+    let state = Arc::new(webfind::api::ApiState::new(
+        Arc::new(indexer),
+        None,
+        None,
+        data_dir.clone(),
+    ));
+    let app = webfind::api::app(state, None, &webfind::config::WebfindConfig::default());
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_addr: SocketAddr = listener.local_addr().unwrap();
+    // Serve with connect-info so the default PeerIpKeyExtractor rate limiter
+    // can extract the client address (matches production run_server).
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     let seed_app = Router::new()

@@ -152,14 +152,10 @@ async fn process_job(
     Ok(())
 }
 
-/// Stable URL-derived identifier matching SurrealStore::url_id.
+/// Stable URL-derived identifier using BLAKE3.
+/// Delegates to the shared `url_id()` utility in `engine::util`.
 fn url_to_id(url: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(url.as_bytes());
-    let digest = hasher.finalize();
-    let first16: [u8; 16] = digest[..16].try_into().unwrap_or([0u8; 16]);
-    format!("{:016x}", u128::from_be_bytes(first16))
+    crate::engine::util::url_id(url)
 }
 
 #[cfg(test)]
@@ -211,6 +207,8 @@ mod tests {
             redirect_count: 0,
             is_paywalled: false,
             is_valid_content: true,
+            content_type: "text/html".to_string(),
+            content_type_header: "text/html".to_string(),
             entities: crate::schema::content::Entities::default(),
         }
     }
@@ -221,7 +219,10 @@ mod tests {
         let worker = BackgroundWorker::new(graph.clone(), None, 16);
 
         let url = "https://example.com/page".to_string();
-        worker.persist(url.clone(), sample_content(&url)).await.unwrap();
+        worker
+            .persist(url.clone(), sample_content(&url))
+            .await
+            .unwrap();
         worker.close().await;
 
         // When processing finishes, no pending jobs remain.

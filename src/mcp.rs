@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use rmcp::{
     ServiceExt,
@@ -8,38 +10,67 @@ use rmcp::{
     model::{CallToolResult, ContentBlock},
     schemars, tool, tool_router,
 };
+use rquickjs::{CatchResultExt, Ctx, Function, Runtime};
 use serde::Deserialize;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use crate::engine::bg_worker::BackgroundWorker;
-use crate::engine::bulk_crawler::BulkDomainCrawler;
+use crate::engine::bulk_crawler::{BulkDomainCrawler, FollowExternalLinks, RespectRobots};
 use crate::engine::crawl_graph::{CrawlGraphStore, InMemoryCrawlGraph, TraversalDirection};
-use crate::engine::device_profile::SessionManager;
+use crate::engine::device_profile::{SessionManager, StickySessions};
 use crate::engine::embedder::{Embedder, FastembedEmbedder};
-use crate::engine::fetcher::Fetcher;
+use crate::engine::fetcher::{Fetcher, RotateUserAgent};
 use crate::engine::fingerprint::FingerprintAuditLog;
 use crate::engine::graph_summary::build_graph_summary;
-use crate::engine::indexer::Indexer;
+use crate::engine::indexer::attach_content;
 use crate::engine::pagerank_cache::PageRankCache;
 use crate::engine::proxy_pool::{ProxyEndpoint, ProxyPool};
 use crate::engine::ranker::Ranker;
-use crate::engine::search_engine::InMemorySearchEngine;
+use crate::engine::search_engine::{InMemorySearchEngine, SearchEngine};
 use crate::schema::content::StructuredContent;
 use crate::schema::request::{ContentType, OutputFormat, SearchDepth, SearchRequest};
 use crate::schema::response::SearchResponse;
 
+// Global state for Code Mode (FR-10) - accessed by synchronous JS functions
+static CODE_MODE_STATE: OnceLock<CodeModeState> = OnceLock::new();
+
+struct CodeModeState {
+    indexer: Arc<RwLock<Arc<dyn SearchEngine + Send + Sync>>>,
+    graph_store: Option<Arc<dyn CrawlGraphStore + Send + Sync>>,
+    data_dir: PathBuf,
+}
+
+fn get_code_mode_state() -> &'static CodeModeState {
+    CODE_MODE_STATE
+        .get()
+        .expect("Code Mode state not initialized")
+}
+
+fn init_code_mode_state(
+    indexer: Arc<RwLock<Arc<dyn SearchEngine + Send + Sync>>>,
+    graph_store: Option<Arc<dyn CrawlGraphStore + Send + Sync>>,
+    data_dir: PathBuf,
+) {
+    CODE_MODE_STATE
+        .set(CodeModeState {
+            indexer,
+            graph_store,
+            data_dir,
+        })
+        .ok();
+}
+
 #[derive(Clone)]
 pub struct WebfindMcpServer {
-    indexer: Arc<Mutex<Indexer>>,
+    indexer: Arc<RwLock<Arc<dyn SearchEngine + Send + Sync>>>,
     graph_store: Option<Arc<dyn CrawlGraphStore + Send + Sync>>,
     audit_store: Option<Arc<dyn FingerprintAuditLog + Send + Sync>>,
     data_dir: PathBuf,
-    indexer_queue: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl WebfindMcpServer {
     pub fn new(
-        indexer: Arc<Mutex<Indexer>>,
+        indexer: Arc<RwLock<Arc<dyn SearchEngine + Send + Sync>>>,
         graph_store: Option<Arc<dyn CrawlGraphStore + Send + Sync>>,
         audit_store: Option<Arc<dyn FingerprintAuditLog + Send + Sync>>,
         data_dir: PathBuf,
@@ -49,24 +80,26 @@ impl WebfindMcpServer {
             graph_store,
             audit_store,
             data_dir,
-            indexer_queue: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
     pub async fn run_stdio(
-        indexer: Indexer,
+        indexer: Arc<dyn SearchEngine + Send + Sync>,
         graph_store: Option<Arc<dyn CrawlGraphStore + Send + Sync>>,
         audit_store: Option<Arc<dyn FingerprintAuditLog + Send + Sync>>,
         data_dir: PathBuf,
     ) -> anyhow::Result<()> {
-        let server = Self::new(Arc::new(Mutex::new(indexer)), graph_store, audit_store, data_dir);
+        let server = Self::new(
+            Arc::new(RwLock::new(indexer)),
+            graph_store,
+            audit_store,
+            data_dir,
+        );
         let service = server.serve(rmcp::transport::stdio()).await?;
         service.waiting().await?;
         Ok(())
     }
 }
-
-
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SearchToolParams {
@@ -166,6 +199,19 @@ struct FetchToolParams {
     extract_keywords: Option<bool>,
 }
 
+/// Parameters for the Code Mode tool (FR-10): execute JavaScript with WebFind functions.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RunToolParams {
+    /// JavaScript code to execute. Has access to `search()`, `fetch()`, `research()` functions.
+    code: String,
+    /// Maximum execution time in milliseconds (default: 30000).
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    /// Memory limit in MB (default: 64).
+    #[serde(default)]
+    memory_limit_mb: Option<u64>,
+}
+
 #[tool_router(server_handler)]
 impl WebfindMcpServer {
     #[tool(description = "Search the WebFind index for the given query.")]
@@ -183,7 +229,9 @@ impl WebfindMcpServer {
             if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(ts) {
                 let year = parsed.format("%Y").to_string();
                 let chars: Vec<char> = query.chars().collect();
-                let has_year = chars.windows(4).any(|w| w.iter().all(|c| c.is_ascii_digit()));
+                let has_year = chars
+                    .windows(4)
+                    .any(|w| w.iter().all(|c| c.is_ascii_digit()));
                 if !has_year {
                     query = format!("{} {}", query.trim(), year);
                 }
@@ -192,7 +240,7 @@ impl WebfindMcpServer {
 
         let mut results = self
             .indexer
-            .lock()
+            .read()
             .await
             .search_bm25(&query, limit)
             .await
@@ -231,7 +279,7 @@ impl WebfindMcpServer {
         let vector_scores: Option<HashMap<String, f64>> = if hybrid {
             match self
                 .indexer
-                .lock()
+                .read()
                 .await
                 .search_vector(&params.query, limit)
                 .await
@@ -301,10 +349,7 @@ impl WebfindMcpServer {
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
-    async fn research_one(
-        &self,
-        params: ResearchToolParams,
-    ) -> Result<SearchResponse, String> {
+    async fn research_one(&self, params: ResearchToolParams) -> Result<SearchResponse, String> {
         let limit = params.limit.unwrap_or(10).clamp(1, 100);
         let max_pages = params.max_pages.unwrap_or(50).clamp(1, 500);
         let delay_ms = params.delay.unwrap_or(1000).max(100) as u64;
@@ -343,7 +388,9 @@ impl WebfindMcpServer {
                 let year = parsed.format("%Y").to_string();
                 // Only add year if query doesn't already contain a 4-digit year
                 let chars: Vec<char> = query.chars().collect();
-                let has_year = chars.windows(4).any(|w| w.iter().all(|c| c.is_ascii_digit()));
+                let has_year = chars
+                    .windows(4)
+                    .any(|w| w.iter().all(|c| c.is_ascii_digit()));
                 if !has_year {
                     query = format!("{} {}", query.trim(), year);
                 }
@@ -362,7 +409,11 @@ impl WebfindMcpServer {
             .map_err(|e| format!("failed to load embedder: {}", e));
         let embedder = embedder?;
 
-        let background_worker = Arc::new(BackgroundWorker::new(graph.clone(), Some(embedder.clone()), 256));
+        let background_worker = Arc::new(BackgroundWorker::new(
+            graph.clone(),
+            Some(embedder.clone()),
+            256,
+        ));
         let auto_discover = params.seed.is_none();
         let mut all_seeds: Vec<String> = Vec::new();
         if let Some(ref seed) = params.seed {
@@ -372,9 +423,9 @@ impl WebfindMcpServer {
 
         if all_seeds.is_empty() {
             // Auto-discover seeds from WebFind's own index, graph, and query-derived candidates.
-            let indexer = self.indexer.lock().await;
+            let indexer = self.indexer.read().await;
             let discovered = crate::engine::discovery::discover_seeds(
-                &indexer,
+                indexer.as_ref(),
                 Some(graph.as_ref()),
                 &query,
             )
@@ -382,24 +433,24 @@ impl WebfindMcpServer {
             .map_err(|e| e.to_string())?;
             drop(indexer);
             if discovered.is_empty() {
-                return Err("No seeds discovered for the query. Provide a seed URL or rephrase the query.".to_string());
+                return Err(
+                    "No seeds discovered for the query. Provide a seed URL or rephrase the query."
+                        .to_string(),
+                );
             }
             all_seeds = discovered;
         }
 
         // When auto-discovering, always follow external links to escape seed domains.
-        let follow_external = if auto_discover {
-            true
-        } else {
-            follow_external
-        };
+        let follow_external = if auto_discover { true } else { follow_external };
 
         let proxy_pool = ProxyPool::new();
         if let Some(ref proxies_str) = params.proxies {
             for url in proxies_str.split(',') {
                 let url = url.trim().to_string();
                 if !url.is_empty() {
-                    proxy_pool.add(ProxyEndpoint::from_url(&url).map_err(|e| e.to_string())?);
+                    let ep = ProxyEndpoint::from_url(&url).map_err(|e| e.to_string())?;
+                    proxy_pool.add(ep).map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -411,11 +462,15 @@ impl WebfindMcpServer {
             delay_ms,
             1,
             max_pages,
-            follow_external,
+            if follow_external {
+                FollowExternalLinks::Follow
+            } else {
+                FollowExternalLinks::Ignore
+            },
             min_depth,
             max_depth,
         )
-        .with_respect_robots(true)
+        .with_respect_robots(RespectRobots::Yes)
         .with_graph_store(graph.clone())
         .with_background_worker(background_worker.clone())
         .with_topics(topics);
@@ -424,13 +479,11 @@ impl WebfindMcpServer {
         let mut contents: Vec<StructuredContent> = Vec::new();
         let mut seen_urls: HashSet<String> = HashSet::new();
         for seed_url in &all_seeds {
-            let crawled = tokio::time::timeout(
-                std::time::Duration::from_secs(60),
-                crawler.crawl(seed_url),
-            )
-            .await
-            .map_err(|_| "crawl timed out after 60s".to_string())
-            .and_then(|r| r.map_err(|e| e.to_string()))?;
+            let crawled =
+                tokio::time::timeout(std::time::Duration::from_secs(60), crawler.crawl(seed_url))
+                    .await
+                    .map_err(|_| "crawl timed out after 60s".to_string())
+                    .and_then(|r| r.map_err(|e| e.to_string()))?;
             for c in crawled {
                 if seen_urls.insert(c.url.clone()) {
                     contents.push(c);
@@ -465,21 +518,18 @@ impl WebfindMcpServer {
             });
         }
 
-        // Serialize writes to the index through a FIFO queue. Crawling
-        // happens concurrently; only indexing + commit + search are ordered.
-        let _queue_guard = self.indexer_queue.lock().await;
-
         {
-            let mut indexer = self.indexer.lock().await;
+            let mut indexer = self.indexer.write().await;
             if hybrid {
-                *indexer = Indexer::new(Arc::new(
-                    InMemorySearchEngine::with_embedder(embedder),
-                ));
+                *indexer = Arc::new(InMemorySearchEngine::with_embedder(embedder));
             }
-            indexer.index_batch(&contents).await.map_err(|e| e.to_string())?;
+            indexer
+                .index_batch(&contents)
+                .await
+                .map_err(|e| e.to_string())?;
         }
 
-        let indexer = self.indexer.lock().await;
+        let indexer = self.indexer.read().await;
         let mut results = indexer
             .search_bm25(&query, limit)
             .await
@@ -517,7 +567,7 @@ impl WebfindMcpServer {
         results = ranker.rank(results, &request, None, vector_scores.as_ref());
 
         // Always attach full content for research responses.
-        Indexer::attach_content(&mut results, &contents);
+        attach_content(&mut results, &contents);
 
         // Wait for background knowledge-graph + vector persistence to drain.
         background_worker.close().await;
@@ -565,8 +615,8 @@ impl WebfindMcpServer {
         Parameters(params): Parameters<ResearchToolParams>,
     ) -> Result<CallToolResult, String> {
         let response = self.research_one(params).await?;
-        let text = serde_json::to_string_pretty(&response.to_llm_value())
-            .map_err(|e| e.to_string())?;
+        let text =
+            serde_json::to_string_pretty(&response.to_llm_value()).map_err(|e| e.to_string())?;
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
@@ -604,10 +654,7 @@ impl WebfindMcpServer {
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
-    async fn fetch_one(
-        &self,
-        params: FetchToolParams,
-    ) -> Result<serde_json::Value, String> {
+    async fn fetch_one(&self, params: FetchToolParams) -> Result<serde_json::Value, String> {
         let proxy_list: Vec<String> = params
             .proxies
             .as_ref()
@@ -624,7 +671,8 @@ impl WebfindMcpServer {
         } else {
             let pool = ProxyPool::new();
             for url in &proxy_list {
-                pool.add(ProxyEndpoint::from_url(url).map_err(|e| e.to_string())?);
+                let ep = ProxyEndpoint::from_url(url).map_err(|e| e.to_string())?;
+                pool.add(ep).map_err(|e| e.to_string())?;
             }
             Some(pool)
         };
@@ -646,11 +694,11 @@ impl WebfindMcpServer {
                 // If proxies were supplied, retry through the proxy pool with a
                 // random user-agent + rotating egress IP.
                 if let Some(pool) = proxy_pool {
-                    let session_manager = SessionManager::new(true);
+                    let session_manager = SessionManager::new(StickySessions::Sticky);
                     let mut proxy_fetcher = Fetcher::new_human(
                         Some(pool),
                         Some(session_manager),
-                        true, // random UA per request
+                        RotateUserAgent::Rotate,
                         1,
                     )
                     .map_err(|e| e.to_string())?;
@@ -715,5 +763,241 @@ impl WebfindMcpServer {
         let text = serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?;
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
-}
 
+    /// Code Mode tool (FR-10): Execute JavaScript with WebFind functions in a sandboxed QuickJS runtime.
+    /// Collapses N tools into a single `run()` tool — 99.9% token reduction per Cloudflare's Code Mode pattern.
+    #[tool(
+        description = "Execute JavaScript code with access to WebFind search, fetch, and research functions. Use for complex multi-step workflows. Returns the last expression's value as JSON."
+    )]
+    async fn webfind_run(
+        &self,
+        Parameters(params): Parameters<RunToolParams>,
+    ) -> Result<CallToolResult, String> {
+        let timeout_ms = params.timeout_ms.unwrap_or(30_000).clamp(1_000, 120_000);
+        let memory_limit_mb = params.memory_limit_mb.unwrap_or(64).clamp(16, 512);
+
+        // Initialize global state for synchronous JS functions
+        init_code_mode_state(
+            self.indexer.clone(),
+            self.graph_store.clone(),
+            self.data_dir.clone(),
+        );
+        let code = params.code.clone();
+
+        // Execute in a blocking task to avoid blocking the async runtime, and
+        // bound it with an outer timeout so a runaway JS loop cannot hold a
+        // blocking thread indefinitely (FR-10 sandbox CPU limit).
+        let result = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            tokio::task::spawn_blocking(move || {
+                // Create a QuickJS runtime with memory limits
+                let runtime = Runtime::new().map_err(|e| format!("Failed to create JS runtime: {}", e))?;
+                runtime.set_memory_limit((memory_limit_mb as usize) * 1024 * 1024);
+
+            let context = rquickjs::Context::full(&runtime).map_err(|e| format!("Failed to create JS context: {}", e))?;
+
+            context.with(|ctx| {
+                // Inject search function (synchronous, uses block_on internally)
+                fn search_impl(
+                    _ctx: Ctx<'_>,
+                    query: String,
+                    limit: Option<u32>,
+                ) -> rquickjs::Result<String> {
+                    let state = get_code_mode_state();
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(async move {
+                        let limit = limit.unwrap_or(10).clamp(1, 100) as usize;
+                        let mut results = state.indexer
+                            .read()
+                            .await
+                            .search_bm25(&query, limit)
+                            .await
+                            .map_err(|e| rquickjs::Error::new_resolving_message(e.to_string(), "WebFind", e.to_string()))?;
+
+                        let request = SearchRequest {
+                            query: query.clone(),
+                            depth: SearchDepth::Standard,
+                            limit: limit as u32,
+                            output: OutputFormat::Json,
+                            language: None,
+                            date_range: None,
+                            domains: None,
+                            content_type: Some(ContentType::Any),
+                            include_content: false,
+                            include_graph: false,
+                            include_keywords: false,
+                            include_metrics: false,
+                            hybrid: false,
+                        };
+
+                        let graph_scores: Option<HashMap<String, f64>> = match &state.graph_store {
+                            Some(store) => {
+                                let cache = PageRankCache::new(&state.data_dir);
+                                match cache.get_or_compute(store.as_ref(), 20, 0.85).await {
+                                    Ok(scores) => Some(scores),
+                                    Err(e) => {
+                                        tracing::warn!("PageRank cache failed: {}", e);
+                                        None
+                                    }
+                                }
+                            }
+                            None => None,
+                        };
+
+                        let ranker = Ranker::new();
+                        results = ranker.rank(results, &request, graph_scores.as_ref(), None);
+                        results.truncate(limit);
+
+                        let json_results: Vec<serde_json::Value> = results
+                            .into_iter()
+                            .map(|r| serde_json::json!({
+                                "rank": r.rank,
+                                "url": r.url,
+                                "title": r.title,
+                                "snippet": r.snippet,
+                                "domain": r.domain,
+                                "score": r.score,
+                            }))
+                            .collect();
+
+                        Ok(serde_json::to_string(&json_results).unwrap())
+                    })
+                }
+
+                let search_fn = Function::new(ctx.clone(), search_impl).map_err(|e| format!("Failed to create search function: {}", e))?;
+                ctx.globals().set("search", search_fn).map_err(|e| format!("Failed to set search global: {}", e))?;
+
+                // Inject fetch function
+                fn fetch_impl(
+                    _ctx: Ctx<'_>,
+                    url: String,
+                ) -> rquickjs::Result<String> {
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(async move {
+                        let fetcher = Fetcher::new().map_err(|e| rquickjs::Error::new_resolving_message(e.to_string(), "WebFind", e.to_string()))?;
+                        let content = fetcher.fetch_url(&url).await.map_err(|e| rquickjs::Error::new_resolving_message(e.to_string(), "WebFind", e.to_string()))?;
+                        Ok(serde_json::to_string(&serde_json::json!({
+                            "url": content.url,
+                            "title": content.title,
+                            "excerpt": content.excerpt,
+                            "content_text": content.content_text,
+                            "content_markdown": content.content_markdown,
+                            "word_count": content.word_count,
+                            "language": content.language,
+                        })).unwrap())
+                    })
+                }
+
+                let fetch_fn = Function::new(ctx.clone(), fetch_impl).map_err(|e| format!("Failed to create fetch function: {}", e))?;
+                ctx.globals().set("fetch", fetch_fn).map_err(|e| format!("Failed to set fetch global: {}", e))?;
+
+                // Inject research function
+                fn research_impl(
+                    _ctx: Ctx<'_>,
+                    query: String,
+                    seed: Option<String>,
+                    max_pages: Option<u32>,
+                ) -> rquickjs::Result<String> {
+                    let state = get_code_mode_state();
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(async move {
+                        let max_pages = max_pages.unwrap_or(50).clamp(1, 500) as usize;
+                        let embedder: Arc<dyn Embedder> = match FastembedEmbedder::new() {
+                            Ok(e) => Arc::new(e),
+                            Err(e) => {
+                                tracing::warn!("fastembed unavailable, using dummy: {}", e);
+                                Arc::new(crate::engine::embedder::DummyEmbedder)
+                            }
+                        };
+
+                        let graph: Arc<dyn CrawlGraphStore + Send + Sync> = state.graph_store.as_ref()
+                            .map(|s| s.clone())
+                            .unwrap_or_else(|| Arc::new(InMemoryCrawlGraph::new()));
+
+                        let background_worker = Arc::new(BackgroundWorker::new(graph.clone(), Some(embedder.clone()), 256));
+                        let mut all_seeds = Vec::new();
+                        if let Some(s) = seed { all_seeds.push(s); }
+
+                        let proxy_pool = ProxyPool::new();
+                        let crawler = BulkDomainCrawler::new(
+                            proxy_pool, 100, 30, 1000, 1, max_pages,
+                            FollowExternalLinks::Ignore, 0, 5,
+                        )
+                        .with_respect_robots(RespectRobots::Yes)
+                        .with_graph_store(graph.clone())
+                        .with_background_worker(background_worker.clone());
+
+                        let mut contents = Vec::new();
+                        let mut seen = HashSet::new();
+                        for seed_url in &all_seeds {
+                            let crawled = tokio::time::timeout(Duration::from_secs(60), crawler.crawl(seed_url))
+                                .await
+                                .map_err(|_| rquickjs::Error::new_resolving_message("crawl_timeout".to_string(), "WebFind", "crawl timeout".to_string()))?
+                                .map_err(|e| rquickjs::Error::new_resolving_message(e.to_string(), "WebFind", e.to_string()))?;
+                            for c in crawled {
+                                if seen.insert(c.url.clone()) { contents.push(c); }
+                            }
+                        }
+
+                        if contents.is_empty() {
+                            return Ok(serde_json::to_string(&serde_json::json!({"results": []})).unwrap());
+                        }
+
+                        let mut indexer_guard = state.indexer.write().await;
+                        *indexer_guard = Arc::new(InMemorySearchEngine::with_embedder(embedder));
+                        indexer_guard.index_batch(&contents).await.map_err(|e| rquickjs::Error::new_resolving_message(e.to_string(), "WebFind", e.to_string()))?;
+                        drop(indexer_guard);
+
+                        let indexer_read = state.indexer.read().await;
+                        let results = indexer_read.search_bm25(&query, 10).await.map_err(|e| rquickjs::Error::new_resolving_message(e.to_string(), "WebFind", e.to_string()))?;
+
+                        let json_results: Vec<serde_json::Value> = results.into_iter().map(|r| serde_json::json!({
+                            "rank": r.rank, "url": r.url, "title": r.title, "snippet": r.snippet, "domain": r.domain, "score": r.score
+                        })).collect();
+
+                        background_worker.close().await;
+                        Ok(serde_json::to_string(&serde_json::json!({"results": json_results})).unwrap())
+                    })
+                }
+
+                let research_fn = Function::new(ctx.clone(), research_impl).map_err(|e| format!("Failed to create research function: {}", e))?;
+                ctx.globals().set("research", research_fn).map_err(|e| format!("Failed to set research global: {}", e))?;
+
+                // Inject console.log for debugging
+                let console_log = Function::new(ctx.clone(), |_ctx: Ctx<'_>, msg: String| {
+                    tracing::info!("[CodeMode] {}", msg);
+                    Ok::<_, rquickjs::Error>(())
+                }).map_err(|e| format!("Failed to create console.log: {}", e))?;
+                let console = rquickjs::Object::new(ctx.clone()).map_err(|e| format!("Failed to create console object: {}", e))?;
+                console.set("log", console_log).map_err(|e| format!("Failed to set console.log: {}", e))?;
+                ctx.globals().set("console", console).map_err(|e| format!("Failed to set console global: {}", e))?;
+
+                // Execute the user code and capture the result
+                let wrapped_code = format!(
+                    "(async () => {{ const result = await (async () => {{ {} }})(); return typeof result === 'string' ? result : JSON.stringify(result); }})()",
+                    code
+                );
+
+                let result_val: String = ctx.eval(wrapped_code.as_str()).catch(&ctx).map_err(|e| format!("Code execution error: {}", e))?;
+
+                Ok(result_val)
+            })
+        }))
+        .await;
+
+        // `timeout` returns Ok(join_result) | Err(elapsed); the inner
+        // spawn_blocking result is Result<String, String>.
+        let output = match result {
+            Ok(join_result) => join_result.map_err(|e| format!("Task join error: {}", e))?,
+            Err(_elapsed) => {
+                tracing::warn!("Code Mode execution timed out after {} ms", timeout_ms);
+                return Err("Code execution timed out (CPU limit exceeded)".to_string());
+            }
+        };
+
+        match output {
+            Ok(o) => Ok(CallToolResult::success(vec![ContentBlock::text(o)])),
+            Err(e) => Err(e),
+        }
+    }
+}

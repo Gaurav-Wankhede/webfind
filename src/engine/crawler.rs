@@ -6,12 +6,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use spider::website::Website;
 
-use super::device_profile::SessionManager;
+use super::device_profile::{SessionManager, StickySessions};
 use super::embedder::Embedder;
-use super::fetcher::Fetcher;
-use super::indexer::Indexer;
+use super::fetcher::{Fetcher, RotateUserAgent};
 use super::proxy_pool::{ProxyPool, ProxyProtocol};
-use super::search_engine::InMemorySearchEngine;
+use super::search_engine::{InMemorySearchEngine, SearchEngine};
 use crate::schema::content::StructuredContent;
 use crate::storage::cache_store::{CacheEntry, CacheStore, ReCrawlPolicy, SimHash};
 
@@ -173,14 +172,27 @@ impl Crawler {
             None
         };
         let session_manager = if self.rotate_ua || proxy_pool.is_some() {
-            Some(SessionManager::new(self.sticky_sessions))
+            Some(SessionManager::new(if self.sticky_sessions {
+                StickySessions::Sticky
+            } else {
+                StickySessions::PerRequest
+            }))
         } else {
             None
         };
         let fetcher = if proxy_pool.is_some() || self.rotate_ua {
-            Fetcher::new_human(proxy_pool, session_manager, self.rotate_ua, self.rps)
-                .context("failed to create human-like fetcher")?
-                .with_dynamic_fallback(self.dynamic_wait_ms)
+            Fetcher::new_human(
+                proxy_pool,
+                session_manager,
+                if self.rotate_ua {
+                    RotateUserAgent::Rotate
+                } else {
+                    RotateUserAgent::Fixed
+                },
+                self.rps,
+            )
+            .context("failed to create human-like fetcher")?
+            .with_dynamic_fallback(self.dynamic_wait_ms)
         } else if self.dynamic_fallback {
             Fetcher::new()
                 .context("failed to create fetcher")?
@@ -188,12 +200,11 @@ impl Crawler {
         } else {
             Fetcher::new().context("failed to create fetcher")?
         };
-        let indexer = Indexer::new(Arc::new(
-            self.embedder
-                .as_ref()
-                .map(|e| InMemorySearchEngine::with_embedder(e.clone()))
-                .unwrap_or_else(InMemorySearchEngine::new),
-        ));
+        let indexer = self
+            .embedder
+            .as_ref()
+            .map(|e| InMemorySearchEngine::with_embedder(e.clone()))
+            .unwrap_or_else(InMemorySearchEngine::new);
 
         // 4. Process pages as they come in
         let batch_size = 50;
@@ -335,14 +346,27 @@ impl Crawler {
             None
         };
         let session_manager = if self.rotate_ua || proxy_pool.is_some() {
-            Some(SessionManager::new(self.sticky_sessions))
+            Some(SessionManager::new(if self.sticky_sessions {
+                StickySessions::Sticky
+            } else {
+                StickySessions::PerRequest
+            }))
         } else {
             None
         };
         let fetcher = if proxy_pool.is_some() || self.rotate_ua {
-            Fetcher::new_human(proxy_pool, session_manager, self.rotate_ua, self.rps)
-                .context("failed to create human-like fetcher")?
-                .with_dynamic_fallback(self.dynamic_wait_ms)
+            Fetcher::new_human(
+                proxy_pool,
+                session_manager,
+                if self.rotate_ua {
+                    RotateUserAgent::Rotate
+                } else {
+                    RotateUserAgent::Fixed
+                },
+                self.rps,
+            )
+            .context("failed to create human-like fetcher")?
+            .with_dynamic_fallback(self.dynamic_wait_ms)
         } else if self.dynamic_fallback {
             Fetcher::new()
                 .context("failed to create fetcher")?

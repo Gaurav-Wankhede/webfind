@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use super::bg_worker::BackgroundWorker;
 use super::crawl_graph::{CrawlGraphStore, DiscoverySource, InMemoryCrawlGraph, UrlNode};
-use super::device_profile::{DeviceProfile, SessionManager};
+use super::device_profile::{DeviceProfile, SessionManager, StickySessions};
 use super::fetcher::Fetcher;
 use super::proxy_pool::ProxyPool;
 use super::site_policy::{RobotsPolicy, SiteExplorer};
@@ -42,10 +42,7 @@ fn score_relevance(url: &str, content: Option<&StructuredContent>, topics: &[Str
         let mut total = 0;
         for t in &topic_set {
             total += 1;
-            if title_lower.contains(t)
-                || excerpt_lower.contains(t)
-                || kw_lower.contains(*t)
-            {
+            if title_lower.contains(t) || excerpt_lower.contains(t) || kw_lower.contains(*t) {
                 hits += 1;
             }
         }
@@ -148,6 +145,20 @@ pub struct BulkDomainCrawler {
     topics: Vec<String>,
 }
 
+/// Whether to follow links to external domains during crawling.
+#[derive(Clone, Copy)]
+pub enum FollowExternalLinks {
+    Follow,
+    Ignore,
+}
+
+/// Whether to respect robots.txt directives.
+#[derive(Clone, Copy)]
+pub enum RespectRobots {
+    Yes,
+    No,
+}
+
 impl BulkDomainCrawler {
     pub fn new(
         proxy_pool: ProxyPool,
@@ -156,13 +167,13 @@ impl BulkDomainCrawler {
         delay_ms: u64,
         rps: u32,
         max_pages: usize,
-        follow_external: bool,
+        follow_external: FollowExternalLinks,
         min_depth: u32,
         max_depth: u32,
     ) -> Self {
         Self {
             proxy_pool,
-            session_manager: SessionManager::new(true),
+            session_manager: SessionManager::new(StickySessions::Sticky),
             domains: Mutex::new(HashMap::new()),
             pages_per_session: pages_per_session.max(1),
             session_max_age: Duration::from_secs(session_max_age_minutes.max(1) * 60),
@@ -172,15 +183,21 @@ impl BulkDomainCrawler {
             respect_robots: true,
             graph_store: None,
             background_worker: None,
-            follow_external,
+            follow_external: match follow_external {
+                FollowExternalLinks::Follow => true,
+                FollowExternalLinks::Ignore => false,
+            },
             min_depth,
             max_depth,
             topics: Vec::new(),
         }
     }
 
-    pub fn with_respect_robots(mut self, respect: bool) -> Self {
-        self.respect_robots = respect;
+    pub fn with_respect_robots(mut self, respect: RespectRobots) -> Self {
+        self.respect_robots = match respect {
+            RespectRobots::Yes => true,
+            RespectRobots::No => false,
+        };
         self
     }
 
@@ -256,8 +273,16 @@ impl BulkDomainCrawler {
         };
 
         if !seed_already_crawled {
-            self.record_url(seed, &seed_domain, DiscoverySource::Seed, 0, 1.0, None, None)
-                .await;
+            self.record_url(
+                seed,
+                &seed_domain,
+                DiscoverySource::Seed,
+                0,
+                1.0,
+                None,
+                None,
+            )
+            .await;
         }
 
         // Seed queue from sitemap (highest priority first), then the user seed if new.
@@ -274,10 +299,12 @@ impl BulkDomainCrawler {
                 entry.changefreq.as_deref(),
             )
             .await;
-            self.enqueue_url(&seed_domain, &entry.url, 1, relevance).await;
+            self.enqueue_url(&seed_domain, &entry.url, 1, relevance)
+                .await;
         }
         if !seed_already_crawled {
-            self.enqueue_url(&seed_domain, seed, 0, seed_relevance).await;
+            self.enqueue_url(&seed_domain, seed, 0, seed_relevance)
+                .await;
         }
 
         // Phase 1+2: DISCOVER + FETCH in interleaved BFS with depth tracking.
@@ -405,7 +432,8 @@ impl BulkDomainCrawler {
                     for link in &content.internal_links {
                         if next_depth <= self.max_depth {
                             let relevance = score_relevance(link, Some(&content), &self.topics);
-                            let is_new = self.enqueue_url(&domain, link, next_depth, relevance).await;
+                            let is_new =
+                                self.enqueue_url(&domain, link, next_depth, relevance).await;
                             if is_new {
                                 self.record_url(
                                     link,
@@ -428,9 +456,11 @@ impl BulkDomainCrawler {
                             let ext_domain =
                                 util::extract_domain(link).unwrap_or_else(|| "unknown".to_string());
                             if ext_domain != domain && next_depth <= self.max_depth {
-                                let relevance = score_relevance(link, Some(&content), &self.topics) * 0.3;
-                                let is_new =
-                                    self.enqueue_url(&ext_domain, link, next_depth, relevance).await;
+                                let relevance =
+                                    score_relevance(link, Some(&content), &self.topics) * 0.3;
+                                let is_new = self
+                                    .enqueue_url(&ext_domain, link, next_depth, relevance)
+                                    .await;
                                 if is_new {
                                     self.record_url(
                                         link,
@@ -551,7 +581,7 @@ impl BulkDomainCrawler {
     }
 
     async fn rotate_session(&self, domain: &str) -> Result<CrawlSession> {
-        let proxy = self.proxy_pool.select(Some(domain));
+        let proxy = self.proxy_pool.select(Some(domain))?;
         let proxy_url = proxy.as_ref().map(|p| p.url.clone());
         let session = self.session_manager.session_for(domain, proxy_url.clone());
 

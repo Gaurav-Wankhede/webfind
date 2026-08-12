@@ -51,7 +51,10 @@ impl FetchPipeline {
 
         let mut tasks = Vec::with_capacity(urls.len());
         for url in urls.iter().cloned() {
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
             let timeout = Duration::from_millis(self.timeout_ms);
             let fut = async move {
                 let start = std::time::Instant::now();

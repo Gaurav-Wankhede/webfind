@@ -1,6 +1,7 @@
 pub mod bg_worker;
 pub mod bulk_crawler;
 pub mod categories;
+pub mod content_classifier;
 pub mod crawl_graph;
 pub mod crawler;
 pub mod device_profile;
@@ -23,6 +24,5 @@ pub mod ranker;
 pub mod research_service;
 pub mod search_engine;
 pub mod site_policy;
-pub mod surreal_engine;
 pub mod util;
 pub mod vector;

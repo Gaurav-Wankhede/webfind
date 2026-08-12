@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use webfind::engine::bulk_crawler::BulkDomainCrawler;
+use webfind::engine::bulk_crawler::{BulkDomainCrawler, FollowExternalLinks, RespectRobots};
 use webfind::engine::crawl_graph::{CrawlGraphStore, DiscoverySource};
 use webfind::engine::proxy_pool::ProxyPool;
 
@@ -10,8 +10,18 @@ mod common;
 async fn test_bulk_crawler_discovers_linked_pages() {
     let (_server, base_url) = common::start_test_server().await;
 
-    let crawler =
-        BulkDomainCrawler::new(ProxyPool::new(), 10, 60, 50, 10, 10, false, 0, 5).with_respect_robots(false);
+    let crawler = BulkDomainCrawler::new(
+        ProxyPool::new(),
+        10,
+        60,
+        50,
+        10,
+        10,
+        FollowExternalLinks::Ignore,
+        0,
+        5,
+    )
+    .with_respect_robots(RespectRobots::No);
 
     let results = crawler
         .crawl(&base_url)
@@ -43,8 +53,18 @@ async fn test_bulk_crawler_discovers_linked_pages() {
 async fn test_bulk_crawler_respects_max_pages() {
     let (_server, base_url) = common::start_test_server().await;
 
-    let crawler =
-        BulkDomainCrawler::new(ProxyPool::new(), 10, 60, 50, 10, 2, false, 0, 5).with_respect_robots(false);
+    let crawler = BulkDomainCrawler::new(
+        ProxyPool::new(),
+        10,
+        60,
+        50,
+        10,
+        2,
+        FollowExternalLinks::Ignore,
+        0,
+        5,
+    )
+    .with_respect_robots(RespectRobots::No);
 
     let results = crawler
         .crawl(&base_url)
@@ -64,9 +84,19 @@ async fn test_bulk_crawler_uses_sitemap_and_respects_robots() {
     let graph = webfind::engine::crawl_graph::InMemoryCrawlGraph::new();
     let graph = Arc::new(graph);
 
-    let crawler = BulkDomainCrawler::new(ProxyPool::new(), 10, 60, 10, 100, 10, false, 0, 5)
-        .with_respect_robots(true)
-        .with_graph_store(graph.clone());
+    let crawler = BulkDomainCrawler::new(
+        ProxyPool::new(),
+        10,
+        60,
+        10,
+        100,
+        10,
+        FollowExternalLinks::Ignore,
+        0,
+        5,
+    )
+    .with_respect_robots(RespectRobots::Yes)
+    .with_graph_store(graph.clone());
 
     let results = crawler
         .crawl(&base_url)

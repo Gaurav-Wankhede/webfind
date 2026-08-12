@@ -1,9 +1,11 @@
 pub mod api;
+pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod engine;
 pub mod gui;
 pub mod mcp;
+pub mod render;
 pub mod report;
 pub mod schema;
 pub mod storage;
