@@ -435,6 +435,8 @@ where F: Fn(&JsonValue) -> Option<LinkEdge> + Send;
 
 **FR-11 OAuth (updated 2026-08-12):** All acceptance criteria DONE, including the three-user concurrent integration test (`auth::tests::test_three_concurrent_users_respect_scopes_and_audit`). See PRD FR-11.
 
+**FR-11 REMOVED (2026-08-13):** Auth (OAuth 2.1 + PKCE + JWT scope middleware) deleted as a cloud-deployment assumption — WebFind is local-only (no cloud, no multi-tenant). Removed: `src/auth.rs` module, `pub mod auth` in lib.rs, `oauth2`/`jsonwebtoken`/`base64`/`urlencoding` deps, `/oauth` routes + `mcp_auth_middleware` in api.rs, `OAuthConfig`/`resolve_oauth_config`/`WEBFIND_AUTH_MODE`/`WEBFIND_OAUTH_*` in config.rs + `.env.example`, README env table. MCP service now mounted unprotected (local single-tenant).
+
 **FR-8 benchmark (updated 2026-08-12):** `benches/url_id.rs` compares BLAKE3 `url_id` vs a bench-only `sha2` equivalent (dev-dependency only — production stays sha2-free). Measured ~1.9× for the full `url_id` (hex-encoding dominates on short inputs) and 2.2× raw digest. BLAKE3 is strictly faster but below the PRD's ≥3× target. Not a hot path; documented as an honest finding rather than forcing a false pass.
 
 **Performance acceptance (updated 2026-08-12):** All three PRD performance criteria now measured and PASSING at 100K docs via `cargo run --release --example perf_acceptance`:

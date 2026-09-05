@@ -80,15 +80,18 @@ webfind fetch "https://example.com/article" --dynamic --extract-links --extract-
 
 ---
 
-## 3. Research: Crawl + Search Fresh Content
+## 3. Research: Crawl + Persist + Search Fresh Content
 
 ```bash
-webfind research --seed "https://example.com/blog" --query "rust performance" --max-pages 50 --hybrid --limit 10
+webfind research "rust performance" --seed "https://example.com/blog" --max-pages 50 --limit 10 --output /tmp/result.json
 ```
 
-**Output schema (JSON):** Same as `search` but results are from **freshly crawled** pages (not pre-indexed). Always includes full content.
+**Output schema (JSON):** Same as `search` but results are from **freshly
+crawled** pages (not pre-indexed). Always includes full content. Every crawled
+record is **persisted to the Turso graph store** for durable graph-memory
+awareness.
 
-**Key flags:** `--seed URL` (optional — auto-discovers if omitted), `--query`, `--max-pages N`, `--delay 1000`, `--hybrid`, `--limit N`, `--include-graph`, `--include-content`, `--follow-external`, `--topics "rust,performance"`, `--seeds "url1,url2"`
+**Key flags:** `--seed URL` (optional — auto-discovers from curated catalog if omitted), `--query`, `--max-pages N`, `--delay 1000`, `--hybrid`, `--limit N`, `--include-graph`, `--include-content` (default true), `--follow-external`, `--topics "rust,performance"`, `--seeds "url1,url2"`, `--dynamic` (CDP Chromium), `--deep` (no timeout/backoff + stealth/scroll), `--graph-store turso|memory`, `--turso-path /path/db`, `--output /path/result.json`
 
 ---
 
@@ -129,21 +132,22 @@ Index: /path/to/webfind.db
 |----------|---------|-------------|
 | `WEBFIND_TURSO_PATH` | `./webfind.db` | Embedded database path |
 | `WEBFIND_GRAPH_STORE` | `turso` | `turso` or `memory` |
-| `WEBFIND_RATE_LIMIT` | `60` | Requests/second (API/MCP) |
+| `WEBFIND_RATE_LIMIT` | `60` | Requests/second (HTTP API) |
 | `WEBFIND_CORS_ORIGINS` | `*` | Comma-separated allowed origins |
-| `WEBFIND_MCP_ALLOWED_HOSTS` | `localhost` | MCP host allowlist |
 | `WEBFIND_DATA_DIR` | `cwd` | Data directory |
 | `WEBFIND_CONFIG` | `./webfind.toml` | Config file path |
 
 ---
 
-## MCP Tools (for agent hosts)
+## CLI Commands (pure CLI, no MCP)
 
-| Tool | Description |
-|------|-------------|
-| `webfind_search` | Search pre-indexed content |
-| `webfind_research` | Crawl + search fresh |
-| `webfind_fetch` | Extract single URL |
-| `webfind_graph` | Traverse link graph |
+| Command | Description |
+|---------|-------------|
+| `webfind research "q" --output /tmp/r.json` | Crawl + persist + search fresh (single call) |
+| `webfind search "q"` | Search pre-indexed graph |
+| `webfind fetch URL` | Extract single URL |
+| `webfind crawl --seed URL` | Bulk crawl + persist |
+| `webfind graph URL` | Traverse persisted link graph |
 
-**Transport:** `webfind serve --transport stdio` (MCP) or `--transport http --port 4747` (HTTP+MCP)
+Agents call these via a harness / system prompt. Use `--output PATH` to write the
+JSON result to a file and read it with a file-read tool — no Python/shell parsing.
