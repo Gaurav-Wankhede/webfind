@@ -27,14 +27,10 @@ pub struct WebfindConfig {
     pub graph_store: Option<String>,
     pub turso: Option<TursoConfig>,
     pub rate_limit: Option<u32>,
-    /// Maximum request body size in bytes (default: 1MB for API, 256KB for MCP)
+    /// Maximum request body size in bytes (default: 1MB)
     pub body_limit: Option<usize>,
     /// Comma-separated list of allowed CORS origins (default: none — must be explicitly configured)
     pub cors_origins: Option<String>,
-    /// Comma-separated list of allowed MCP hosts (default: localhost)
-    pub mcp_allowed_hosts: Option<String>,
-    /// OAuth 2.1 configuration (FR-11)
-    pub oauth: Option<OAuthConfig>,
     /// Storage budget / retention tuning for limited-disk deployments.
     pub storage: Option<StorageConfig>,
 }
@@ -70,7 +66,12 @@ pub fn resolve_max_full_content_pages(config: &WebfindConfig) -> Option<u64> {
     std::env::var("WEBFIND_STORAGE_MAX_FULL_CONTENT")
         .ok()
         .and_then(|s| s.trim().parse().ok())
-        .or_else(|| config.storage.as_ref().and_then(|s| s.max_full_content_pages))
+        .or_else(|| {
+            config
+                .storage
+                .as_ref()
+                .and_then(|s| s.max_full_content_pages)
+        })
 }
 
 /// Parse a human-friendly byte size (e.g. "500MB", "2GB", "1500KB", "1048576").
@@ -87,30 +88,10 @@ fn parse_bytes(s: &str) -> Option<u64> {
     } else {
         (s.as_str(), 1)
     };
-    num.trim().parse::<f64>().ok().map(|v| (v * mult as f64) as u64)
-}
-
-#[derive(Debug, Default, Deserialize, Clone)]
-pub struct OAuthConfig {
-    /// Enable OAuth 2.1 + PKCE for MCP (default: off for backwards compatibility)
-    pub enabled: Option<bool>,
-    /// OAuth issuer URL (e.g., https://auth.example.com)
-    pub issuer: Option<String>,
-    /// Client ID for this WebFind instance
-    pub client_id: Option<String>,
-    /// Client secret (for confidential clients)
-    pub client_secret: Option<String>,
-    /// Redirect URI for OAuth callback
-    pub redirect_uri: Option<String>,
-    /// Scopes to request (comma-separated)
-    pub scopes: Option<String>,
-    /// JWKS URI for token validation (defaults to issuer + /.well-known/jwks.json)
-    pub jwks_uri: Option<String>,
-    /// Token audience (for resource server validation)
-    pub audience: Option<String>,
-    /// Optional path to append FR-11 audit-log entries (JSONL). When unset, audit
-    /// entries are kept in memory only (bounded ring buffer).
-    pub audit_log_path: Option<std::path::PathBuf>,
+    num.trim()
+        .parse::<f64>()
+        .ok()
+        .map(|v| (v * mult as f64) as u64)
 }
 
 #[derive(Debug, Default, Deserialize, Clone)]
@@ -197,13 +178,13 @@ pub fn resolve_rate_limit(config: &WebfindConfig, cli: Option<u32>) -> Option<No
         .and_then(NonZeroU32::new)
 }
 
-/// Resolve request body limit from env → config → default (1MB for API, 256KB for MCP).
-pub fn resolve_body_limit(config: &WebfindConfig, for_mcp: bool) -> usize {
+/// Resolve request body limit from env → config → default (1MB for API).
+pub fn resolve_body_limit(config: &WebfindConfig) -> usize {
     std::env::var("WEBFIND_BODY_LIMIT")
         .ok()
         .and_then(|s| s.parse().ok())
-        .or_else(|| config.body_limit)
-        .unwrap_or_else(|| if for_mcp { 256 * 1024 } else { 1024 * 1024 })
+        .or(config.body_limit)
+        .unwrap_or(1024 * 1024)
 }
 
 /// Resolve CORS origins from env → config → default (empty = restrictive).
@@ -218,56 +199,6 @@ pub fn resolve_cors_origins(config: &WebfindConfig) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// Resolve MCP allowed hosts from env → config → default (localhost).
-pub fn resolve_mcp_allowed_hosts(config: &WebfindConfig) -> Vec<String> {
-    std::env::var("WEBFIND_MCP_ALLOWED_HOSTS")
-        .ok()
-        .or_else(|| config.mcp_allowed_hosts.clone())
-        .map(|s| {
-            s.split(',')
-                .map(|h| h.trim().to_string())
-                .filter(|h| !h.is_empty())
-                .collect()
-        })
-        .unwrap_or_else(|| vec!["localhost".to_string()])
-}
-
-/// Resolve OAuth configuration from env → config → defaults.
-pub fn resolve_oauth_config(config: &WebfindConfig) -> OAuthConfig {
-    let mut oauth = config.oauth.clone().unwrap_or_default();
-
-    // Env vars take precedence
-    if let Ok(v) = std::env::var("WEBFIND_AUTH_MODE") {
-        oauth.enabled = Some(v == "oauth2.1");
-    }
-    if let Ok(v) = std::env::var("WEBFIND_OAUTH_ISSUER") {
-        oauth.issuer = Some(v);
-    }
-    if let Ok(v) = std::env::var("WEBFIND_OAUTH_CLIENT_ID") {
-        oauth.client_id = Some(v);
-    }
-    if let Ok(v) = std::env::var("WEBFIND_OAUTH_CLIENT_SECRET") {
-        oauth.client_secret = Some(v);
-    }
-    if let Ok(v) = std::env::var("WEBFIND_OAUTH_REDIRECT_URI") {
-        oauth.redirect_uri = Some(v);
-    }
-    if let Ok(v) = std::env::var("WEBFIND_OAUTH_SCOPES") {
-        oauth.scopes = Some(v);
-    }
-    if let Ok(v) = std::env::var("WEBFIND_OAUTH_JWKS_URI") {
-        oauth.jwks_uri = Some(v);
-    }
-    if let Ok(v) = std::env::var("WEBFIND_OAUTH_AUDIENCE") {
-        oauth.audience = Some(v);
-    }
-    if let Ok(v) = std::env::var("WEBFIND_OAUTH_AUDIT_LOG") {
-        oauth.audit_log_path = Some(std::path::PathBuf::from(v));
-    }
-
-    oauth
 }
 
 #[cfg(test)]
