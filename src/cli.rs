@@ -6,7 +6,7 @@ use crate::storage::cache_store::ReCrawlPolicy;
 #[derive(Parser)]
 #[command(
     name = "webfind",
-    about = "Self-hosted native search engine for AI agents — CLI + MCP, zero cost",
+    about = "Self-hosted native search engine for AI agents — pure CLI, zero cost",
     version,
     next_display_order = None,
     subcommand_required = false
@@ -67,6 +67,11 @@ pub enum Commands {
         #[arg(long, default_value = "false")]
         hybrid: bool,
 
+        /// Merge live search-engine results (DuckDuckGo, Bing) with the index
+        /// via RRF. Live-only results carry title/snippet but no stored content.
+        #[arg(long, default_value = "false")]
+        live: bool,
+
         /// Graph store to load PageRank from for ranking.
         #[arg(long, value_enum, env = "WEBFIND_GRAPH_STORE")]
         graph_store: Option<GraphStoreArg>,
@@ -112,9 +117,26 @@ pub enum Commands {
 
     /// Crawl and index web pages
     Crawl {
-        /// Seed URL to start crawling from
+        /// Seed URL to start crawling from. Optional when --daemon is used
+        /// (the curated seed catalog supplies the sources instead).
         #[arg(long)]
-        seed: String,
+        seed: Option<String>,
+
+        /// Run as a background curation daemon over the curated seed catalog.
+        #[arg(long, default_value = "false")]
+        daemon: bool,
+
+        /// Domains to curate (comma-separated slugs). Default: all curated.
+        #[arg(long)]
+        domains: Option<String>,
+
+        /// Max pages to fetch per source per daemon sweep.
+        #[arg(long, default_value = "50")]
+        daemon_pages: u32,
+
+        /// Seconds to pause between daemon catalog sweeps.
+        #[arg(long, default_value = "3600")]
+        daemon_interval: u64,
 
         /// Crawl depth
         #[arg(short, long, default_value = "2")]
@@ -217,6 +239,11 @@ pub enum Commands {
         #[arg(long, default_value = "5")]
         max_depth: u32,
 
+        /// Auto-map crawl depth from the site's own map (sitemap/llms.txt)
+        /// and keep link-following inside the site's declared content surface.
+        #[arg(long, default_value = "true")]
+        auto_depth: bool,
+
         /// Query topics for content-aware link prioritization (comma-separated).
         #[arg(long)]
         topics: Option<String>,
@@ -307,8 +334,12 @@ pub enum Commands {
         #[arg(long, default_value = "false")]
         include_graph: bool,
 
-        /// Include full page content in each result.
-        #[arg(long, default_value = "false")]
+        /// Include full page content in each result. Enabled by default: this
+        /// is the primary web-research path for agents, and they need the
+        /// scraped body text (the MCP/CLI previously defaulted this off, so
+        /// research returned content: null and agents fell back to other
+        /// engines). Pass --include-content=false for tiny responses.
+        #[arg(long, default_value = "true")]
         include_content: bool,
 
         /// Follow external (cross-domain) links during crawl.
@@ -323,6 +354,11 @@ pub enum Commands {
         #[arg(long, default_value = "5")]
         max_depth: u32,
 
+        /// Auto-map crawl depth from the site's own map (sitemap/llms.txt)
+        /// and keep link-following inside the site's declared content surface.
+        #[arg(long, default_value = "true")]
+        auto_depth: bool,
+
         /// Query topics for content-aware link prioritization (comma-separated).
         #[arg(long)]
         topics: Option<String>,
@@ -330,21 +366,40 @@ pub enum Commands {
         /// Additional seed URLs for multi-seed crawling (comma-separated).
         #[arg(long)]
         seeds: Option<String>,
+
+        /// Render JS-heavy / bot-protected pages in headless Chromium (CDP)
+        /// when a plain HTTP fetch yields no meaningful content. Enables
+        /// stealth mode so bot-protected sites serve real content.
+        #[arg(long, default_value = "false")]
+        dynamic: bool,
+
+        /// Deep research mode: no crawl deadline and no backoff caps, and use
+        /// the full CDP browser (stealth + infinite-scroll) to capture
+        /// progressively rendered pages. Intended for long-running, thorough
+        /// investigations; may run for many minutes.
+        #[arg(long, default_value = "false")]
+        deep: bool,
+
+        /// Write the JSON result to this file instead of stdout. Agents read
+        /// the file with their file-read tool — no shell/Python parsing needed.
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+
+        /// Graph store backend to persist crawled records into (default: turso).
+        #[arg(long, value_enum, env = "WEBFIND_GRAPH_STORE")]
+        graph_store: Option<GraphStoreArg>,
+
+        /// Path to the Turso/libSQL database file (when --graph-store turso).
+        /// Every crawled record is persisted here for graph-memory awareness.
+        #[arg(long)]
+        turso_path: Option<String>,
     },
 
-    /// Start MCP server mode
+    /// Start the HTTP API + Web UI server (pure CLI / HTTP, no MCP)
     Serve {
-        /// Transport mode
-        #[arg(long, value_enum, default_value_t = ModeArg::Mcp)]
-        mode: ModeArg,
-
         /// Port for HTTP transport (default: 4747)
         #[arg(long, default_value = "4747")]
         port: u16,
-
-        /// Transport: stdio or http
-        #[arg(long, value_enum, default_value_t = TransportArg::Stdio)]
-        transport: TransportArg,
 
         /// Graph store to load PageRank from for ranking.
         #[arg(long, value_enum, env = "WEBFIND_GRAPH_STORE")]
@@ -399,6 +454,9 @@ pub enum IndexAction {
 
     /// Optimize the index
     Optimize,
+
+    /// List the curated seed catalog (non-Wikipedia, official sources per domain)
+    Domains,
 }
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -489,15 +547,4 @@ pub enum DirectionArg {
     Inbound,
     Outbound,
     Both,
-}
-
-#[derive(ValueEnum, Clone, Debug)]
-pub enum ModeArg {
-    Mcp,
-}
-
-#[derive(ValueEnum, Clone, Debug)]
-pub enum TransportArg {
-    Stdio,
-    Http,
 }

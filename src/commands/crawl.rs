@@ -4,6 +4,7 @@ use std::time::Instant;
 use anyhow::Context;
 
 use webfind::cli::{DirectionArg, OutputArg};
+use webfind::engine::bg_worker::BackgroundWorker;
 use webfind::engine::bulk_crawler::{BulkDomainCrawler, FollowExternalLinks, RespectRobots};
 use webfind::engine::crawl_graph::CrawlGraphStore;
 use webfind::engine::crawler::Crawler;
@@ -14,7 +15,11 @@ use webfind::engine::search_engine::{InMemorySearchEngine, SearchEngine};
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     cfg: &webfind::config::WebfindConfig,
-    seed: String,
+    seed: Option<String>,
+    daemon: bool,
+    domains: Option<String>,
+    daemon_pages: u32,
+    daemon_interval: u64,
     delay: u32,
     max_pages: u32,
     cache_dir: String,
@@ -39,9 +44,27 @@ pub async fn run(
     follow_external: bool,
     min_depth: u32,
     max_depth: u32,
+    auto_depth: bool,
     topics: Option<String>,
 ) -> anyhow::Result<()> {
     use webfind::engine::util::split_comma;
+
+    // Background curation daemon mode: continuously crawl the curated seed
+    // catalog (official, non-Wikipedia sources) into the persistent graph store.
+    if daemon {
+        return run_daemon(
+            cfg,
+            graph_store,
+            turso_path,
+            domains,
+            daemon_pages,
+            daemon_interval,
+        )
+        .await;
+    }
+
+    // Non-daemon mode requires a seed.
+    let seed = seed.context("a --seed URL is required unless running --daemon")?;
 
     let graph_store = webfind::config::resolve_graph_store(cfg, graph_store);
     let path = crate::commands::index_path();
@@ -104,6 +127,7 @@ pub async fn run(
         } else {
             RespectRobots::No
         })
+        .with_auto_depth(auto_depth)
         .with_graph_store(graph)
         .with_topics(
             topics
@@ -227,4 +251,52 @@ pub async fn run(
             Err(e)
         }
     }
+}
+
+/// Run the background curation daemon: continuously crawl the curated seed
+/// catalog (official, non-Wikipedia sources) into the persistent graph store,
+/// honoring each source's recrawl cadence and the configured storage budget.
+async fn run_daemon(
+    cfg: &webfind::config::WebfindConfig,
+    graph_store_arg: Option<webfind::cli::GraphStoreArg>,
+    turso_path: Option<String>,
+    domains: Option<String>,
+    daemon_pages: u32,
+    daemon_interval: u64,
+) -> anyhow::Result<()> {
+    use webfind::engine::curation_daemon::{CurationDaemon, DaemonConfig};
+
+    println!("{}", webfind::engine::seed_catalog::catalog_summary());
+
+    let kind = webfind::config::resolve_graph_store(cfg, graph_store_arg);
+    let turso_path = webfind::config::resolve_turso(cfg, turso_path.as_deref());
+    let graph: Arc<dyn CrawlGraphStore> = crate::commands::build_graph_store(
+        &kind,
+        &turso_path,
+        cfg.turso.as_ref().and_then(|t| t.encryption_key.as_deref()),
+    )
+    .await?;
+
+    // Background worker persists crawled content + embeddings into the graph.
+    let worker = Arc::new(BackgroundWorker::new(graph.clone(), None, 64));
+
+    let only_domains: Vec<String> = domains
+        .as_ref()
+        .map(|d| {
+            d.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let config = DaemonConfig {
+        delay_ms: 1000,
+        max_pages_per_source: daemon_pages.max(1) as usize,
+        sweep_interval_secs: daemon_interval.max(60),
+        only_domains,
+    };
+
+    let daemon = CurationDaemon::new(config, graph, worker, None);
+    daemon.run_forever().await
 }

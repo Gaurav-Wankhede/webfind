@@ -393,9 +393,12 @@ async fn run_research_job(
         follow_external: true,
         min_depth: 0,
         max_depth: 5,
+        auto_depth: true,
         topics: None,
         proxies: None,
         domain_filter: categories.clone(),
+        dynamic: false,
+        deep: false,
     };
 
     let tx_progress = tx.clone();
@@ -515,44 +518,6 @@ async fn rank_contents(
     attach_content(&mut results, &contents);
 
     Ok(results)
-}
-
-/// Fallback helper: convert a `StructuredContent` blob into a `SearchResult` when
-/// the in-memory index returns nothing usable.
-#[allow(dead_code)]
-fn content_to_result(rank: u32, content: &StructuredContent) -> SearchResult {
-    let domain = url::Url::parse(&content.url)
-        .map(|u| u.host_str().unwrap_or("").to_string())
-        .unwrap_or_default();
-
-    SearchResult {
-        rank,
-        url: content.url.clone(),
-        title: content.title.clone(),
-        snippet: content.excerpt.clone(),
-        domain,
-        published_at: content.published_at,
-        modified_at: content.modified_at,
-        crawled_at: content.fetched_at,
-        author: content.author.clone(),
-        site_name: content.site_name.clone(),
-        score: 0.0,
-        scores: ScoreBreakdown {
-            bm25: 0.0,
-            vector: None,
-            graph: None,
-            freshness: None,
-            quality: None,
-            final_score: 0.0,
-        },
-        content: Some(content.to_content_block()),
-        keywords: None,
-        metrics: None,
-        favicon: content.favicon.clone(),
-        thumbnail: None,
-        language: content.language.clone(),
-        content_type: content.content_type.clone(),
-    }
 }
 
 /// Filter search results by content type label.

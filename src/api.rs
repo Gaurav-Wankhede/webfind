@@ -15,14 +15,11 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio::sync::Semaphore;
-use tokio_util::sync::CancellationToken;
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 
-use crate::auth::{OAuthState, oauth_routes};
-use crate::config::resolve_oauth_config;
 use crate::engine::crawl_graph::CrawlGraphStore;
 use crate::engine::embedder::{Embedder, FastembedEmbedder};
 use crate::engine::fetcher::Fetcher;
@@ -33,14 +30,10 @@ use crate::engine::pagerank_cache::PageRankCache;
 use crate::engine::proxy_pool::ProxyPool;
 use crate::engine::ranker::Ranker;
 use crate::engine::search_engine::SearchEngine;
-use crate::mcp::WebfindMcpServer;
 use crate::report::format_response;
 use crate::schema::content::StructuredContent;
 use crate::schema::request::{ContentType, OutputFormat, SearchDepth, SearchRequest};
 use crate::schema::response::{ScoreBreakdown, SearchResponse, SearchResult};
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
-};
 
 /// Shared application state for the HTTP API.
 pub struct ApiState {
@@ -156,6 +149,10 @@ pub struct ResearchParams {
     /// Maximum discovery depth — stop following links beyond this hop count (default 5).
     #[serde(default = "default_max_depth")]
     pub max_depth: u32,
+    /// Auto-map crawl depth from the site's own map (sitemap/llms.txt) and
+    /// bound link-following to the site's declared content surface (default true).
+    #[serde(default = "default_auto_depth")]
+    pub auto_depth: bool,
     /// Query topics for content-aware link prioritization (comma-separated).
     #[serde(default)]
     pub topics: Option<String>,
@@ -182,6 +179,10 @@ fn default_min_depth() -> u32 {
 
 fn default_max_depth() -> u32 {
     5
+}
+
+fn default_auto_depth() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]
@@ -582,9 +583,12 @@ pub async fn research(
         follow_external: params.follow_external,
         min_depth: params.min_depth,
         max_depth: params.max_depth,
+        auto_depth: params.auto_depth,
         topics: params.topics.clone(),
         proxies: params.proxies.clone(),
         domain_filter: Vec::new(),
+        dynamic: false,
+        deep: false,
     };
 
     let (contents, research_graph) = match crate::engine::research_service::execute_research(
@@ -805,26 +809,8 @@ pub fn app(
     rate_limit: Option<NonZeroU32>,
     config: &crate::config::WebfindConfig,
 ) -> Router {
-    let mcp_state = state.clone();
-    let mcp = StreamableHttpService::new(
-        move || {
-            Ok::<_, std::io::Error>(WebfindMcpServer::new(
-                mcp_state.indexer.clone(),
-                mcp_state.graph_store.clone(),
-                mcp_state.audit_store.clone(),
-                mcp_state.data_dir.clone(),
-            ))
-        },
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default()
-            .with_stateful_mode(false)
-            .with_json_response(true)
-            .with_allowed_hosts(crate::config::resolve_mcp_allowed_hosts(config))
-            .with_cancellation_token(CancellationToken::new()),
-    );
-
     // Body size limit: configurable via WEBFIND_BODY_LIMIT (default 1MB for API)
-    let body_limit = crate::config::resolve_body_limit(config, false);
+    let body_limit = crate::config::resolve_body_limit(config);
 
     // CORS: configurable via WEBFIND_CORS_ORIGINS (default: restrictive — empty = no CORS)
     let cors_origins = crate::config::resolve_cors_origins(config);
@@ -833,63 +819,24 @@ pub fn app(
         CorsLayer::new()
             .allow_origin(AllowOrigin::predicate(|_origin, _header| false))
             .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-            .allow_headers([
-                axum::http::header::CONTENT_TYPE,
-                axum::http::header::AUTHORIZATION,
-            ])
+            .allow_headers([axum::http::header::CONTENT_TYPE])
     } else {
         let origins: Vec<HeaderValue> =
             cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(origins))
             .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-            .allow_headers([
-                axum::http::header::CONTENT_TYPE,
-                axum::http::header::AUTHORIZATION,
-            ])
+            .allow_headers([axum::http::header::CONTENT_TYPE])
             .allow_credentials(true)
     };
 
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/health", get(health))
         .route("/search", get(search))
         .route("/research", get(research))
         .with_state(state.clone())
         .layer(RequestBodyLimitLayer::new(body_limit))
         .layer(cors_layer);
-
-    // Add OAuth routes if enabled (FR-11). When enabled, the `/mcp` service is
-    // wrapped in a dedicated sub-router that enforces token validation +
-    // per-tool scope + audit logging — `/health`, `/search`, `/research` remain
-    // unauthenticated.
-    let oauth_config = resolve_oauth_config(config);
-    let mut router = if oauth_config.enabled.unwrap_or(false) {
-        match OAuthState::new(oauth_config) {
-            Ok(oauth_state) => {
-                let oauth_state = Arc::new(oauth_state);
-                // OAuth metadata endpoints (authorize, token, jwks).
-                let router = router.nest("/oauth", oauth_routes(oauth_state.clone()));
-                // MCP service protected by token validation + scope + audit.
-                let mcp_router = Router::new().nest_service("/mcp", mcp).route_layer(
-                    axum::middleware::from_fn_with_state(
-                        oauth_state,
-                        crate::auth::mcp_auth_middleware,
-                    ),
-                );
-                router.merge(mcp_router)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "OAuth enabled but configuration invalid ({}); MCP unprotected",
-                    e
-                );
-                router.nest_service("/mcp", mcp)
-            }
-        }
-    } else {
-        // Auth disabled: MCP unprotected (single-tenant default).
-        router.nest_service("/mcp", mcp)
-    };
 
     // Rate limiting enabled by default (60 req/s, burst 120) to protect the API.
     let default_rate_limit = NonZeroU32::new(60).unwrap();

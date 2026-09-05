@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context;
@@ -8,20 +7,242 @@ use chrono::Utc;
 use webfind::cli::GraphStoreArg;
 use webfind::engine::crawl_graph::CrawlGraphStore;
 use webfind::engine::embedder::{DummyEmbedder, Embedder, FastembedEmbedder};
-use webfind::engine::graph_summary::build_graph_summary;
-use webfind::engine::indexer::build_metadata;
-use webfind::engine::ranker::Ranker;
-use webfind::engine::search_engine::{InMemorySearchEngine, SearchEngine};
+use webfind::engine::web_index::{
+    EngineOptions, FusedHit, Hit, LiveIndex, canonical_url, positional_relevance,
+    reciprocal_rank_fusion,
+};
 use webfind::report::format_response;
-use webfind::schema::request::{OutputFormat, SearchDepth, SearchRequest};
+use webfind::schema::request::{OutputFormat, SearchDepth};
 use webfind::schema::response::{
     ContentBlock, IndexFreshness, ScoreBreakdown, SearchMetadata, SearchResponse, SearchResult,
 };
-use webfind::storage::turso_store::TursoStore;
+use webfind::storage::turso_store::{TursoSearchHit, TursoStore};
+
+/// Convert a store hit into a renderable result.
+fn store_hit_to_result(
+    hit: &TursoSearchHit,
+    rank: u32,
+    score: f64,
+    include_content: bool,
+) -> SearchResult {
+    let domain = url::Url::parse(&hit.url)
+        .map(|u| u.host_str().unwrap_or("").to_string())
+        .unwrap_or_default();
+    let has_vec = hit.signals.iter().any(|s| s == "vector");
+    let has_graph = hit.signals.iter().any(|s| s == "graph");
+    SearchResult {
+        rank,
+        url: hit.url.clone(),
+        title: hit.title.clone(),
+        snippet: hit.excerpt.clone(),
+        domain,
+        published_at: None,
+        modified_at: None,
+        crawled_at: Utc::now(),
+        author: None,
+        site_name: None,
+        score,
+        scores: ScoreBreakdown {
+            bm25: 0.0,
+            vector: has_vec.then_some(score),
+            graph: has_graph.then_some(score),
+            freshness: None,
+            quality: None,
+            final_score: score,
+        },
+        content: include_content.then(|| ContentBlock {
+            text: hit.excerpt.clone(),
+            excerpt: hit.excerpt.clone(),
+            word_count: 0,
+            reading_time_seconds: 0,
+            html: None,
+            markdown: None,
+        }),
+        keywords: None,
+        metrics: None,
+        favicon: None,
+        thumbnail: None,
+        language: "en".to_string(),
+        content_type: "text/html".to_string(),
+    }
+}
+
+/// Convert a live-only fused hit into a renderable result.
+///
+/// Live results carry title/snippet from the engines but no stored content, so
+/// `content` is the snippet when requested.
+fn live_fused_to_result(fused: &FusedHit, rank: u32, include_content: bool) -> SearchResult {
+    let domain = url::Url::parse(&fused.url)
+        .map(|u| u.host_str().unwrap_or("").to_string())
+        .unwrap_or_default();
+    SearchResult {
+        rank,
+        url: fused.url.clone(),
+        title: fused.title.clone(),
+        snippet: fused.snippet.clone(),
+        domain,
+        published_at: fused.published_at,
+        modified_at: None,
+        crawled_at: Utc::now(),
+        author: None,
+        site_name: None,
+        score: fused.score,
+        scores: ScoreBreakdown {
+            bm25: 0.0,
+            vector: None,
+            graph: None,
+            freshness: None,
+            quality: None,
+            final_score: fused.score,
+        },
+        content: include_content.then(|| ContentBlock {
+            text: fused.snippet.clone(),
+            excerpt: fused.snippet.clone(),
+            word_count: 0,
+            reading_time_seconds: 0,
+            html: None,
+            markdown: None,
+        }),
+        keywords: None,
+        metrics: None,
+        favicon: None,
+        thumbnail: None,
+        language: "en".to_string(),
+        content_type: "text/html".to_string(),
+    }
+}
+
+/// Fuse store hits with live fused hits into a single ranked list.
+///
+/// The store list and the live fused list are each treated as one ranked list;
+/// [`reciprocal_rank_fusion`] scores every URL by `sum(weight / (k + rank))`
+/// across both, so a URL both lists rank highly wins over a URL only one list
+/// ranks first. The live list carries a 2x weight: `--live` explicitly asks
+/// for fresh results, and the store's hybrid ranking can surface stale
+/// pagerank-driven pages (BM25=0) that would otherwise tie with relevant live
+/// hits. Each fused entry carries the matching store hit when the URL already
+/// exists in the store, so callers can enrich it with stored content.
+fn fuse_index_and_live<'a>(
+    store_hits: &'a [TursoSearchHit],
+    live_fused: &[FusedHit],
+) -> Vec<(FusedHit, Option<&'a TursoSearchHit>)> {
+    let index_list: Vec<Hit> = store_hits
+        .iter()
+        .enumerate()
+        .map(|(i, h)| Hit {
+            url: h.url.clone(),
+            title: h.title.clone(),
+            snippet: h.excerpt.clone(),
+            published_at: None,
+            relevance_score: positional_relevance(i, store_hits.len()),
+            engine: "index",
+        })
+        .collect();
+    let live_list: Vec<Hit> = live_fused
+        .iter()
+        .enumerate()
+        .map(|(i, f)| Hit {
+            url: f.url.clone(),
+            title: f.title.clone(),
+            snippet: f.snippet.clone(),
+            published_at: f.published_at,
+            relevance_score: positional_relevance(i, live_fused.len()),
+            engine: "live",
+        })
+        .collect();
+
+    let fused = reciprocal_rank_fusion(&[(&index_list, 1.0), (&live_list, LIVE_FUSION_WEIGHT)], 60);
+
+    let store_by_url: HashMap<String, &TursoSearchHit> = store_hits
+        .iter()
+        .map(|h| (canonical_url(&h.url), h))
+        .collect();
+
+    fused
+        .into_iter()
+        .map(|f| {
+            let store_hit = store_by_url.get(&canonical_url(&f.url)).copied();
+            (f, store_hit)
+        })
+        .collect()
+}
+
+/// Weight applied to the live list in the store-vs-live fusion.
+///
+/// `--live` explicitly asks for fresh results; the store's hybrid ranking can
+/// surface stale pagerank-driven pages (BM25=0) that would otherwise tie with
+/// relevant live hits. 2x keeps the hierarchy shared > live-only > store-only
+/// while still letting a URL present in both lists win decisively.
+const LIVE_FUSION_WEIGHT: f64 = 2.0;
+
+/// Merge store hits with live search-engine results via RRF.
+///
+/// URLs already in the store keep their stored content and signal breakdown;
+/// live-only URLs carry title/snippet from the engines. Appends `"live"` to
+/// `signals` when live results contributed.
+async fn merge_live_results(
+    query: &str,
+    store_hits: &[TursoSearchHit],
+    limit: u32,
+    include_content: bool,
+    signals: &mut Vec<String>,
+) -> anyhow::Result<Vec<SearchResult>> {
+    let live_index = LiveIndex::new().context("build live search index")?;
+    let opts = EngineOptions {
+        max_results: limit.max(1) as usize,
+        ..EngineOptions::default()
+    };
+    let outcome = live_index.search(query, &opts).await;
+    if outcome.engines_failed > 0 {
+        tracing::warn!(
+            "live search: {}/{} engines failed",
+            outcome.engines_failed,
+            outcome.total_engines
+        );
+        for report in &outcome.reports {
+            if let Some(error) = &report.error {
+                tracing::debug!("engine {} failed: {error:?}", report.engine);
+            }
+        }
+    }
+    if outcome.fused.is_empty() {
+        return Ok(store_hits
+            .iter()
+            .enumerate()
+            .map(|(i, h)| store_hit_to_result(h, (i + 1) as u32, h.score, include_content))
+            .collect());
+    }
+    tracing::debug!(
+        "live fused: {}",
+        outcome
+            .fused
+            .iter()
+            .map(|f| format!("{}={:.3}", f.url, f.score))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let fused = fuse_index_and_live(store_hits, &outcome.fused[..limit.max(1) as usize]);
+    let mut results = Vec::with_capacity(fused.len());
+    for (i, (f, store_hit)) in fused.iter().enumerate() {
+        let rank = (i + 1) as u32;
+        if let Some(hit) = store_hit {
+            results.push(store_hit_to_result(hit, rank, f.score, include_content));
+        } else {
+            results.push(live_fused_to_result(f, rank, include_content));
+        }
+    }
+    results.truncate(limit.max(1) as usize);
+
+    if !signals.iter().any(|s| s == "live") {
+        signals.push("live".to_string());
+    }
+    Ok(results)
+}
 
 /// Search the embedded Turso graph store with hybrid (BM25 + vector + graph)
-/// RRF fusion. Used when `--graph-store turso` is selected; requires no
-/// `index_data` directory.
+/// RRF fusion, optionally merged with live search-engine results. Used when
+/// `--graph-store turso` is selected; requires no `index_data` directory.
 #[allow(clippy::too_many_arguments)]
 async fn turso_search(
     cfg: &webfind::config::WebfindConfig,
@@ -32,6 +253,7 @@ async fn turso_search(
     include_content: bool,
     turso_path: Option<String>,
     hybrid: bool,
+    live: bool,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
     let turso_path = webfind::config::resolve_turso(cfg, turso_path.as_deref());
@@ -40,10 +262,15 @@ async fn turso_search(
         .with_context(|| format!("open Turso graph store at `{turso_path}`"))?;
     // Ensure the derived indexes are current so search returns full signals.
     store.rebuild_fts().await.context("rebuild FTS index")?;
-    store
-        .compute_pagerank(20, 0.85)
-        .await
-        .context("compute PageRank")?;
+    // PageRank is expensive on large graphs; recompute only when the graph
+    // changed since the last computation (the `pagerank` table records the
+    // graph version it was computed from).
+    if store.pagerank_version().await != store.graph_version().await {
+        store
+            .compute_pagerank(20, 0.85)
+            .await
+            .context("compute PageRank")?;
+    }
 
     // Embed the query for the vector signal (fall back to the deterministic
     // dummy embedder when the ONNX model is unavailable).
@@ -62,15 +289,22 @@ async fn turso_search(
         None
     };
 
+    // Fetch extra store hits when merging with live results so the fusion has
+    // material beyond the final limit.
+    let store_limit = if live {
+        (limit.max(1) * 2) as usize
+    } else {
+        limit.max(1) as usize
+    };
     let hits = store
-        .search(query, embedding.as_deref(), limit.max(1) as usize)
+        .search(query, embedding.as_deref(), store_limit)
         .await
         .context("hybrid search in Turso store")?;
 
     let mut signals: Vec<String> = Vec::new();
     for h in &hits {
         for s in &h.signals {
-            if !signals.contains(s) {
+            if !signals.iter().any(|known| known == s) {
                 signals.push(s.clone());
             }
         }
@@ -79,52 +313,14 @@ async fn turso_search(
         signals.push("bm25".to_string());
     }
 
-    let results: Vec<SearchResult> = hits
-        .into_iter()
-        .enumerate()
-        .map(|(i, h)| {
-            let domain = url::Url::parse(&h.url)
-                .map(|u| u.host_str().unwrap_or("").to_string())
-                .unwrap_or_default();
-            let has_vec = h.signals.contains(&"vector".to_string());
-            let has_graph = h.signals.contains(&"graph".to_string());
-            SearchResult {
-                rank: (i + 1) as u32,
-                url: h.url.clone(),
-                title: h.title,
-                snippet: h.excerpt.clone(),
-                domain,
-                published_at: None,
-                modified_at: None,
-                crawled_at: Utc::now(),
-                author: None,
-                site_name: None,
-                score: h.score,
-                scores: ScoreBreakdown {
-                    bm25: 0.0,
-                    vector: has_vec.then_some(h.score),
-                    graph: has_graph.then_some(h.score),
-                    freshness: None,
-                    quality: None,
-                    final_score: h.score,
-                },
-                content: include_content.then(|| ContentBlock {
-                    text: h.excerpt.clone(),
-                    excerpt: h.excerpt.clone(),
-                    word_count: 0,
-                    reading_time_seconds: 0,
-                    html: None,
-                    markdown: None,
-                }),
-                keywords: None,
-                metrics: None,
-                favicon: None,
-                thumbnail: None,
-                language: "en".to_string(),
-                content_type: "text/html".to_string(),
-            }
-        })
-        .collect();
+    let results = if live {
+        merge_live_results(query, &hits, limit, include_content, &mut signals).await?
+    } else {
+        hits.iter()
+            .enumerate()
+            .map(|(i, h)| store_hit_to_result(h, (i + 1) as u32, h.score, include_content))
+            .collect()
+    };
 
     let response = SearchResponse {
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -166,139 +362,100 @@ pub async fn run(
     _language: Option<String>,
     _domains: Option<String>,
     include_content: bool,
-    include_graph: bool,
-    include_keywords: bool,
-    include_metrics: bool,
+    _include_graph: bool,
+    _include_keywords: bool,
+    _include_metrics: bool,
     graph_store: Option<GraphStoreArg>,
     turso_path: Option<String>,
     hybrid: bool,
+    live: bool,
 ) -> anyhow::Result<()> {
     let graph_store = webfind::config::resolve_graph_store(cfg, graph_store);
-
-    // Turso-backed hybrid search: search the embedded graph store directly
-    // instead of the Tantivy index. No `index_data` directory is required.
-    if graph_store == GraphStoreArg::Turso {
-        return turso_search(
-            cfg,
-            &query,
-            depth,
-            limit,
-            output,
-            include_content,
-            turso_path,
-            hybrid,
-        )
-        .await;
-    }
-
-    let path = crate::commands::index_path();
-
-    if !path.exists() {
+    if graph_store == GraphStoreArg::Memory {
         eprintln!(
-            "No index found at {}. Run 'webfind crawl' or 'webfind index import' first.",
-            path.display()
+            "note: '--graph-store memory' has no persistent index; searching the Turso store instead."
         );
-        std::process::exit(1);
     }
-
-    let embedder: Option<Arc<dyn Embedder>> = if hybrid {
-        Some(Arc::new(
-            webfind::engine::embedder::FastembedEmbedder::new()
-                .context("load embedding model for hybrid search")?,
-        ))
-    } else {
-        None
-    };
-    let indexer: Arc<dyn SearchEngine + Send + Sync> = Arc::new(
-        embedder
-            .as_ref()
-            .map(|e| InMemorySearchEngine::with_embedder(e.clone()))
-            .unwrap_or_else(InMemorySearchEngine::new),
-    );
-    let ranker = Ranker::new();
-
-    let depth_enum = SearchDepth::from(depth);
-
-    let start = Instant::now();
-    let mut results = indexer.search_bm25(&query, limit as usize).await?;
-    let search_ms = start.elapsed().as_millis() as u64;
-
-    let request = SearchRequest {
-        query: query.clone(),
-        depth: depth_enum.clone(),
+    turso_search(
+        cfg,
+        &query,
+        depth,
         limit,
-        output: OutputFormat::Json,
-        language: None,
-        date_range: None,
-        domains: None,
-        content_type: None,
+        output,
         include_content,
-        include_graph,
-        include_keywords,
-        include_metrics,
+        turso_path,
         hybrid,
-    };
+        live,
+    )
+    .await
+}
 
-    let vector_scores: Option<HashMap<String, f64>> = if hybrid {
-        Some(indexer.search_vector(&query, limit as usize).await?)
-    } else {
-        None
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let data_dir = webfind::config::data_dir();
-    let cache = webfind::engine::pagerank_cache::PageRankCache::new(&data_dir);
-    let turso_path = webfind::config::resolve_turso(cfg, turso_path.as_deref());
-    let graph_store_arc: Arc<dyn webfind::engine::crawl_graph::CrawlGraphStore + Send + Sync> =
-        crate::commands::build_graph_store(
-            &graph_store,
-            &turso_path,
-            cfg.turso.as_ref().and_then(|t| t.encryption_key.as_deref()),
-        )
-        .await?;
-    let graph_scores: Option<HashMap<String, f64>> = Some(
-        cache
-            .get_or_compute(graph_store_arc.as_ref(), 20, 0.85)
-            .await?,
-    );
-    results = ranker.rank(
-        results,
-        &request,
-        graph_scores.as_ref(),
-        vector_scores.as_ref(),
-    );
-
-    let graph_summary = if include_graph {
-        build_graph_summary(graph_store_arc.as_ref(), &results).await
-    } else {
-        None
-    };
-
-    let mut signals = vec!["bm25".to_string()];
-    if hybrid {
-        signals.push("vector".to_string());
+    fn store_hit(url: &str, title: &str) -> TursoSearchHit {
+        TursoSearchHit {
+            url: url.to_string(),
+            title: title.to_string(),
+            excerpt: format!("excerpt for {title}"),
+            score: 1.0,
+            signals: vec!["bm25".to_string()],
+        }
     }
-    if graph_scores.is_some() {
-        signals.push("graph".to_string());
+
+    fn live_fused(url: &str, title: &str, score: f64) -> FusedHit {
+        FusedHit {
+            url: url.to_string(),
+            title: title.to_string(),
+            snippet: format!("snippet for {title}"),
+            published_at: None,
+            score,
+            engine_count: 1,
+            engines: vec!["ddg"],
+        }
     }
-    let total = results.len() as u64;
-    let meta = build_metadata(&*indexer, signals).await?;
 
-    let response = SearchResponse {
-        request_id: uuid::Uuid::new_v4().to_string(),
-        query: query.clone(),
-        depth: depth_enum,
-        total_results: total,
-        returned: results.len() as u32,
-        latency_ms: search_ms,
-        results,
-        suggestions: vec![],
-        related: vec![],
-        graph: graph_summary,
-        metadata: meta,
-    };
+    #[test]
+    fn fusion_ranks_shared_urls_above_single_list_urls() {
+        let store = vec![
+            store_hit("https://example.com/old", "Old page"),
+            store_hit("https://example.com/other", "Other page"),
+        ];
+        let live = vec![
+            live_fused("https://fresh.example/new", "Fresh page", 0.9),
+            live_fused("https://example.com/old", "Old page", 0.8),
+        ];
+        let fused = fuse_index_and_live(&store, &live);
 
-    let formatted = format_response(&response, &OutputFormat::from(output));
-    print!("{}", formatted);
+        // The URL present in both lists outranks URLs present in only one.
+        assert_eq!(fused[0].0.url, "https://example.com/old");
+        assert!(fused[0].1.is_some(), "shared URL enriched with store hit");
+        // The live-only URL (live rank 1) outranks the store-only URL (store rank 2).
+        assert_eq!(fused[1].0.url, "https://fresh.example/new");
+        assert!(fused[1].1.is_none());
+        assert_eq!(fused[2].0.url, "https://example.com/other");
+    }
 
-    Ok(())
+    #[test]
+    fn fusion_keeps_store_content_for_shared_urls() {
+        let store = vec![store_hit("https://example.com/a", "Stored A")];
+        let live = vec![live_fused("https://example.com/a", "Live A", 0.9)];
+        let fused = fuse_index_and_live(&store, &live);
+
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].0.url, "https://example.com/a");
+        assert_eq!(fused[0].1.map(|h| h.title.as_str()), Some("Stored A"));
+    }
+
+    #[test]
+    fn fusion_dedups_tracking_variants_of_same_url() {
+        let store = vec![store_hit("https://example.com/doc?utm_source=x", "Stored")];
+        let live = vec![live_fused("https://example.com/doc", "Live", 0.9)];
+        let fused = fuse_index_and_live(&store, &live);
+
+        assert_eq!(fused.len(), 1, "tracking variants fuse into one result");
+        assert_eq!(fused[0].0.url, "https://example.com/doc?utm_source=x");
+        assert!(fused[0].1.is_some());
+    }
 }

@@ -1,8 +1,5 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
-use anyhow::Context;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use webfind::cli::{Cli, Commands};
@@ -13,20 +10,10 @@ use webfind::cli::{Cli, Commands};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod commands;
-use webfind::engine::bulk_crawler::BulkDomainCrawler;
-use webfind::engine::crawl_graph::{CrawlGraphStore, InMemoryCrawlGraph, TraversalDirection};
-use webfind::engine::crawler::Crawler;
-use webfind::engine::embedder::{Embedder, FastembedEmbedder};
 use webfind::engine::fetcher::Fetcher;
-use webfind::engine::graph_summary::build_graph_summary;
-use webfind::engine::indexer::attach_content;
-use webfind::engine::proxy_pool::{ProxyEndpoint, ProxyPool};
-use webfind::engine::ranker::Ranker;
 use webfind::engine::search_engine::{InMemorySearchEngine, SearchEngine};
-use webfind::report::format_response;
 use webfind::schema::content::StructuredContent;
-use webfind::schema::request::{OutputFormat, SearchDepth, SearchRequest};
-use webfind::schema::response::SearchResponse;
+use webfind::schema::request::OutputFormat;
 
 // Embedded skills reference for AI agents (progressive disclosure)
 const SKILLS_MD: &str = include_str!("../webfind/SKILL.md");
@@ -269,6 +256,7 @@ async fn main() -> anyhow::Result<()> {
             graph_store,
             turso_path,
             hybrid,
+            live,
         } => {
             return commands::search::run(
                 &cfg,
@@ -285,6 +273,7 @@ async fn main() -> anyhow::Result<()> {
                 graph_store,
                 turso_path,
                 hybrid,
+                live,
             )
             .await;
         }
@@ -383,6 +372,10 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Crawl {
             seed,
+            daemon,
+            domains,
+            daemon_pages,
+            daemon_interval,
             depth: _,
             delay,
             max_pages,
@@ -408,11 +401,16 @@ async fn main() -> anyhow::Result<()> {
             follow_external,
             min_depth,
             max_depth,
+            auto_depth,
             topics,
         } => {
             return commands::crawl::run(
                 &cfg,
                 seed,
+                daemon,
+                domains,
+                daemon_pages,
+                daemon_interval,
                 delay,
                 max_pages,
                 cache_dir,
@@ -437,6 +435,7 @@ async fn main() -> anyhow::Result<()> {
                 follow_external,
                 min_depth,
                 max_depth,
+                auto_depth,
                 topics,
             )
             .await;
@@ -480,10 +479,17 @@ async fn main() -> anyhow::Result<()> {
             follow_external,
             min_depth,
             max_depth,
+            auto_depth,
             topics,
             seeds,
+            dynamic,
+            deep,
+            output,
+            graph_store,
+            turso_path,
         } => {
             return commands::research::run(
+                &cfg,
                 seed,
                 query,
                 max_pages,
@@ -497,16 +503,20 @@ async fn main() -> anyhow::Result<()> {
                 follow_external,
                 min_depth,
                 max_depth,
+                auto_depth,
                 topics,
                 seeds,
+                dynamic,
+                deep,
+                output,
+                graph_store,
+                turso_path,
             )
             .await;
         }
 
         Commands::Serve {
-            mode: _,
             port,
-            transport,
             graph_store,
             turso_path,
             hybrid,
@@ -516,7 +526,6 @@ async fn main() -> anyhow::Result<()> {
             return commands::serve::run(
                 &cfg,
                 port,
-                transport,
                 graph_store,
                 turso_path,
                 hybrid,
