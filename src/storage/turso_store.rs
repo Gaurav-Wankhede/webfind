@@ -31,7 +31,7 @@ use crate::engine::crawl_graph::{
     CrawlGraphStore, CrawlJob, DiscoverySource, LinkEdge, TraversalDirection, UrlNode,
 };
 use crate::engine::fingerprint::{Fingerprint, FingerprintAuditLog};
-use crate::engine::util::url_id;
+use crate::engine::util::{extract_domain, url_id};
 use crate::schema::content::PageContentRecord;
 
 /// Name of the graph-version key stored in `graph_meta`.
@@ -133,10 +133,7 @@ impl TursoStore {
             )
             .await
             .context("compute logical storage size")?;
-        let row = rows
-            .next()
-            .await?
-            .context("storage size row")?;
+        let row = rows.next().await?.context("storage size row")?;
         Ok(row.get::<i64>(0).unwrap_or(0) as u64)
     }
 
@@ -154,10 +151,7 @@ impl TursoStore {
             )
             .await
             .context("count full-content pages")?;
-        let row = rows
-            .next()
-            .await?
-            .context("full-content count row")?;
+        let row = rows.next().await?.context("full-content count row")?;
         Ok(row.get::<i64>(0).unwrap_or(0) as u64)
     }
 
@@ -250,9 +244,7 @@ impl TursoStore {
         .await
         .context("bump graph version after eviction")?;
 
-        tx.commit()
-            .await
-            .context("commit eviction transaction")?;
+        tx.commit().await.context("commit eviction transaction")?;
 
         Ok(rows as u64)
     }
@@ -592,6 +584,7 @@ impl TursoStore {
         match source {
             DiscoverySource::Seed => "seed",
             DiscoverySource::Sitemap => "sitemap",
+            DiscoverySource::LlmsTxt => "llms_txt",
             DiscoverySource::LinkCrawl => "link_crawl",
             DiscoverySource::ExternalLink => "external_link",
         }
@@ -600,6 +593,7 @@ impl TursoStore {
     fn parse_source(s: &str) -> DiscoverySource {
         match s {
             "sitemap" => DiscoverySource::Sitemap,
+            "llms_txt" => DiscoverySource::LlmsTxt,
             "link_crawl" => DiscoverySource::LinkCrawl,
             "external_link" => DiscoverySource::ExternalLink,
             _ => DiscoverySource::Seed,
@@ -819,22 +813,64 @@ impl TursoStore {
     ) -> Result<std::collections::HashMap<String, f64>> {
         let scores = crate::engine::crawl_graph::compute_pagerank(self, iterations, damping).await;
 
-        // Rewrite the cache atomically.
-        self.conn
-            .execute("DELETE FROM pagerank", ())
+        // Rewrite the cache atomically. The DELETE + all INSERTs run under one
+        // transaction: on a large graph (hundreds of thousands of nodes) each
+        // auto-committed INSERT would fsync individually and take minutes.
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .context("begin pagerank cache transaction")?;
+        tx.execute("DELETE FROM pagerank", ())
             .await
             .context("clear pagerank cache")?;
         for (url, score) in &scores {
-            self.conn
-                .execute(
-                    "INSERT INTO pagerank (url, score) VALUES (?1, ?2)",
-                    params![url.as_str(), *score],
-                )
-                .await
-                .with_context(|| format!("cache pagerank for `{url}`"))?;
+            tx.execute(
+                "INSERT INTO pagerank (url, score) VALUES (?1, ?2)",
+                params![url.as_str(), *score],
+            )
+            .await
+            .with_context(|| format!("cache pagerank for `{url}`"))?;
         }
-        self.bump_graph_version().await;
+        // Record the graph version this cache was computed from. Search skips
+        // recomputation while `pagerank_version == graph_version`. This is a
+        // derived-cache write, NOT a graph mutation, so it must not bump the
+        // graph version (bumping here would invalidate the cache on every
+        // compute and force a full recompute per search).
+        let version = self.graph_version().await;
+        tx.execute(
+            "INSERT INTO graph_meta (key, value) VALUES ('pagerank_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![version],
+        )
+        .await
+        .context("record pagerank version")?;
+        tx.commit().await.context("commit pagerank cache")?;
         Ok(scores)
+    }
+
+    /// Graph version the `pagerank` cache was computed from, or `"0"` when
+    /// never computed. Search compares this against `graph_version()` to skip
+    /// recomputation on unchanged graphs.
+    pub async fn pagerank_version(&self) -> String {
+        let mut rows = match self
+            .conn
+            .query(
+                "SELECT value FROM graph_meta WHERE key = 'pagerank_version'",
+                (),
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("failed to read pagerank version: {}", e);
+                return "0".to_string();
+            }
+        };
+        match rows.next().await {
+            Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0).to_string(),
+            _ => "0".to_string(),
+        }
     }
 
     /// Read the cached PageRank scores as `(url, score)` ordered descending.
@@ -1132,6 +1168,24 @@ impl CrawlGraphStore for TursoStore {
     }
 
     async fn record_link(&self, edge: LinkEdge) {
+        // link_edges has FOREIGN KEY references to url_nodes(id). The crawler
+        // records edges for URLs that may never become full nodes (e.g.
+        // external links that aren't followed, or a link seen before its own
+        // page is crawled). Insert a placeholder endpoint first when missing so
+        // the edge insert does not trip the FK constraint.
+        for endpoint in [&edge.from, &edge.to] {
+            let placeholder = self
+                .conn
+                .execute(
+                    "INSERT OR IGNORE INTO url_nodes (id, url, domain, source, depth, priority, lastmod, changefreq, discovered_at, crawled) VALUES (?1, ?2, ?3, 'link_crawl', 0, 0.5, NULL, NULL, ?4, 0)",
+                    params![url_id(endpoint), endpoint.as_str(), extract_domain(endpoint), Utc::now().to_rfc3339()],
+                )
+                .await;
+            if let Err(e) = placeholder {
+                tracing::debug!("ensure link endpoint {} node: {}", endpoint, e);
+            }
+        }
+
         let result = self
             .conn
             .execute(
@@ -2623,7 +2677,10 @@ mod tests {
             .enforce_storage_budget(Some(1), None)
             .await
             .expect("enforce tiny byte budget");
-        assert_eq!(pruned, 3, "all pages should be stripped to fit 1-byte budget");
+        assert_eq!(
+            pruned, 3,
+            "all pages should be stripped to fit 1-byte budget"
+        );
         assert_eq!(store.full_content_page_count().await.unwrap(), 0);
         // Logical size is now just embeddings/excerpts — must be < 4096 bytes.
         let size = store.db_size_bytes().await.unwrap();
