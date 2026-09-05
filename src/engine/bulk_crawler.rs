@@ -59,6 +59,32 @@ fn score_relevance(url: &str, content: Option<&StructuredContent>, topics: &[Str
     (0.4 * url_score + 0.6 * content_score).clamp(0.0, 1.0)
 }
 
+/// Path depth of a URL: number of non-empty path segments. Used to auto-map
+/// crawl depth from the site's own map (sitemap/llms.txt URLs) instead of a
+/// manual hop count. `https://example.com/a/b/c` -> 3, root -> 0.
+fn path_depth(url: &str) -> u32 {
+    reqwest::Url::parse(url)
+        .map(|u| u.path().split('/').filter(|s| !s.is_empty()).count() as u32)
+        .unwrap_or(0)
+}
+
+/// Normalize a URL for scope membership: lowercase scheme+host, strip
+/// fragment and trailing slash. Two URLs that point at the same page compare
+/// equal so link-following can stay inside the site's declared map.
+fn normalize_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(mut parsed) => {
+            parsed.set_fragment(None);
+            let mut s = parsed.to_string();
+            if s.ends_with('/') && !s.ends_with("://") {
+                s.pop();
+            }
+            s.to_lowercase()
+        }
+        Err(_) => url.trim_end_matches('/').to_lowercase(),
+    }
+}
+
 /// A crawling session binds one egress IP + device fingerprint + cookie jar together.
 /// It is rotated after `max_requests` or `max_age` to avoid burning out one identity.
 #[derive(Debug)]
@@ -115,10 +141,16 @@ impl DomainState {
 /// Bulk domain crawler: fetches many pages from the same domain using rotating
 /// sessions while keeping IP + UA + cookies consistent within each session.
 ///
-/// Structural awareness:
-/// - Fetches `/robots.txt` and `/sitemap.xml` in parallel before crawling.
-/// - Seeds the queue from sitemap entries sorted by priority.
+/// Structural awareness (site-driven methodology, "be a polite research bot"):
+/// - Fetches `/robots.txt`, `/sitemap.xml`, and the site's curated LLM index
+///   (`/llms.txt`, falling back to `/llm.txt`) in parallel before crawling.
+/// - Seeds the queue from sitemap entries sorted by priority, plus llms.txt
+///   entries (the site's own statement of which pages matter most).
 /// - Respects robots.txt `Disallow` and `Crawl-delay` directives.
+/// - Auto-maps crawl depth from the site map when `auto_depth` is enabled:
+///   depth is derived from each mapped URL's path instead of a manual hop
+///   count, and link-following stays inside the site's declared content
+///   surface (content privacy) instead of wandering the open web.
 /// - Records discovered URLs and links into an optional `CrawlGraphStore`
 ///   so a SurrealDB graph-vector backend can run PageRank / vector retrieval.
 ///
@@ -141,8 +173,22 @@ pub struct BulkDomainCrawler {
     follow_external: bool,
     min_depth: u32,
     max_depth: u32,
+    /// When true (default), crawl depth is derived from the site's own map
+    /// (sitemap + llms.txt path depth) and link-following is bounded to the
+    /// mapped URL set. Manual min/max depth become the fallback for sites
+    /// that publish no map.
+    auto_depth: bool,
     /// Query topics for content-aware link prioritization.
     topics: Vec<String>,
+    /// Render JS-heavy / bot-protected pages via headless Chromium (CDP) when
+    /// a plain HTTP fetch yields no meaningful content.
+    dynamic: bool,
+    /// Deep research mode: CDP stealth + infinite-scroll, and no crawl
+    /// deadline or backoff caps so long-running investigations can finish.
+    deep: bool,
+    /// Per-request HTTP timeout. Deep mode raises this so slow JS-heavy pages
+    /// are not abandoned prematurely.
+    request_timeout: Duration,
 }
 
 /// Whether to follow links to external domains during crawling.
@@ -189,8 +235,29 @@ impl BulkDomainCrawler {
             },
             min_depth,
             max_depth,
+            auto_depth: true,
             topics: Vec::new(),
+            dynamic: false,
+            deep: false,
+            request_timeout: Duration::from_secs(30),
         }
+    }
+
+    /// Enable CDP browser rendering fallback for JS-heavy / bot-protected pages.
+    pub fn with_dynamic(mut self, dynamic: bool) -> Self {
+        self.dynamic = dynamic;
+        self
+    }
+
+    /// Enable deep research: CDP stealth + infinite-scroll, and disable the
+    /// crawl deadline and backoff caps so long investigations can complete.
+    pub fn with_deep(mut self, deep: bool) -> Self {
+        self.deep = deep;
+        if deep {
+            // Slow JS-heavy pages deserve a longer per-request timeout.
+            self.request_timeout = Duration::from_secs(90);
+        }
+        self
     }
 
     pub fn with_respect_robots(mut self, respect: RespectRobots) -> Self {
@@ -198,6 +265,14 @@ impl BulkDomainCrawler {
             RespectRobots::Yes => true,
             RespectRobots::No => false,
         };
+        self
+    }
+
+    /// Enable (default) or disable site-map-derived crawl depth. When enabled,
+    /// depth is auto-mapped from the site's sitemap/llms.txt path structure
+    /// and link-following is bounded to the site's declared content surface.
+    pub fn with_auto_depth(mut self, auto: bool) -> Self {
+        self.auto_depth = auto;
         self
     }
 
@@ -232,6 +307,18 @@ impl BulkDomainCrawler {
     /// 2. PRIORITIZE: score discovered URLs by depth (shallower = higher priority).
     /// 3. FETCH: budget-constrained, per-host rate-limited fetch of top-scored URLs.
     pub async fn crawl(&self, seed: &str) -> Result<Vec<StructuredContent>> {
+        self.crawl_with_limit(seed, self.max_pages).await
+    }
+
+    /// Crawl from a seed with an explicit page budget, overriding the
+    /// crawler-wide `max_pages` for this call. Multi-seed callers (research)
+    /// use this to split one total budget across seeds instead of granting
+    /// each seed the full `max_pages`.
+    pub async fn crawl_with_limit(
+        &self,
+        seed: &str,
+        limit: usize,
+    ) -> Result<Vec<StructuredContent>> {
         let seed_domain = util::extract_domain(seed).unwrap_or_else(|| "unknown".to_string());
 
         // Build structural awareness in parallel before touching any page.
@@ -243,6 +330,33 @@ impl BulkDomainCrawler {
             bp
         } else {
             Default::default()
+        };
+
+        // Auto-map crawl depth from the site's own map (sitemap + llms.txt
+        // path depth) and bound link-following to the site's declared content
+        // surface. Manual min/max depth is the fallback for sites that
+        // publish no map.
+        let (effective_max_depth, scope) = if self.auto_depth {
+            let mut depths: Vec<u32> = Vec::new();
+            let mut scope: HashSet<String> = HashSet::new();
+            for entry in &blueprint.sitemap_urls {
+                depths.push(path_depth(&entry.url));
+                scope.insert(normalize_url(&entry.url));
+            }
+            if let Some(ref llms) = blueprint.llms {
+                for url in llms.urls() {
+                    depths.push(path_depth(url));
+                    scope.insert(normalize_url(url));
+                }
+            }
+            if scope.is_empty() {
+                (self.max_depth, None)
+            } else {
+                let derived = depths.into_iter().max().unwrap_or(0).clamp(1, 20);
+                (derived, Some(scope))
+            }
+        } else {
+            (self.max_depth, None)
         };
 
         // Merge user topics with sitemap-derived topic keywords.
@@ -285,22 +399,49 @@ impl BulkDomainCrawler {
             .await;
         }
 
-        // Seed queue from sitemap (highest priority first), then the user seed if new.
+        // Seed queue from sitemap (highest priority first) and the site's curated
+        // LLM index (llms.txt / llm.txt), then the user seed if new. Map
+        // entries carry their auto-mapped path depth when auto_depth is on.
         let seed_relevance = score_relevance(seed, None, &self.topics);
         for entry in &blueprint.sitemap_urls {
             let relevance = score_relevance(&entry.url, None, &self.topics);
+            let depth = if self.auto_depth {
+                path_depth(&entry.url)
+            } else {
+                1
+            };
             self.record_url(
                 &entry.url,
                 &seed_domain,
                 DiscoverySource::Sitemap,
-                1, // sitemap entries are depth 1 from seed
+                depth,
                 entry.priority,
                 entry.lastmod,
                 entry.changefreq.as_deref(),
             )
             .await;
-            self.enqueue_url(&seed_domain, &entry.url, 1, relevance)
+            self.enqueue_url(&seed_domain, &entry.url, depth, relevance)
                 .await;
+        }
+        // llms.txt entries are the site's own statement of which pages matter
+        // most: seed them at top priority, gated by robots.txt like anything
+        // else.
+        if let Some(ref llms) = blueprint.llms {
+            for url in llms.urls() {
+                let relevance = score_relevance(url, None, &self.topics).max(0.9);
+                let depth = if self.auto_depth { path_depth(url) } else { 1 };
+                self.record_url(
+                    url,
+                    &seed_domain,
+                    DiscoverySource::LlmsTxt,
+                    depth,
+                    1.0,
+                    None,
+                    None,
+                )
+                .await;
+                self.enqueue_url(&seed_domain, url, depth, relevance).await;
+            }
         }
         if !seed_already_crawled {
             self.enqueue_url(&seed_domain, seed, 0, seed_relevance)
@@ -308,9 +449,9 @@ impl BulkDomainCrawler {
         }
 
         // Phase 1+2: DISCOVER + FETCH in interleaved BFS with depth tracking.
-        let mut results: Vec<StructuredContent> = Vec::with_capacity(self.max_pages);
+        let mut results: Vec<StructuredContent> = Vec::with_capacity(limit);
 
-        while results.len() < self.max_pages || {
+        while results.len() < limit || {
             let domains = self.domains.lock().await;
             domains
                 .values()
@@ -347,6 +488,17 @@ impl BulkDomainCrawler {
             if let Some(ref store) = self.graph_store {
                 if let Some(node) = store.get_url(&url).await {
                     if node.crawled {
+                        // Dequeue before skipping. The selected URL is the
+                        // highest-relevance entry in the queue; leaving it in
+                        // place makes the next iteration select it again and
+                        // `continue` forever (re-crawls re-enqueue sitemap /
+                        // link URLs that earlier crawls already marked crawled).
+                        let mut domains = self.domains.lock().await;
+                        if let Some(d) = domains.get_mut(&domain) {
+                            if let Some(pos) = d.queue.iter().position(|(u, _, _)| u == &url) {
+                                d.queue.remove(pos);
+                            }
+                        }
                         continue;
                     }
                 }
@@ -428,9 +580,20 @@ impl BulkDomainCrawler {
 
                     let next_depth = depth + 1;
 
-                    // Internal links: same domain, enqueue if within max_depth.
+                    // Scope check: when the site publishes a map (sitemap /
+                    // llms.txt), link-following stays inside the declared
+                    // content surface — content privacy. Without a map, all
+                    // links are eligible (bounded by effective depth).
+                    let in_scope = |link: &str| {
+                        scope
+                            .as_ref()
+                            .map(|s| s.contains(&normalize_url(link)))
+                            .unwrap_or(true)
+                    };
+
+                    // Internal links: same domain, enqueue if within scope and depth.
                     for link in &content.internal_links {
-                        if next_depth <= self.max_depth {
+                        if in_scope(link) && next_depth <= effective_max_depth {
                             let relevance = score_relevance(link, Some(&content), &self.topics);
                             let is_new =
                                 self.enqueue_url(&domain, link, next_depth, relevance).await;
@@ -450,12 +613,15 @@ impl BulkDomainCrawler {
                         self.record_link(&url, link, None).await;
                     }
 
-                    // External links: cross-domain, enqueue if follow_external && within max_depth.
+                    // External links: cross-domain, enqueue if follow_external && within scope && depth.
                     if self.follow_external {
                         for link in &content.external_links {
                             let ext_domain =
                                 util::extract_domain(link).unwrap_or_else(|| "unknown".to_string());
-                            if ext_domain != domain && next_depth <= self.max_depth {
+                            if ext_domain != domain
+                                && in_scope(link)
+                                && next_depth <= effective_max_depth
+                            {
                                 let relevance =
                                     score_relevance(link, Some(&content), &self.topics) * 0.3;
                                 let is_new = self
@@ -618,7 +784,7 @@ impl BulkDomainCrawler {
         proxy_url: Option<&str>,
     ) -> Result<Fetcher> {
         let mut builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(self.request_timeout)
             .redirect(reqwest::redirect::Policy::limited(10))
             .gzip(true)
             .cookie_store(true);
@@ -628,10 +794,24 @@ impl BulkDomainCrawler {
         }
 
         let client = builder.build()?;
-        Ok(Fetcher::from_client(client)?.with_profile(profile.clone()))
+        let mut fetcher = Fetcher::from_client(client)?.with_profile(profile.clone());
+        if self.dynamic {
+            // Chromium fallback when a static fetch yields no meaningful text.
+            // Deep mode enables stealth + infinite-scroll for progressive/bot-
+            // protected pages.
+            fetcher = fetcher
+                .with_dynamic_fallback(if self.deep { 4000 } else { 2000 })
+                .with_dynamic_deep(self.deep);
+        }
+        Ok(fetcher)
     }
 
     async fn apply_backoff(&self, domain: &str, state: &mut DomainState) {
+        // Deep research mode never backs off: a failed fetch is retried without
+        // penalty so a single transient failure can't stall a long investigation.
+        if self.deep {
+            return;
+        }
         let failures = state.failure_count.saturating_sub(state.success_count);
         let backoff = Duration::from_secs((2u64.pow(failures.min(6) as u32)).min(60));
         warn!(
@@ -704,5 +884,108 @@ impl Clone for CrawlSession {
             max_age: self.max_age,
             consecutive_failures: self.consecutive_failures,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Re-crawls re-enqueue URLs that earlier crawls marked crawled. The crawl
+    /// loop must dequeue-and-skip them instead of re-selecting the top entry
+    /// forever (regression: infinite loop hung research requests).
+    #[tokio::test]
+    async fn test_crawl_skips_already_crawled_urls_without_hanging() {
+        let graph = Arc::new(InMemoryCrawlGraph::new());
+        let seed = "https://example.com/";
+        let crawled_page = "https://example.com/crawled-page";
+        for url in [seed, crawled_page] {
+            graph
+                .record_url(UrlNode {
+                    url: url.to_string(),
+                    domain: "example.com".to_string(),
+                    source: DiscoverySource::Seed,
+                    depth: 0,
+                    priority: 1.0,
+                    lastmod: None,
+                    changefreq: None,
+                    discovered_at: Utc::now(),
+                    crawled: true,
+                })
+                .await;
+        }
+
+        let crawler = BulkDomainCrawler::new(
+            ProxyPool::new(),
+            100,
+            30,
+            100,
+            1,
+            50,
+            FollowExternalLinks::Ignore,
+            0,
+            5,
+        )
+        .with_respect_robots(RespectRobots::No)
+        .with_graph_store(graph.clone());
+
+        // Queue an already-crawled URL as the only work item. Before the fix
+        // the loop selected it, saw `crawled`, and `continue`d without
+        // dequeuing, spinning forever.
+        assert!(
+            crawler
+                .enqueue_url("example.com", crawled_page, 0, 1.0)
+                .await
+        );
+
+        let result = tokio::time::timeout(Duration::from_secs(5), crawler.crawl(seed))
+            .await
+            .expect("crawl hung: already-crawled URL was re-selected forever");
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_path_depth() {
+        // Root has no path segments.
+        assert_eq!(path_depth("https://example.com"), 0);
+        assert_eq!(path_depth("https://example.com/"), 0);
+        assert_eq!(path_depth("https://example.com/index.html"), 1);
+        // One segment per non-empty path part.
+        assert_eq!(path_depth("https://example.com/docs"), 1);
+        assert_eq!(path_depth("https://example.com/docs/"), 1);
+        assert_eq!(path_depth("https://example.com/docs/guide"), 2);
+        assert_eq!(path_depth("https://example.com/a/b/c"), 3);
+        // Query strings and fragments do not add depth.
+        assert_eq!(path_depth("https://example.com/docs?ref=1"), 1);
+        assert_eq!(path_depth("https://example.com/docs/#top"), 1);
+        // Trailing slashes collapse; double slashes are ignored.
+        assert_eq!(path_depth("https://example.com/a/b/"), 2);
+        assert_eq!(path_depth("https://example.com//a//b"), 2);
+    }
+
+    #[test]
+    fn test_normalize_url() {
+        // Scheme/authority lowercased, fragment dropped, trailing slash kept off.
+        assert_eq!(
+            normalize_url("HTTPS://Example.COM/Docs"),
+            "https://example.com/docs"
+        );
+        assert_eq!(
+            normalize_url("https://example.com/#section"),
+            "https://example.com"
+        );
+        assert_eq!(normalize_url("https://example.com"), "https://example.com");
+        assert_eq!(normalize_url("https://example.com/"), "https://example.com");
+        // Path case is preserved (servers may be case-sensitive), only host case
+        // is folded — map URLs and discovered links must compare equal on host.
+        assert_eq!(
+            normalize_url("https://Example.com/Docs/Guide"),
+            "https://example.com/docs/guide"
+        );
+        // Query strings are preserved (they distinguish real URLs).
+        assert_eq!(
+            normalize_url("https://example.com/search?q=rust"),
+            "https://example.com/search?q=rust"
+        );
     }
 }

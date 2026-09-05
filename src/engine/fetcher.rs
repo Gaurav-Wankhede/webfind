@@ -21,6 +21,17 @@ use crate::schema::response::Keyword;
 const USER_AGENT: &str = "webfind/0.1 (+https://github.com/Gaurav-Wankhede/webfind)";
 const FETCH_TIMEOUT_SECS: u64 = 30;
 
+/// Minimum word count for a page to be considered valid content.
+///
+/// Kept deliberately low: many legitimate pages (docs landing pages, error /
+/// redirect stubs, single-purpose pages like example.com) carry only a few
+/// dozen words yet are exactly what an agent wants scraped. A high floor
+/// (previously 50) silently dropped these, so `webfind_fetch` returned
+/// `is_valid_content: false` and research treated them as failed crawls —
+/// which is why the LLM fell back to DuckDuckGo. 5 words still filters
+/// empty / JS-shell pages while retaining real content.
+pub(crate) const MIN_VALID_WORDS: u32 = 5;
+
 /// Whether to rotate the User-Agent header per request.
 #[derive(Clone, Copy)]
 pub enum RotateUserAgent {
@@ -36,6 +47,7 @@ pub struct Fetcher {
     audit_log: Option<Arc<dyn FingerprintAuditLog>>,
     dynamic_fallback: bool,
     dynamic_wait_ms: u64,
+    dynamic_deep: bool,
 }
 
 impl Fetcher {
@@ -54,6 +66,7 @@ impl Fetcher {
             audit_log: None,
             dynamic_fallback: false,
             dynamic_wait_ms: 2000,
+            dynamic_deep: false,
         })
     }
 
@@ -113,6 +126,7 @@ impl Fetcher {
             audit_log: None,
             dynamic_fallback: false,
             dynamic_wait_ms: 2000,
+            dynamic_deep: false,
         })
     }
 
@@ -132,8 +146,20 @@ impl Fetcher {
         self
     }
 
+    /// Enable deep browser rendering: stealth mode + infinite-scroll so
+    /// progressively rendered / bot-protected pages are fully captured.
+    pub fn with_dynamic_deep(mut self, deep: bool) -> Self {
+        self.dynamic_deep = deep;
+        self
+    }
+
     /// Fetch a URL and extract StructuredContent.
     pub async fn fetch_url(&self, url: &str) -> Result<StructuredContent> {
+        // Reddit-specific path: try .json endpoint, fall back to old Reddit HTML.
+        if super::reddit::is_reddit_url(url) {
+            return self.fetch_reddit(url).await;
+        }
+
         let start = Instant::now();
         let response = if let Some(ref hc) = self.human_client {
             hc.get(url).await?
@@ -224,8 +250,9 @@ impl Fetcher {
             #[cfg(feature = "dynamic")]
             {
                 let dynamic = super::dynamic_fetcher::DynamicFetcher::new();
-                let (rendered_html, dynamic_final_url) =
-                    dynamic.render(url, self.dynamic_wait_ms).await?;
+                let (rendered_html, dynamic_final_url) = dynamic
+                    .render(url, self.dynamic_wait_ms, self.dynamic_deep)
+                    .await?;
                 let ssl = dynamic_final_url.starts_with("https://");
                 let mut dyn_content = self.extract_from_html(
                     &rendered_html,
@@ -248,6 +275,152 @@ impl Fetcher {
         }
 
         Ok(content)
+    }
+
+    /// Fetch a Reddit URL, preferring the `.json` endpoint and falling back
+    /// to old.reddit.com HTML when JSON returns 403.
+    async fn fetch_reddit(&self, url: &str) -> Result<StructuredContent> {
+        let start = Instant::now();
+
+        // Attempt 1: try the .json endpoint
+        if let Some(json_url) = super::reddit::to_reddit_json_url(url) {
+            let json_request = self.build_reddit_request(&json_url);
+            match json_request.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let status = resp.status().as_u16();
+                    let final_url = resp.url().to_string();
+                    let body = resp
+                        .text()
+                        .await
+                        .context("failed to read Reddit JSON body")?;
+                    let elapsed = start.elapsed().as_millis() as u64;
+
+                    match super::reddit::parse_reddit_listing(&body) {
+                        Ok(items) if !items.is_empty() => {
+                            let text = super::reddit::listing_to_text(&items);
+                            return self
+                                .build_reddit_content(url, &final_url, status, elapsed, &text);
+                        }
+                        _ => {
+                            // JSON parsed but no items — fall through to HTML
+                        }
+                    }
+                }
+                Ok(_) | Err(_) => {
+                    // 403 or network error — fall through to HTML
+                }
+            }
+        }
+
+        // Attempt 2: fetch old.reddit.com HTML (cleaner than new Reddit)
+        let old_url = super::reddit::to_old_reddit_url(url);
+        let html_request = self.build_reddit_request(&old_url);
+        let resp = html_request
+            .send()
+            .await
+            .with_context(|| format!("HTTP request failed for Reddit {}", old_url))?;
+
+        let status = resp.status().as_u16();
+        let final_url = resp.url().to_string();
+        let ssl_valid = final_url.starts_with("https://");
+        let body_bytes = resp
+            .bytes()
+            .await
+            .context("failed to read Reddit HTML body")?;
+        let body = String::from_utf8_lossy(&body_bytes);
+        let elapsed = start.elapsed().as_millis() as u64;
+
+        self.extract_from_html(&body, url, &final_url, status, ssl_valid, elapsed, None)
+    }
+
+    /// Build a Reddit request with descriptive User-Agent and rate-limit delay.
+    fn build_reddit_request(&self, url: &str) -> reqwest::RequestBuilder {
+        // Respect rate limits — sleep before each Reddit request
+        std::thread::sleep(super::reddit::REDDIT_RATE_LIMIT);
+
+        self.client
+            .get(url)
+            .header("User-Agent", super::reddit::REDDIT_USER_AGENT)
+            .header(
+                "Accept",
+                "application/json, text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+    }
+
+    /// Build a StructuredContent from extracted Reddit text.
+    fn build_reddit_content(
+        &self,
+        original_url: &str,
+        final_url: &str,
+        status_code: u16,
+        fetch_duration_ms: u64,
+        text: &str,
+    ) -> Result<StructuredContent> {
+        let collapsed = normalize_text(text);
+        let title = collapsed
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| l.trim().chars().take(120).collect())
+            .unwrap_or_else(|| title_from_url(final_url));
+
+        let excerpt = collapsed.chars().take(300).collect::<String>();
+        let word_count = count_words(&collapsed);
+        let sentence_count = count_sentences(&collapsed);
+        let reading_time_seconds = estimate_reading_time(word_count);
+        let reading_ease = textstat::flesch_reading_ease(&collapsed);
+        let grade_level = textstat::flesch_kincaid_grade(&collapsed);
+        let keywords = extract_keywords(&collapsed, 15);
+        let (language, language_confidence) = whatlang::detect(&collapsed)
+            .map(|i| (i.lang().code().to_string(), i.confidence() as f64))
+            .unwrap_or_else(|| ("en".to_string(), 0.3));
+        let content_markdown = collapsed.clone();
+
+        Ok(StructuredContent {
+            url: original_url.to_string(),
+            final_url: final_url.to_string(),
+            status_code,
+            title,
+            description: None,
+            canonical_url: None,
+            language,
+            language_confidence,
+            published_at: None,
+            modified_at: None,
+            author: None,
+            site_name: Some("reddit.com".to_string()),
+            content_text: collapsed.clone(),
+            content_html: format!("<pre>{}</pre>", html_escape(&collapsed)),
+            content_markdown,
+            excerpt,
+            word_count,
+            char_count: collapsed.len() as u32,
+            sentence_count,
+            reading_time_seconds,
+            reading_ease,
+            grade_level,
+            keywords,
+            open_graph: None,
+            twitter_card: None,
+            json_ld: vec![],
+            schema_type: Some("reddit".to_string()),
+            images: vec![],
+            internal_links: vec![],
+            external_links: vec![],
+            favicon: None,
+            rss_url: None,
+            normalized_text: collapsed,
+            fetched_at: Utc::now(),
+            fetch_duration_ms,
+            html_size_bytes: 0,
+            encoding: None,
+            ssl_valid: true,
+            redirect_count: 0,
+            content_type: "reddit/json".to_string(),
+            content_type_header: "application/json".to_string(),
+            is_paywalled: false,
+            is_valid_content: word_count >= MIN_VALID_WORDS,
+            entities: extract_entities(text),
+        })
     }
 
     /// Extract StructuredContent from raw HTML.
@@ -383,7 +556,7 @@ impl Fetcher {
 
         // Pre-compute values before moves
         let content_markdown = html_to_markdown(&content_html);
-        let is_valid = !content_text.is_empty() && word_count > 50;
+        let is_valid = !content_text.is_empty() && word_count >= MIN_VALID_WORDS;
 
         // 20. Schema type from JSON-LD
         let schema_type = json_ld
@@ -611,7 +784,7 @@ fn extract_from_text(
         content_type: String::new(),
         content_type_header: String::new(),
         is_paywalled: false,
-        is_valid_content: word_count > 50,
+        is_valid_content: word_count >= MIN_VALID_WORDS,
         entities: Entities::default(),
     })
 }
@@ -1008,7 +1181,7 @@ fn parse_date(s: &str) -> Option<DateTime<Utc>> {
 
 // ── Keyword Extraction ──────────────────────────────────────────────────────
 
-fn extract_keywords(text: &str, max: usize) -> Vec<Keyword> {
+pub(crate) fn extract_keywords(text: &str, max: usize) -> Vec<Keyword> {
     if text.len() < 100 {
         return vec![];
     }
@@ -1036,21 +1209,21 @@ fn extract_keywords(text: &str, max: usize) -> Vec<Keyword> {
 
 // ── Word / Sentence Counting ───────────────────────────────────────────────
 
-fn count_words(text: &str) -> u32 {
+pub(crate) fn count_words(text: &str) -> u32 {
     text.unicode_words().count() as u32
 }
 
-fn count_sentences(text: &str) -> u32 {
+pub(crate) fn count_sentences(text: &str) -> u32 {
     text.unicode_sentences().count() as u32
 }
 
-fn estimate_reading_time(word_count: u32) -> u32 {
+pub(crate) fn estimate_reading_time(word_count: u32) -> u32 {
     (word_count as f64 / 238.0 * 60.0).ceil() as u32
 }
 
 // ── Text Normalization ──────────────────────────────────────────────────────
 
-fn normalize_text(text: &str) -> String {
+pub(crate) fn normalize_text(text: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     text.nfc()
         .collect::<String>()
@@ -1073,20 +1246,15 @@ fn html_to_markdown(html: &str) -> String {
 
 /// Emails: standard local@domain[.tld], tolerant of a trailing period.
 static RE_EMAIL: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-        r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b",
-    )
-    .expect("valid email regex")
+    regex::Regex::new(r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b").expect("valid email regex")
 });
 
 /// Phone numbers: E.164/US-centric — optional +country, then 7-15 digits
 /// separated by space/dash/dot. Requires at least 7 digits total so a date
 /// like `2017-05-13` (fewer digits) is not misclassified as a phone.
 static RE_PHONE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-        r"(?:\+?\d{1,3}[\s\-\.]?)?\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]\d{4}\b",
-    )
-    .expect("valid phone regex")
+    regex::Regex::new(r"(?:\+?\d{1,3}[\s\-\.]?)?\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]\d{4}\b")
+        .expect("valid phone regex")
 });
 
 /// Addresses: a leading number + street words, then a street suffix, then an
@@ -1135,14 +1303,11 @@ static RE_IP: LazyLock<regex::Regex> = LazyLock::new(|| {
 /// whitespace or line start so an email local-part (`name@example.com`) is not
 /// mistaken for a handle.
 static RE_SOCIAL: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-        r"(?:\A|\s)(@[a-zA-Z0-9_]{3,30})\b",
-    )
-    .expect("valid social regex")
+    regex::Regex::new(r"(?:\A|\s)(@[a-zA-Z0-9_]{3,30})\b").expect("valid social regex")
 });
 
 /// Extract structured entities from cleaned page text.
-fn extract_entities(text: &str) -> Entities {
+pub(crate) fn extract_entities(text: &str) -> Entities {
     fn unique(v: Vec<String>) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         v.into_iter()
@@ -1157,7 +1322,12 @@ fn extract_entities(text: &str) -> Entities {
             .map(|m| m.as_str().trim_end_matches('.').to_string())
             .collect(),
     );
-    let phones = unique(RE_PHONE.find_iter(text).map(|m| m.as_str().trim().to_string()).collect());
+    let phones = unique(
+        RE_PHONE
+            .find_iter(text)
+            .map(|m| m.as_str().trim().to_string())
+            .collect(),
+    );
     let addresses = unique(
         RE_ADDRESS
             .find_iter(text)
@@ -1167,7 +1337,11 @@ fn extract_entities(text: &str) -> Entities {
     let urls = unique(
         RE_URL
             .find_iter(text)
-            .map(|m| m.as_str().trim_end_matches(['.', ')', ';', ','].as_slice()).to_string())
+            .map(|m| {
+                m.as_str()
+                    .trim_end_matches(['.', ')', ';', ','].as_slice())
+                    .to_string()
+            })
             .collect(),
     );
     let prices = unique(
@@ -1176,9 +1350,18 @@ fn extract_entities(text: &str) -> Entities {
             .map(|m| m.as_str().trim().to_string())
             .collect(),
     );
-    let dates = unique(RE_DATE.find_iter(text).map(|m| m.as_str().trim().to_string()).collect());
-    let ip_addresses =
-        unique(RE_IP.find_iter(text).map(|m| m.as_str().trim().to_string()).collect());
+    let dates = unique(
+        RE_DATE
+            .find_iter(text)
+            .map(|m| m.as_str().trim().to_string())
+            .collect(),
+    );
+    let ip_addresses = unique(
+        RE_IP
+            .find_iter(text)
+            .map(|m| m.as_str().trim().to_string())
+            .collect(),
+    );
     let social_handles = unique(
         RE_SOCIAL
             .captures_iter(text)
@@ -1472,7 +1655,7 @@ fn collect_text_nodes(
 }
 
 /// Build a human-readable title from the last path segment of a URL.
-fn title_from_url(url: &str) -> String {
+pub(crate) fn title_from_url(url: &str) -> String {
     let path = url
         .trim_start_matches("https://")
         .trim_start_matches("http://")
@@ -1508,7 +1691,7 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// Derive a site name from the registered domain, or fall back to the full host.
-fn extract_site_name(url: &str) -> Option<String> {
+pub(crate) fn extract_site_name(url: &str) -> Option<String> {
     let host = extract_domain(url);
     if host.is_empty() {
         return None;
@@ -1521,7 +1704,7 @@ fn extract_site_name(url: &str) -> Option<String> {
 }
 
 /// Minimal HTML-escape for fallback plain text blocks.
-fn html_escape(text: &str) -> String {
+pub(crate) fn html_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -1601,6 +1784,46 @@ mod tests {
     }
 
     #[test]
+    fn test_short_page_is_valid_content() {
+        // A short-but-real page (e.g. example.com, ~19 words) must be treated
+        // as valid content so webfind_fetch does not mark it invalid and drop
+        // it. Regression for the >50 word threshold that pushed the LLM to
+        // DuckDuckGo.
+        let html = r#"<!DOCTYPE html><html><head><title>Example Domain</title></head>
+<body><h1>Example Domain</h1>
+<p>This domain is for use in documentation examples without needing permission. Avoid use in operations. Learn more.</p>
+</body></html>"#;
+        let fetcher = Fetcher::new().unwrap();
+        let content = fetcher
+            .extract_from_html(
+                html,
+                "https://example.com/",
+                "https://example.com/",
+                200,
+                true,
+                5,
+                None,
+            )
+            .unwrap();
+        assert!(content.word_count > 0);
+        assert!(
+            content.is_valid_content,
+            "short page marked invalid (word_count={})",
+            content.word_count
+        );
+    }
+
+    #[test]
+    fn test_empty_page_is_invalid_content() {
+        let html = "<!DOCTYPE html><html><head><title>Empty</title></head><body></body></html>";
+        let fetcher = Fetcher::new().unwrap();
+        let content = fetcher
+            .extract_from_html(html, "https://x.com/", "https://x.com/", 200, true, 5, None)
+            .unwrap();
+        assert!(!content.is_valid_content, "empty page must stay invalid");
+    }
+
+    #[test]
     fn test_reading_time() {
         assert_eq!(estimate_reading_time(238), 60);
         assert_eq!(estimate_reading_time(100), 26);
@@ -1642,7 +1865,11 @@ mod tests {
         // A date must not be classified as a phone; an email local-part must
         // not be classified as a social handle.
         let e = extract_entities("Released 2017-05-13. Reach sales@corp.io directly.");
-        assert!(e.phones.is_empty(), "date misclassified as phone: {:?}", e.phones);
+        assert!(
+            e.phones.is_empty(),
+            "date misclassified as phone: {:?}",
+            e.phones
+        );
         assert!(
             !e.social_handles.iter().any(|m| m.contains("corp")),
             "email local-part misclassified as handle: {:?}",

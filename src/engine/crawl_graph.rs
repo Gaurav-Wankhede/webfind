@@ -17,6 +17,8 @@ pub enum DiscoverySource {
     Seed,
     /// Discovered via sitemap.xml (or sitemap index).
     Sitemap,
+    /// Discovered via the site's curated LLM index (llms.txt / llm.txt).
+    LlmsTxt,
     /// Discovered by following an internal link while crawling.
     LinkCrawl,
     /// Discovered by following an external (cross-domain) link.
@@ -190,15 +192,23 @@ pub async fn compute_pagerank(
         incoming.entry(edge.to.clone()).or_default().push(edge.from);
     }
 
-    let mut scores: HashMap<String, f64> =
-        nodes.iter().map(|u| (u.clone(), 1.0 / n as f64)).collect();
     let base = (1.0 - damping) / n as f64;
+    // Nodes without incoming edges receive no mass and stay at `base` for
+    // every iteration, so only nodes with incoming edges need to be iterated.
+    // On sparse graphs (few edges relative to nodes) this is a large constant
+    // factor: 373K nodes with 9K edges → ~40x fewer hash-map ops per round.
+    // Initializing every node to `base` (rather than `1/n`) is the correct
+    // starting point: inactive nodes are already at their fixed point, and
+    // active nodes converge to the same PageRank fixed point regardless of
+    // initialization.
+    let mut scores: HashMap<String, f64> = nodes.iter().map(|u| (u.clone(), base)).collect();
+    let active: Vec<&String> = nodes.iter().filter(|u| incoming.contains_key(*u)).collect();
 
     for _ in 0..iterations.max(1) {
-        let mut new_scores = HashMap::with_capacity(n);
-        for url in &nodes {
+        let mut new_scores = HashMap::with_capacity(active.len());
+        for url in &active {
             let mut rank = base;
-            if let Some(in_nodes) = incoming.get(url) {
+            if let Some(in_nodes) = incoming.get(*url) {
                 for in_url in in_nodes {
                     if let Some(s) = scores.get(in_url) {
                         let out_deg = out_degree.get(in_url).copied().unwrap_or(1).max(1);
@@ -206,9 +216,11 @@ pub async fn compute_pagerank(
                     }
                 }
             }
-            new_scores.insert(url.clone(), rank);
+            new_scores.insert((*url).clone(), rank);
         }
-        scores = new_scores;
+        for (url, rank) in new_scores {
+            scores.insert(url, rank);
+        }
     }
 
     scores

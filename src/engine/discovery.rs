@@ -3,23 +3,18 @@
 //! Discovery is layered:
 //! 1. Search the existing WebFind index for relevant URLs.
 //! 2. Search the crawl graph for discovered-but-not-yet-indexed URLs.
-//! 3. Generate query-driven domain candidates, validate them, and score relevance.
+//! 3. Query live search engines (DuckDuckGo, Bing) and fuse their results.
 //!
-//! No websites are hardcoded. Discovery relies only on the existing WebFind data
-//! and URL patterns derived from the query itself.
+//! No websites are hardcoded beyond the curated seed catalog. Discovery relies
+//! on the existing WebFind data and live search-engine results.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use reqwest::Client;
-use tokio::net::lookup_host;
-use tokio::sync::Semaphore;
 
 use crate::engine::crawl_graph::CrawlGraphStore;
-use crate::engine::fetcher::Fetcher;
 use crate::engine::search_engine::SearchEngine;
-use crate::schema::content::StructuredContent;
+use crate::engine::web_index::{EngineOptions, LiveIndex, extract_keywords};
 
 /// Minimum relevance score (0.0–1.0) for an auto-discovered seed to be accepted.
 const MIN_RELEVANCE: f64 = 0.55;
@@ -30,175 +25,11 @@ const FALLBACK_RELEVANCE: f64 = 0.25;
 /// Maximum number of validated seeds to return.
 const MAX_SEEDS: usize = 5;
 
-/// Maximum number of candidate URLs to generate from a query.
-const MAX_CANDIDATES: usize = 20;
-
-/// DNS resolution timeout per candidate.
-const DNS_TIMEOUT_SECS: u64 = 2;
-
-/// HTTP validation timeout per candidate.
-const HTTP_TIMEOUT_SECS: u64 = 2;
-
-/// Maximum parallel validation tasks during discovery.
-const DISCOVERY_CONCURRENCY: usize = 8;
-
 /// Hard ceiling on total seed-discovery time so research requests don't hang.
-const DISCOVERY_TIMEOUT_SECS: u64 = 12;
-
-/// TLDs to try, in priority order.
-const TLDS: &[&str] = &[
-    "com", "org", "io", "ai", "dev", "app", "net", "co", "tech", "software", "tools", "blog",
-    "news", "info", "xyz", "me", "sh", "so", "to", "us", "eu", "in",
-];
-
-/// Stop words removed from query keywords.
-const STOP_WORDS: &[&str] = &[
-    "a",
-    "an",
-    "the",
-    "and",
-    "or",
-    "but",
-    "in",
-    "on",
-    "at",
-    "to",
-    "for",
-    "of",
-    "with",
-    "by",
-    "from",
-    "as",
-    "is",
-    "are",
-    "was",
-    "were",
-    "be",
-    "been",
-    "being",
-    "have",
-    "has",
-    "had",
-    "do",
-    "does",
-    "did",
-    "will",
-    "would",
-    "could",
-    "should",
-    "may",
-    "might",
-    "must",
-    "shall",
-    "can",
-    "need",
-    "dare",
-    "ought",
-    "used",
-    "this",
-    "that",
-    "these",
-    "those",
-    "i",
-    "you",
-    "he",
-    "she",
-    "it",
-    "we",
-    "they",
-    "what",
-    "which",
-    "who",
-    "when",
-    "where",
-    "why",
-    "how",
-    "all",
-    "any",
-    "both",
-    "each",
-    "few",
-    "more",
-    "most",
-    "other",
-    "some",
-    "such",
-    "no",
-    "nor",
-    "not",
-    "only",
-    "own",
-    "same",
-    "so",
-    "than",
-    "too",
-    "very",
-    "just",
-    "now",
-    "then",
-    "also",
-    "about",
-    "up",
-    "out",
-    "if",
-    "because",
-    "until",
-    "while",
-    "during",
-    "before",
-    "after",
-    "above",
-    "below",
-    "between",
-    "into",
-    "through",
-    "over",
-    "under",
-    "again",
-    "further",
-    "once",
-    "here",
-    "there",
-    "everywhere",
-    "anywhere",
-    "somewhere",
-    "get",
-    "me",
-    "my",
-    "your",
-    "his",
-    "her",
-    "its",
-    "our",
-    "their",
-    "what's",
-    "how's",
-    "where's",
-    "who's",
-    "when's",
-    "why's",
-    "latest",
-    "new",
-    "best",
-    "top",
-    "guide",
-    "overview",
-    "introduction",
-    "vs",
-    "versus",
-    "compare",
-    "comparison",
-    "difference",
-    "between",
-    "2020",
-    "2021",
-    "2022",
-    "2023",
-    "2024",
-    "2025",
-    "2026",
-    "2027",
-];
+/// Budget for the live seed-discovery fan-out. With 11 engines queried
+/// concurrently (each with a 10s per-request timeout), 25s leaves headroom for
+/// the slowest engine plus fusion.
+const DISCOVERY_TIMEOUT_SECS: u64 = 25;
 
 /// Discover high-quality seed URLs for a query.
 ///
@@ -208,49 +39,66 @@ pub async fn discover_seeds(
     graph: Option<&(dyn CrawlGraphStore + Send + Sync)>,
     query: &str,
 ) -> Result<Vec<String>> {
-    let mut seeds: Vec<DiscoveredSeed> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut final_seeds: Vec<DiscoveredSeed> = Vec::new();
 
-    // Layer 1: existing index.
-    seeds.extend(discover_from_index(indexer, query).await?);
-
-    // Layer 2: crawl graph.
-    if let Some(graph) = graph {
-        seeds.extend(discover_from_graph(graph, query).await);
-    }
-
-    // If we already have enough quality seeds from existing data, return them.
-    let mut seen: HashSet<String> = seeds.iter().map(|s| s.url.clone()).collect();
-    let mut final_seeds: Vec<DiscoveredSeed> = seeds
-        .iter()
-        .filter(|s| s.relevance >= MIN_RELEVANCE)
-        .take(MAX_SEEDS)
-        .cloned()
-        .collect();
-
-    // Layer 3: query-driven domain inference with a hard time ceiling.
+    // Layer 3 runs FIRST: live search engines return real, query-specific
+    // URLs, so they are the primary seed source. The curated catalog, index,
+    // and graph fill remaining slots as offline fallbacks — without this
+    // ordering, accumulated graph memory (e.g. ruby-doc.org from an old Ruby
+    // query) fills the cap and displaces live results for the current query.
     let generated = match tokio::time::timeout(
         std::time::Duration::from_secs(DISCOVERY_TIMEOUT_SECS),
-        discover_from_query(query, &seen),
+        discover_from_live(query, &seen),
     )
     .await
     {
         Ok(Ok(seeds)) => seeds,
         Ok(Err(e)) => {
-            tracing::warn!("query-driven seed discovery failed: {}", e);
+            tracing::warn!("live seed discovery failed: {}", e);
             Vec::new()
         }
         Err(_) => {
             tracing::warn!(
-                "query-driven seed discovery timed out after {}s",
+                "live seed discovery timed out after {}s",
                 DISCOVERY_TIMEOUT_SECS
             );
             Vec::new()
         }
     };
+    for seed in generated {
+        if seen.insert(seed.url.clone()) {
+            final_seeds.push(seed);
+        }
+    }
 
-    // If discovery timed out or found nothing, fall back to the most obvious
-    // query-derived domain candidate so the caller can still attempt a crawl.
-    if generated.is_empty() {
+    // Offline layers fill remaining slots: curated catalog (topic-matched
+    // official sources), existing index, then crawl graph. Sort by relevance
+    // so the most specific (catalog / URL-matched) sources win the cap.
+    let mut offline: Vec<DiscoveredSeed> = Vec::new();
+    offline.extend(discover_from_catalog(query));
+    offline.extend(discover_from_index(indexer, query).await?);
+    if let Some(graph) = graph {
+        offline.extend(discover_from_graph(graph, query).await);
+    }
+    offline.sort_by(|a, b| {
+        b.relevance
+            .partial_cmp(&a.relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for seed in offline {
+        if seen.insert(seed.url.clone()) {
+            final_seeds.push(seed);
+            if final_seeds.len() >= MAX_SEEDS {
+                break;
+            }
+        }
+    }
+
+    // If live discovery found nothing (offline/blocked), fall back to the most
+    // obvious query-derived domain candidate so the caller can still attempt a
+    // crawl instead of receiving a hard "no seeds" error.
+    if final_seeds.is_empty() {
         let keywords = extract_keywords(query);
         if let Some(first) = keywords.first() {
             let fallback = format!("https://{}.com", first);
@@ -261,22 +109,11 @@ pub async fn discover_seeds(
                 });
             }
         }
-    } else {
-        // Merge query-derived candidates into the seed pool (dedup by URL).
-        for seed in generated {
-            if seen.insert(seed.url.clone()) {
-                final_seeds.push(seed);
-                if final_seeds.len() >= MAX_SEEDS {
-                    break;
-                }
-            }
-        }
     }
 
     // Prefer high-quality seeds. If none reach the quality bar, fall back to
-    // the best query-derived candidates rather than erroring. The fallback
-    // seed above survives this filtering so an empty index still yields a
-    // crawlable URL.
+    // the best candidates rather than erroring. The fallback seed above
+    // survives this filtering so an empty index still yields a crawlable URL.
     let high_quality: Vec<DiscoveredSeed> = final_seeds
         .iter()
         .filter(|s| s.relevance >= MIN_RELEVANCE)
@@ -317,6 +154,85 @@ pub async fn discover_seeds(
 struct DiscoveredSeed {
     url: String,
     relevance: f64,
+}
+
+/// Layer 0: consult the curated, non-Wikipedia seed catalog. Returns topic-
+/// matched authoritative source URLs (e.g. doc.rust-lang.org for "rust"),
+/// ranked so sources whose URL/domain actually contains a query keyword come
+/// first. Without per-source ranking every source in a matched domain scored
+/// identically, so a "rust" query surfaced go.dev / nodejs / MDN before
+/// doc.rust-lang.org (the reported quality bug).
+fn discover_from_catalog(query: &str) -> Vec<DiscoveredSeed> {
+    let keywords = extract_keywords(query);
+    if keywords.is_empty() {
+        return Vec::new();
+    }
+
+    let mut seeds: Vec<DiscoveredSeed> = Vec::new();
+    for domain in crate::engine::seed_catalog::DOMAINS {
+        // Match catalog topics against the query keywords. A topic matches a
+        // keyword when one is a substring of the other OR they share a common
+        // root (>=4 chars) — this lets "secure" match the "security" topic
+        // while rejecting false substrings like "chain" ⊃ "ai". Substring-only
+        // matching previously both missed real matches and pulled unrelated
+        // domains.
+        let domain_matched = domain
+            .topics
+            .iter()
+            .any(|t| keywords.iter().any(|k| topics_match(k, t)));
+        if !domain_matched {
+            continue;
+        }
+        for source in domain.sources {
+            let url = source.url.to_lowercase();
+            // Score by keyword overlap with the source URL/domain: sources that
+            // literally mention a query keyword (doc.rust-lang.org for "rust")
+            // outrank generic-but-related sources (go.dev for "rust"). Domain
+            // match alone keeps the source in the pool.
+            let url_keyword_hits = keywords.iter().filter(|k| url.contains(k.as_str())).count();
+            let relevance = if url_keyword_hits > 0 {
+                // Strong, direct match.
+                let base = 0.95 + 0.05 * ((url_keyword_hits - 1) as f64).min(1.0);
+                // Reddit is community content, not primary sources — slight
+                // penalty so authoritative docs (doc.rust-lang.org, etc.) win ties.
+                if crate::engine::reddit::is_reddit_url(&source.url) {
+                    (base - 0.03).max(0.75)
+                } else {
+                    base
+                }
+            } else {
+                // Domain-related but no literal URL match: authoritative but
+                // below the high-quality bar so it only wins if no direct
+                // match exists.
+                0.75
+            };
+            seeds.push(DiscoveredSeed {
+                url: source.url.to_string(),
+                relevance,
+            });
+        }
+    }
+
+    // Deduplicate by URL, keep the highest relevance.
+    let mut by_url: HashMap<String, f64> = HashMap::new();
+    for s in seeds {
+        by_url
+            .entry(s.url)
+            .and_modify(|r| *r = (*r).max(s.relevance))
+            .or_insert(s.relevance);
+    }
+    let mut seeds: Vec<DiscoveredSeed> = by_url
+        .into_iter()
+        .map(|(url, relevance)| DiscoveredSeed { url, relevance })
+        .collect();
+    // Most-relevant sources first so `truncate` keeps the best matches.
+    seeds.sort_by(|a, b| {
+        b.relevance
+            .partial_cmp(&a.relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    seeds.truncate(MAX_SEEDS);
+    seeds
 }
 
 /// Discover seeds from the existing WebFind index.
@@ -378,22 +294,29 @@ async fn discover_from_graph(graph: &dyn CrawlGraphStore, query: &str) -> Vec<Di
     let nodes = graph.get_urls().await;
     let links = graph.get_all_links().await;
 
-    // Build inbound-link counts.
+    // Build inbound-link counts and the anchor-text index in one pass over the
+    // edges. Looking up per-node anchor text by scanning all links would be
+    // O(nodes × edges) — minutes on a large graph.
     let mut inbound: HashMap<String, usize> = HashMap::new();
+    let mut anchors: HashMap<String, String> = HashMap::new();
     for edge in &links {
         *inbound.entry(edge.to.clone()).or_insert(0) += 1;
+        if let Some(text) = &edge.anchor_text {
+            anchors
+                .entry(edge.to.clone())
+                .and_modify(|t| {
+                    t.push(' ');
+                    t.push_str(text);
+                })
+                .or_insert_with(|| text.clone());
+        }
     }
 
     let mut seeds: Vec<DiscoveredSeed> = nodes
         .into_iter()
         .filter_map(|node| {
-            let text = format!(
-                "{} {} {}",
-                node.url,
-                node.domain,
-                anchor_text_for_url(&links, &node.url)
-            )
-            .to_lowercase();
+            let anchor_text = anchors.get(&node.url).map(String::as_str).unwrap_or("");
+            let text = format!("{} {} {}", node.url, node.domain, anchor_text).to_lowercase();
             let relevance = keyword_relevance(&keywords, &text);
             if relevance > 0.0 {
                 let authority =
@@ -418,228 +341,96 @@ async fn discover_from_graph(graph: &dyn CrawlGraphStore, query: &str) -> Vec<Di
     seeds
 }
 
-fn anchor_text_for_url(links: &[crate::engine::crawl_graph::LinkEdge], url: &str) -> String {
-    links
-        .iter()
-        .filter(|e| e.to == url)
-        .filter_map(|e| e.anchor_text.clone())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Discover seeds by generating URL candidates from the query and validating them.
-async fn discover_from_query(
-    query: &str,
-    exclude: &HashSet<String>,
-) -> Result<Vec<DiscoveredSeed>> {
+/// Discover seeds by querying live search engines and fusing their results.
+///
+/// Replaces the old query→domain-guess→DNS-validate pipeline: search engines
+/// already return real, query-relevant URLs, so the crawler starts at relevant
+/// pages instead of guessed domains. Relevance blends keyword matches from the
+/// title/snippet with the fused cross-engine score.
+async fn discover_from_live(query: &str, exclude: &HashSet<String>) -> Result<Vec<DiscoveredSeed>> {
     let keywords = extract_keywords(query);
     if keywords.is_empty() {
         return Ok(Vec::new());
     }
 
-    let candidates: Vec<String> = generate_candidates(&keywords)
-        .into_iter()
-        .filter(|u| !exclude.contains(u))
-        .collect();
-
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
-        .redirect(reqwest::redirect::Policy::limited(2))
-        .gzip(true)
-        .build()
-        .context("failed to build validation client")?;
-    let client = Arc::new(client);
-    let keywords = Arc::new(keywords);
-
-    let semaphore = Arc::new(Semaphore::new(DISCOVERY_CONCURRENCY));
-    let seen = Arc::new(tokio::sync::Mutex::new(HashSet::<String>::new()));
-
-    let mut tasks = Vec::with_capacity(candidates.len());
-    for url in candidates {
-        let client = client.clone();
-        let keywords = keywords.clone();
-        let semaphore = semaphore.clone();
-        let seen = seen.clone();
-        tasks.push(tokio::spawn(async move {
-            let _permit = semaphore.acquire().await.ok()?;
-            // Deduplicate inside the worker too.
-            {
-                let mut guard = seen.lock().await;
-                if !guard.insert(url.clone()) {
-                    return None;
-                }
-            }
-            let host = extract_host(&url)?;
-            if !dns_resolves(&host).await {
-                return None;
-            }
-            let fetcher = Fetcher::from_client((*client).clone()).ok()?;
-            validate_url(&fetcher, &url, &keywords).await
-        }));
+    let index = LiveIndex::new().context("failed to build live search index")?;
+    let opts = EngineOptions {
+        max_results: 10,
+        ..EngineOptions::default()
+    };
+    let outcome = index.search(query, &opts).await;
+    if outcome.engines_failed > 0 {
+        tracing::warn!(
+            "live seed discovery: {}/{} engines failed",
+            outcome.engines_failed,
+            outcome.total_engines
+        );
+    }
+    if outcome.fused.is_empty() {
+        return Ok(Vec::new());
     }
 
-    let mut validated: Vec<DiscoveredSeed> = Vec::new();
-    for task in tasks {
-        if validated.len() >= MAX_SEEDS {
-            break;
+    let mut seeds: Vec<DiscoveredSeed> = Vec::new();
+    for hit in &outcome.fused {
+        if exclude.contains(&hit.url) {
+            continue;
         }
-        if let Ok(Some(seed)) = task.await {
-            validated.push(seed);
+        let relevance =
+            live_hit_relevance(&keywords, &hit.title, &hit.snippet, hit.score, opts.rrf_k);
+        if relevance <= 0.0 {
+            continue;
         }
+        seeds.push(DiscoveredSeed {
+            url: hit.url.clone(),
+            relevance,
+        });
     }
 
-    validated.sort_by(|a, b| {
+    seeds.sort_by(|a, b| {
         b.relevance
             .partial_cmp(&a.relevance)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    validated.truncate(MAX_SEEDS);
-    Ok(validated)
+    seeds.truncate(MAX_SEEDS);
+    Ok(seeds)
 }
 
-/// Validate a candidate URL by fetching it and computing relevance to the query.
-async fn validate_url(fetcher: &Fetcher, url: &str, keywords: &[String]) -> Option<DiscoveredSeed> {
-    let content = fetcher.fetch_url(url).await.ok()?;
-
-    if !content.is_valid_content {
-        return None;
+/// Relevance of a live search hit: keyword matches in the title/snippet
+/// dominate, and the normalized fused score (cross-engine agreement) boosts.
+fn live_hit_relevance(
+    keywords: &[String],
+    title: &str,
+    snippet: &str,
+    fused_score: f64,
+    rrf_k: u32,
+) -> f64 {
+    let text = format!("{} {}", title, snippet).to_lowercase();
+    let keyword_rel = keyword_relevance(keywords, &text);
+    if keyword_rel <= 0.0 {
+        return 0.0;
     }
-
-    let relevance = compute_page_relevance(&content, keywords);
-    Some(DiscoveredSeed {
-        url: content.final_url,
-        relevance,
-    })
+    // Normalize the fused RRF score to 0..1: a rank-1 single-engine hit scores
+    // 1/(k+1), so multiplying by k maps it near 1.0; cross-engine agreement
+    // pushes it past 1.0 and is clamped.
+    let fused_norm = (fused_score * f64::from(rrf_k.max(1))).clamp(0.0, 1.0);
+    (keyword_rel * 0.8 + fused_norm * 0.2).clamp(0.0, 1.0)
 }
 
-/// Compute relevance of extracted content to query keywords (0.0–1.0).
-fn compute_page_relevance(content: &StructuredContent, keywords: &[String]) -> f64 {
-    let title = content.title.to_lowercase();
-    let excerpt = content.excerpt.to_lowercase();
-    let description = content.description.as_deref().unwrap_or("").to_lowercase();
-    let text = content.content_text.to_lowercase();
-
-    let title_score = keyword_density(&title, keywords) * 0.35;
-    let excerpt_score = keyword_density(&excerpt, keywords) * 0.25;
-    let description_score = keyword_density(&description, keywords) * 0.15;
-    let body_score = keyword_density(&text, keywords) * 0.20;
-
-    let mut score = (title_score + excerpt_score + description_score + body_score).clamp(0.0, 1.0);
-
-    // Penalize very short or suspicious pages.
-    if content.word_count < 50 {
-        score *= 0.5;
-    }
-    if is_parked_or_generic(&content) {
-        score *= 0.1;
-    }
-
-    score
-}
-
-/// Heuristic detection of parked/generic pages.
-fn is_parked_or_generic(content: &StructuredContent) -> bool {
-    let title_lower = content.title.to_lowercase();
-    let excerpt_lower = content.excerpt.to_lowercase();
-    let indicators = [
-        "domain for sale",
-        "buy this domain",
-        "parked free",
-        "coming soon",
-        "under construction",
-        "403 forbidden",
-        "404 not found",
-        "503 service unavailable",
-    ];
-    indicators
-        .iter()
-        .any(|i| title_lower.contains(i) || excerpt_lower.contains(i))
-}
-
-/// Generate URL candidates from keywords.
+/// Whether a query keyword matches a catalog topic.
 ///
-/// Candidates are interleaved by TLD so that the most important top-level
-/// domains (com, org, io, ai, ...) get both single-keyword and multi-word
-/// phrase coverage before falling back to less common TLDs. Generation stops
-/// at `MAX_CANDIDATES`.
-fn generate_candidates(keywords: &[String]) -> Vec<String> {
-    let mut candidates: Vec<String> = Vec::with_capacity(MAX_CANDIDATES);
-
-    // Most productive patterns; avoid combinatorial explosion.
-    const PHRASE_PATTERNS: &[&str] = &[
-        "https://{k}.{tld}",
-        "https://www.{k}.{tld}",
-        "https://get{k}.{tld}",
-        "https://the{k}.{tld}",
-    ];
-
-    let single: Vec<String> = keywords.iter().take(4).cloned().collect();
-    let pairs: Vec<String> = keywords
-        .windows(2)
-        .take(3)
-        .flat_map(|w| vec![w.join("-"), w.join("")])
-        .collect();
-    let triple: Option<String> = if keywords.len() >= 3 {
-        Some(keywords[..3].join("-"))
-    } else {
-        None
-    };
-
-    for tld in TLDS {
-        for phrase in &single {
-            for pattern in PHRASE_PATTERNS {
-                add_url(&mut candidates, pattern, phrase, tld);
-            }
-        }
-        for phrase in &pairs {
-            for pattern in PHRASE_PATTERNS {
-                add_url(&mut candidates, pattern, phrase, tld);
-            }
-        }
-        if let Some(phrase) = &triple {
-            for pattern in PHRASE_PATTERNS {
-                add_url(&mut candidates, pattern, phrase, tld);
-            }
-        }
-
-        if candidates.len() >= MAX_CANDIDATES {
-            break;
-        }
+/// A match is a direct substring either way OR a shared morphological root of
+/// at least 4 chars, so "secure" matches the "security" topic without "chain"
+/// matching the "ai" topic (a false substring). All inputs are lowercase.
+fn topics_match(keyword: &str, topic: &str) -> bool {
+    if keyword.contains(topic) || topic.contains(keyword) {
+        return true;
     }
-
-    candidates.truncate(MAX_CANDIDATES);
-    candidates
-}
-
-fn add_url(candidates: &mut Vec<String>, pattern: &str, phrase: &str, tld: &str) {
-    let normalized = phrase
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-')
-        .collect::<String>()
-        .to_lowercase();
-    if normalized.is_empty() || normalized.len() > 40 {
-        return;
-    }
-    let url = pattern.replace("{k}", &normalized).replace("{tld}", tld);
-    candidates.push(url);
-}
-
-/// Extract informative keywords from a query.
-fn extract_keywords(query: &str) -> Vec<String> {
-    let stop_set: HashSet<&str> = STOP_WORDS.iter().copied().collect();
-    let mut keywords: Vec<String> = query
-        .to_lowercase()
-        .split_whitespace()
-        .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
-        .filter(|s| !s.is_empty() && !stop_set.contains(s) && s.len() > 1)
-        .map(|s| s.to_string())
-        .collect();
-
-    // Deduplicate while preserving order.
-    let mut seen = HashSet::new();
-    keywords.retain(|k| seen.insert(k.clone()));
-    keywords.truncate(6);
-    keywords
+    // Shared root of >=4 chars (e.g. "secure" / "security" → "secur").
+    let min = keyword.len().min(topic.len());
+    let prefix = (0..min)
+        .take_while(|&i| keyword.as_bytes()[i] == topic.as_bytes()[i])
+        .count();
+    prefix >= 4
 }
 
 /// Compute keyword relevance score for a text blob.
@@ -655,52 +446,6 @@ fn keyword_relevance(keywords: &[String], text: &str) -> f64 {
     (matches as f64 / keywords.len() as f64).clamp(0.0, 1.0)
 }
 
-/// Compute keyword density (matches weighted by position/title).
-fn keyword_density(text: &str, keywords: &[String]) -> f64 {
-    if keywords.is_empty() || text.is_empty() {
-        return 0.0;
-    }
-    let text_lower = text.to_lowercase();
-    let words: Vec<&str> = text_lower.split_whitespace().collect();
-    if words.is_empty() {
-        return 0.0;
-    }
-
-    let mut matched_words = 0usize;
-    let mut keyword_hits = 0usize;
-    for word in &words {
-        for kw in keywords {
-            if word.contains(kw) || kw.contains(word) {
-                matched_words += 1;
-                keyword_hits += 1;
-                break;
-            }
-        }
-    }
-
-    let density = matched_words as f64 / words.len() as f64;
-    let hit_rate = keyword_hits as f64 / keywords.len() as f64;
-
-    (density * 2.0 + hit_rate * 0.5).clamp(0.0, 1.0)
-}
-
-/// Check if a hostname resolves via DNS.
-async fn dns_resolves(host: &str) -> bool {
-    let host = host.to_string();
-    let timeout = tokio::time::Duration::from_secs(DNS_TIMEOUT_SECS);
-    match tokio::time::timeout(timeout, lookup_host(format!("{}:80", host))).await {
-        Ok(Ok(mut iter)) => iter.next().is_some(),
-        _ => false,
-    }
-}
-
-/// Extract host from URL.
-fn extract_host(url: &str) -> Option<String> {
-    url::Url::parse(url)
-        .ok()
-        .map(|u| u.host_str().unwrap_or("").to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,63 +459,105 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_candidates() {
-        let candidates = generate_candidates(&["rust".to_string(), "async".to_string()]);
-        assert!(candidates.contains(&"https://rust.com".to_string()));
-        assert!(candidates.contains(&"https://rust-async.com".to_string()));
+    fn test_live_hit_relevance_blends_keywords_and_fusion() {
+        let keywords = vec![
+            "rust".to_string(),
+            "async".to_string(),
+            "runtime".to_string(),
+        ];
+        // Title+snippet match all keywords → clears the quality bar.
+        let high = live_hit_relevance(
+            &keywords,
+            "Rust async runtime",
+            "Tokio is a Rust async runtime",
+            0.0328, // shared rank-1 across two engines
+            60,
+        );
+        assert!(
+            high >= 0.55,
+            "full keyword match must clear the bar: {high}"
+        );
+        // No keyword match → zero, regardless of fused score.
+        let zero = live_hit_relevance(&keywords, "Cooking recipes", "Pasta and sauce", 0.5, 60);
+        assert_eq!(zero, 0.0);
+        // Cross-engine agreement boosts over a single-engine hit.
+        let shared = live_hit_relevance(&keywords, "Rust async", "runtime", 0.0328, 60);
+        let single = live_hit_relevance(&keywords, "Rust async", "runtime", 0.0164, 60);
+        assert!(shared > single);
     }
 
     #[test]
-    fn test_compute_page_relevance() {
-        let content = StructuredContent {
-            url: "https://rust-lang.org".to_string(),
-            final_url: "https://rust-lang.org".to_string(),
-            status_code: 200,
-            title: "Rust Programming Language".to_string(),
-            description: Some(
-                "A language empowering everyone to build reliable software.".to_string(),
-            ),
-            canonical_url: None,
-            language: "en".to_string(),
-            language_confidence: 0.95,
-            published_at: None,
-            modified_at: None,
-            author: None,
-            site_name: None,
-            content_text: "Rust is a systems programming language.".to_string(),
-            content_html: "<p>Rust</p>".to_string(),
-            content_markdown: "Rust".to_string(),
-            excerpt: "Rust is a systems programming language.".to_string(),
-            word_count: 100,
-            char_count: 100,
-            sentence_count: 5,
-            reading_time_seconds: 30,
-            reading_ease: 60.0,
-            grade_level: 8.0,
-            keywords: vec![],
-            open_graph: None,
-            twitter_card: None,
-            json_ld: vec![],
-            schema_type: None,
-            images: vec![],
-            internal_links: vec![],
-            external_links: vec![],
-            favicon: None,
-            rss_url: None,
-            normalized_text: "Rust".to_string(),
-            fetched_at: chrono::Utc::now(),
-            fetch_duration_ms: 100,
-            html_size_bytes: 1000,
-            encoding: None,
-            ssl_valid: true,
-            redirect_count: 0,
-            is_paywalled: false,
-            is_valid_content: true,
-            content_type: "text/html".to_string(),
-            content_type_header: "text/html".to_string(),
-            entities: crate::schema::content::Entities::default(),
-        };
-        let relevance = compute_page_relevance(&content, &["rust".to_string()]);
-        assert!(relevance > 0.5, "relevance should be high for Rust content");
+    fn test_discover_from_catalog_prefers_authoritative_sources() {
+        // "rust" must resolve to curated official docs, not a domain guess.
+        let seeds = discover_from_catalog("rust programming language 2026");
+        assert!(
+            !seeds.is_empty(),
+            "catalog should return seeds for a programming query"
+        );
+        assert!(
+            seeds.iter().any(|s| s.url.contains("rust")),
+            "expected a rust-specific authoritative source, got: {:?}",
+            seeds
+        );
+        // A rust-specific source must rank first: doc.rust-lang.org outranks
+        // generic programming sources because its URL contains "rust".
+        assert!(
+            seeds
+                .first()
+                .map(|s| s.url.contains("rust"))
+                .unwrap_or(false),
+            "rust-specific source should be first, got: {:?}",
+            seeds.first()
+        );
+        assert!(
+            seeds.iter().all(|s| s.url.starts_with("https://")),
+            "all catalog seeds must be https"
+        );
+        // Catalog seeds are authoritative: above the high-quality bar.
+        assert!(
+            seeds.iter().all(|s| s.relevance >= MIN_RELEVANCE),
+            "catalog seeds must clear the high-quality threshold"
+        );
+    }
+
+    #[test]
+    fn test_discover_from_catalog_ranks_exact_url_matches_first() {
+        // For a rust query, doc.rust-lang.org (URL contains "rust") must be
+        // ranked above unrelated-but-programming sources like go.dev or MDN.
+        let seeds = discover_from_catalog("rust async runtime tokio");
+        assert!(
+            seeds
+                .first()
+                .map(|s| s.url.contains("rust"))
+                .unwrap_or(false),
+            "rust URL match must rank first: {:?}",
+            seeds.first()
+        );
+    }
+
+    #[test]
+    fn test_discover_from_catalog_ignores_unrelated_topics() {
+        // A finance-only query must not pull programming docs.
+        let seeds = discover_from_catalog("interest rate central bank");
+        assert!(
+            seeds.iter().all(|s| !s.url.contains("rust.org")),
+            "unrelated catalog domains should not match"
+        );
+    }
+
+    #[test]
+    fn test_discover_from_catalog_catches_security_query() {
+        // A supply-chain / security query must resolve to cybersecurity
+        // sources, not off-target AI/blog seeds.
+        let seeds = discover_from_catalog("secure software supply chain practices 2026");
+        assert!(
+            seeds.iter().any(|s| s.url.contains("securelist")
+                || s.url.contains("krebsonsecurity")
+                || s.url.contains("nvd.nist.gov")
+                || s.url.contains("cloudflare.com")
+                || s.url.contains("mandiant")),
+            "expected cybersecurity sources for a security query, got: {:?}",
+            seeds
+        );
     }
 }

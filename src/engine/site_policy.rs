@@ -84,6 +84,116 @@ pub struct SitemapUrl {
     pub priority: f32,
 }
 
+/// One curated link from an `llms.txt` / `llm.txt` file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LlmsEntry {
+    pub name: String,
+    pub url: String,
+    pub description: Option<String>,
+}
+
+/// A titled group of curated links inside an LLM index file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LlmsSection {
+    pub heading: String,
+    pub entries: Vec<LlmsEntry>,
+}
+
+/// Parsed `/llms.txt` (Jeremy Howard proposal, llmstxt.org) or the `llm.txt`
+/// compatibility variant. The file is the site owner's curated briefing: which
+/// pages matter, in what order. It does NOT grant access — robots.txt remains
+/// the access control layer — but it tells a research crawler the site's
+/// declared content surface, which we use to auto-map crawl depth and to keep
+/// link-following inside the site's own map.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LlmsIndex {
+    pub site_name: Option<String>,
+    pub summary: Option<String>,
+    pub sections: Vec<LlmsSection>,
+}
+
+impl LlmsIndex {
+    /// Parse an llms.txt body per the llmstxt.org proposal:
+    /// optional BOM, H1 site name, blockquote summary, optional context
+    /// paragraphs, then zero or more H2 sections whose entries are markdown
+    /// links (`- [Name](url)` optionally followed by `: description`).
+    pub fn parse(text: &str) -> Self {
+        let mut index = LlmsIndex::default();
+        let mut current_section: Option<LlmsSection> = None;
+        let mut context_summary = String::new();
+
+        for raw_line in text.lines() {
+            let line = raw_line.trim_start_matches('\u{feff}').trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(name) = line.strip_prefix("# ") {
+                if index.site_name.is_none() {
+                    index.site_name = Some(name.trim().to_string());
+                }
+            } else if let Some(summary) = line.strip_prefix("> ") {
+                if !context_summary.is_empty() {
+                    context_summary.push(' ');
+                }
+                context_summary.push_str(summary.trim());
+            } else if let Some(heading) = line.strip_prefix("## ") {
+                if let Some(section) = current_section.take() {
+                    index.sections.push(section);
+                }
+                current_section = Some(LlmsSection {
+                    heading: heading.trim().to_string(),
+                    entries: Vec::new(),
+                });
+            } else if let Some(rest) = line.strip_prefix("- ") {
+                if let Some(entry) = Self::parse_entry(rest) {
+                    let section = current_section.get_or_insert_with(|| LlmsSection {
+                        heading: String::new(),
+                        entries: Vec::new(),
+                    });
+                    section.entries.push(entry);
+                }
+            }
+            // Non-heading context paragraphs are deliberately ignored: the
+            // proposal allows free-form prose that has no crawlable structure.
+        }
+
+        if let Some(section) = current_section.take() {
+            index.sections.push(section);
+        }
+        if !context_summary.is_empty() {
+            index.summary = Some(context_summary);
+        }
+        index
+    }
+
+    /// Parse a single `- [Name](url): description` list item.
+    fn parse_entry(rest: &str) -> Option<LlmsEntry> {
+        let name_end = rest.find("](")?;
+        let name = rest[..name_end].strip_prefix('[')?.trim().to_string();
+        let after_name = &rest[name_end + 2..];
+        let url_end = after_name.find(')')?;
+        let url = after_name[..url_end].trim().to_string();
+        if name.is_empty() || url.is_empty() {
+            return None;
+        }
+        let tail = after_name[url_end + 1..].trim();
+        let description = tail.strip_prefix(':').map(|d| d.trim().to_string());
+        Some(LlmsEntry {
+            name,
+            url,
+            description: description.filter(|d| !d.is_empty()),
+        })
+    }
+
+    /// All entry URLs across every section, in document order.
+    pub fn urls(&self) -> impl Iterator<Item = &str> {
+        self.sections
+            .iter()
+            .flat_map(|s| s.entries.iter())
+            .map(|e| e.url.as_str())
+    }
+}
+
 /// Complete structural blueprint of a site: robots rules + all sitemap URLs.
 /// Designed to feed both the crawler queue and a SurrealDB graph vector store.
 #[derive(Debug, Clone, Default)]
@@ -93,6 +203,9 @@ pub struct SiteBlueprint {
     /// URLs discovered from sitemap.xml and robots.txt-referenced sitemaps,
     /// deduplicated and sorted by descending priority.
     pub sitemap_urls: Vec<SitemapUrl>,
+    /// Curated LLM index from `/llms.txt` (or the `llm.txt` variant), if the
+    /// site publishes one. The site's own statement of which pages matter.
+    pub llms: Option<LlmsIndex>,
     /// Topic keywords extracted from sampling top sitemap pages.
     pub topic_keywords: Vec<String>,
 }
@@ -138,16 +251,25 @@ impl SiteExplorer {
         let base = format!("{}://{}", scheme, host_with_port);
         let robots_url = format!("{}/robots.txt", base);
         let sitemap_url = format!("{}/sitemap.xml", base);
+        let llms_url = format!("{}/llms.txt", base);
+        let llm_url = format!("{}/llm.txt", base);
 
-        // TRUE PARALLEL fetch of robots.txt and the root sitemap.
-        let (robots_res, sitemap_res) = join!(
+        // TRUE PARALLEL fetch of robots.txt, the root sitemap, and the
+        // site's curated LLM index (llms.txt preferred, llm.txt fallback).
+        let (robots_res, sitemap_res, llms_res) = join!(
             Self::fetch_robots(&self.client, &robots_url),
-            self.fetch_sitemap(sitemap_url, 0)
+            self.fetch_sitemap(sitemap_url, 0),
+            Self::fetch_llms_index(&self.client, &llms_url, &llm_url),
         );
 
         let robots = robots_res.unwrap_or_else(|e| {
             warn!("robots.txt fetch failed for {}: {}", host, e);
             RobotsPolicy::default()
+        });
+
+        let llms = llms_res.unwrap_or_else(|e| {
+            warn!("llms.txt/llm.txt fetch failed for {}: {}", host, e);
+            None
         });
 
         let mut sitemap_urls = sitemap_res.unwrap_or_default();
@@ -193,6 +315,7 @@ impl SiteExplorer {
             domain: host,
             robots,
             sitemap_urls,
+            llms,
             topic_keywords: Vec::new(),
         })
     }
@@ -270,6 +393,37 @@ impl SiteExplorer {
         };
 
         Ok(RobotsPolicy::parse(&text))
+    }
+
+    /// Fetch the site's curated LLM index: `/llms.txt` first (the canonical
+    /// filename from the llmstxt.org proposal), falling back to `/llm.txt`
+    /// (a compatibility variant some sites publish). Returns `None` when
+    /// neither file exists.
+    async fn fetch_llms_index(
+        client: &reqwest::Client,
+        llms_url: &str,
+        llm_url: &str,
+    ) -> Result<Option<LlmsIndex>> {
+        for url in [llms_url, llm_url] {
+            let response = client.get(url).send().await;
+            let text = match response {
+                Ok(r) if r.status().is_success() => r.text().await.context("read llms.txt body")?,
+                Ok(r) => {
+                    debug!("llms.txt returned status {} at {}", r.status(), url);
+                    continue;
+                }
+                Err(e) => {
+                    debug!("llms.txt fetch failed at {}: {}", url, e);
+                    continue;
+                }
+            };
+            let index = LlmsIndex::parse(&text);
+            if index.site_name.is_some() || !index.sections.is_empty() {
+                debug!("parsed LLM index from {}", url);
+                return Ok(Some(index));
+            }
+        }
+        Ok(None)
     }
 
     async fn fetch_sitemap(&self, url: impl AsRef<str>, depth: usize) -> Result<Vec<SitemapUrl>> {
@@ -436,5 +590,79 @@ mod tests {
         assert!((urls[0].priority - 0.8).abs() < f32::EPSILON);
         assert_eq!(urls[0].changefreq.as_deref(), Some("daily"));
         assert_eq!(urls[1].url, "https://example.com/page2");
+    }
+
+    #[test]
+    fn test_parse_llms_index_full() {
+        // Mirrors the canonical llmstxt.org example: BOM, H1, blockquote
+        // summary, context paragraph, then H2 sections with link lists.
+        let body = "\u{feff}# Example Company\n\
+> Example Company provides examples for everyone.\n\
+\n\
+Example Company is a fictional company used in examples.\n\
+\n\
+## Useful Links\n\
+- [Main Website](https://example.com/): The main website of Example Company.\n\
+- [Documentation](https://docs.example.com/)\n\
+- [Blog](https://example.com/blog): News and updates.\n\
+\n\
+## API Reference\n\
+- [REST API](https://api.example.com/v1)\n";
+        let index = LlmsIndex::parse(body);
+        assert_eq!(index.site_name.as_deref(), Some("Example Company"));
+        assert_eq!(
+            index.summary.as_deref(),
+            Some("Example Company provides examples for everyone.")
+        );
+        assert_eq!(index.sections.len(), 2);
+        assert_eq!(index.sections[0].heading, "Useful Links");
+        assert_eq!(index.sections[0].entries.len(), 3);
+        assert_eq!(index.sections[0].entries[0].name, "Main Website");
+        assert_eq!(index.sections[0].entries[0].url, "https://example.com/");
+        assert_eq!(
+            index.sections[0].entries[0].description.as_deref(),
+            Some("The main website of Example Company.")
+        );
+        // Entry without description.
+        assert_eq!(
+            index.sections[0].entries[1].url,
+            "https://docs.example.com/"
+        );
+        assert!(index.sections[0].entries[1].description.is_none());
+        assert_eq!(index.sections[1].heading, "API Reference");
+        assert_eq!(index.sections[1].entries.len(), 1);
+        // urls() flattens all sections in document order.
+        let urls: Vec<&str> = index.urls().collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/",
+                "https://docs.example.com/",
+                "https://example.com/blog",
+                "https://api.example.com/v1",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_llms_index_garbage_is_empty() {
+        let index = LlmsIndex::parse("not an llms.txt at all\nno headings\nrandom prose\n");
+        assert!(index.site_name.is_none());
+        assert!(index.sections.is_empty());
+        // A malformed list item must not panic and yields no entry.
+        let index = LlmsIndex::parse("- [broken link without parens\n");
+        assert!(index.sections.is_empty() || index.sections[0].entries.is_empty());
+    }
+
+    #[test]
+    fn test_parse_llm_txt_variant() {
+        // The llm.txt compatibility variant carries the same structure.
+        let body = "# Docs\n> All docs.\n\n## Guides\n- [Quickstart](https://docs.example.com/quickstart): 5 minutes.\n";
+        let index = LlmsIndex::parse(body);
+        assert_eq!(index.site_name.as_deref(), Some("Docs"));
+        assert_eq!(
+            index.sections[0].entries[0].url,
+            "https://docs.example.com/quickstart"
+        );
     }
 }

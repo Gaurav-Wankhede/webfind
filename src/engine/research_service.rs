@@ -33,10 +33,17 @@ pub struct ResearchOptions {
     pub follow_external: bool,
     pub min_depth: u32,
     pub max_depth: u32,
+    /// Auto-map crawl depth from the site's own map (sitemap/llms.txt) and
+    /// bound link-following to the site's declared content surface.
+    pub auto_depth: bool,
     pub topics: Option<String>,
     pub proxies: Option<String>,
     /// Domain filter: only return results whose domain matches one of these.
     pub domain_filter: Vec<String>,
+    /// Render JS-heavy / bot-protected pages in headless Chromium (CDP).
+    pub dynamic: bool,
+    /// Deep research: no crawl deadline / backoff caps + CDP stealth + scroll.
+    pub deep: bool,
 }
 
 /// Errors that can occur during research.
@@ -175,18 +182,27 @@ where
         options.max_depth,
     )
     .with_respect_robots(RespectRobots::Yes)
+    .with_auto_depth(options.auto_depth)
     .with_graph_store(graph.clone())
     .with_background_worker(background_worker.clone())
-    .with_topics(topics);
+    .with_topics(topics)
+    .with_dynamic(options.dynamic)
+    .with_deep(options.deep);
 
     let max_pages = options.max_pages.clamp(1, 500) as usize;
     let total_estimate = max_pages;
 
-    // Multi-seed crawl with periodic progress updates.
+    // Multi-seed crawl with periodic progress updates. The total page budget
+    // is split across seeds so `--max-pages N` means N pages total, not N per
+    // seed (auto-discovery can return up to 5 seeds).
     let mut contents: Vec<StructuredContent> = Vec::new();
     let mut seen_urls: HashSet<String> = HashSet::new();
+    let mut remaining = max_pages;
 
     for seed_url in &all_seeds {
+        if remaining == 0 {
+            break;
+        }
         progress(ResearchProgress {
             stage: "crawling",
             crawled: contents.len(),
@@ -195,12 +211,13 @@ where
         });
 
         let crawled = crawler
-            .crawl(seed_url)
+            .crawl_with_limit(seed_url, remaining)
             .await
             .map_err(ResearchError::Crawl)?;
         for c in crawled {
             if seen_urls.insert(c.url.clone()) {
                 contents.push(c);
+                remaining = remaining.saturating_sub(1);
                 progress(ResearchProgress {
                     stage: "crawling",
                     crawled: contents.len(),
