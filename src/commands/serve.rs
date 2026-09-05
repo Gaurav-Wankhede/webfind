@@ -15,7 +15,6 @@ use webfind::storage::turso_store::TursoStore;
 pub async fn run(
     cfg: &webfind::config::WebfindConfig,
     port: u16,
-    transport: webfind::cli::TransportArg,
     graph_store: Option<GraphStoreArg>,
     turso_path: Option<String>,
     hybrid: bool,
@@ -95,7 +94,9 @@ pub async fn run(
                         .await
                     {
                         Ok(pruned) if pruned > 0 => {
-                            tracing::info!("storage budget: evicted full content for {pruned} pages");
+                            tracing::info!(
+                                "storage budget: evicted full content for {pruned} pages"
+                            );
                         }
                         Ok(_) => {}
                         Err(e) => tracing::warn!("storage budget enforcement failed: {e}"),
@@ -109,52 +110,37 @@ pub async fn run(
         None
     };
 
-    match transport {
-        webfind::cli::TransportArg::Http => {
-            println!("Starting HTTP search API on port {}", port);
-            if rate_limit.is_some() {
-                println!("Rate limiting enabled");
-            }
-            println!("Starting WebFind GUI on port {}", gui_port);
-            if query_log.is_some() {
-                println!("Query log & autocomplete enabled");
-            }
-
-            let state = Arc::new(
-                webfind::api::ApiState::new(
-                    indexer,
-                    Some(graph_store),
-                    audit_store,
-                    webfind::config::data_dir(),
-                )
-                .with_query_log(query_log)
-                .with_categories(categories),
-            );
-
-            let cfg_clone = cfg.clone();
-            let api_handle = tokio::spawn(webfind::api::run_server(
-                state.clone(),
-                rate_limit,
-                port,
-                cfg_clone,
-            ));
-            let gui_handle = tokio::spawn(webfind::gui::run_server(state.clone(), gui_port));
-
-            let (api_res, gui_res) = tokio::try_join!(api_handle, gui_handle)?;
-            api_res?;
-            gui_res?;
-            Ok(())
-        }
-        webfind::cli::TransportArg::Stdio => {
-            eprintln!("Starting MCP server on stdio");
-            webfind::mcp::WebfindMcpServer::run_stdio(
-                indexer,
-                Some(graph_store),
-                audit_store,
-                webfind::config::data_dir(),
-            )
-            .await?;
-            Ok(())
-        }
+    println!("Starting HTTP search API on port {}", port);
+    if rate_limit.is_some() {
+        println!("Rate limiting enabled");
     }
+    println!("Starting WebFind GUI on port {}", gui_port);
+    if query_log.is_some() {
+        println!("Query log & autocomplete enabled");
+    }
+
+    let state = Arc::new(
+        webfind::api::ApiState::new(
+            indexer,
+            Some(graph_store),
+            audit_store,
+            webfind::config::data_dir(),
+        )
+        .with_query_log(query_log)
+        .with_categories(categories),
+    );
+
+    let cfg_clone = cfg.clone();
+    let api_handle = tokio::spawn(webfind::api::run_server(
+        state.clone(),
+        rate_limit,
+        port,
+        cfg_clone,
+    ));
+    let gui_handle = tokio::spawn(webfind::gui::run_server(state.clone(), gui_port));
+
+    let (api_res, gui_res) = tokio::try_join!(api_handle, gui_handle)?;
+    api_res?;
+    gui_res?;
+    Ok(())
 }
