@@ -473,12 +473,20 @@ impl GraphStoreArg {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_arg(s: &str) -> Option<Self> {
         match s {
             "turso" => Some(GraphStoreArg::Turso),
             "memory" => Some(GraphStoreArg::Memory),
             _ => None,
         }
+    }
+}
+
+impl std::str::FromStr for GraphStoreArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_arg(s).ok_or_else(|| format!("unknown graph store: {}", s))
     }
 }
 

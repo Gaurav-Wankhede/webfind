@@ -97,6 +97,10 @@ impl ApiState {
     pub fn categories(&self) -> Option<Arc<crate::engine::categories::CategoryService>> {
         self.categories.clone()
     }
+
+    pub fn audit_store(&self) -> Option<Arc<dyn FingerprintAuditLog + Send + Sync>> {
+        self.audit_store.clone()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,13 +256,11 @@ pub async fn search(
     if let Some(ref proxies_str) = params.proxies {
         for url in proxies_str.split(',') {
             let url = url.trim();
-            if !url.is_empty() {
-                if let Ok(ep) = crate::engine::proxy_pool::ProxyEndpoint::from_url(url) {
-                    if let Err(e) = proxy_pool.add(ep) {
+            if !url.is_empty()
+                && let Ok(ep) = crate::engine::proxy_pool::ProxyEndpoint::from_url(url)
+                    && let Err(e) = proxy_pool.add(ep) {
                         tracing::warn!("failed to add proxy: {e}");
                     }
-                }
-            }
         }
     }
 
@@ -346,8 +348,8 @@ pub async fn search(
 
     let mut fresh_contents: Vec<StructuredContent> = Vec::new();
     for (i, task) in fetch_tasks.into_iter().enumerate() {
-        if let Ok(Some(content)) = task.await {
-            if content.is_valid_content {
+        if let Ok(Some(content)) = task.await
+            && content.is_valid_content {
                 db_results[i].title = content.title.clone();
                 db_results[i].snippet = content.excerpt.clone();
                 db_results[i].crawled_at = content.fetched_at;
@@ -357,15 +359,14 @@ pub async fn search(
                     db_results[i].content = Some(crate::schema::response::ContentBlock {
                         text: content.content_text.clone(),
                         excerpt: content.excerpt.clone(),
-                        word_count: content.word_count.max(0) as u32,
-                        reading_time_seconds: content.reading_time_seconds.max(0) as u32,
+                        word_count: content.word_count,
+                        reading_time_seconds: content.reading_time_seconds,
                         html: Some(content.content_html.clone()),
                         markdown: Some(content.content_markdown.clone()),
                     });
                 }
                 fresh_contents.push(content);
             }
-        }
     }
 
     // Drop unfetchable results unless we have nothing left.
@@ -392,7 +393,7 @@ pub async fn search(
                 site_name: c.site_name.clone(),
                 score: 0.0,
                 scores: ScoreBreakdown {
-                    bm25: 0.0,
+                    bm25: None,
                     vector: None,
                     graph: None,
                     freshness: None,
@@ -403,8 +404,8 @@ pub async fn search(
                     Some(crate::schema::response::ContentBlock {
                         text: c.content_text.clone(),
                         excerpt: c.excerpt.clone(),
-                        word_count: c.word_count.max(0) as u32,
-                        reading_time_seconds: c.reading_time_seconds.max(0) as u32,
+                        word_count: c.word_count,
+                        reading_time_seconds: c.reading_time_seconds,
                         html: Some(c.content_html.clone()),
                         markdown: Some(c.content_markdown.clone()),
                     })
@@ -736,7 +737,7 @@ pub async fn research(
                     site_name: c.site_name.clone(),
                     score: 0.0,
                     scores: ScoreBreakdown {
-                        bm25: 0.0,
+                        bm25: None,
                         vector: None,
                         graph: None,
                         freshness: None,
@@ -746,8 +747,8 @@ pub async fn research(
                     content: Some(crate::schema::response::ContentBlock {
                         text: c.content_text.clone(),
                         excerpt: c.excerpt.clone(),
-                        word_count: c.word_count.max(0) as u32,
-                        reading_time_seconds: c.reading_time_seconds.max(0) as u32,
+                        word_count: c.word_count,
+                        reading_time_seconds: c.reading_time_seconds,
                         html: Some(c.content_html.clone()),
                         markdown: Some(c.content_markdown.clone()),
                     }),

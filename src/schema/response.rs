@@ -47,7 +47,7 @@ pub struct SearchResult {
 /// Score breakdown by ranking signal
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoreBreakdown {
-    pub bm25: f64,
+    pub bm25: Option<f64>,
     pub vector: Option<f64>,
     pub graph: Option<f64>,
     pub freshness: Option<f64>,

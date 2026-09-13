@@ -546,8 +546,8 @@ impl SessionManager {
 
     /// Get or create a session for a domain.
     pub fn session_for(&self, domain: &str, proxy_url: Option<String>) -> Session {
-        if self.sticky {
-            if let Some(session) = self
+        if self.sticky
+            && let Some(session) = self
                 .sessions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -555,7 +555,6 @@ impl SessionManager {
             {
                 return session.clone();
             }
-        }
 
         let profile = DeviceProfile::random();
         let session = Session {

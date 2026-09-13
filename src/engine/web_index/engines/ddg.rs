@@ -69,38 +69,87 @@ impl Engine for DuckDuckGoEngine {
     }
 }
 
+static RESULT_ROW: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("table tr").expect("static selector is valid"));
+
 /// Parse DDG Lite result HTML into ranked hits.
 ///
-/// Links and snippets are collected as separate columns and paired by index,
-/// matching the lite endpoint's table layout.
+/// Attempts row-based parsing first so each link is paired directly with
+/// snippet elements in its own parent row, avoiding cross-result index
+/// desynchronization if an entry is missing a snippet. Falls back to index
+/// pairing if flat elements are used.
 #[must_use]
 pub fn parse_results(html: &str, max_results: usize) -> Vec<Hit> {
     let document = Html::parse_document(html);
-    let links: Vec<ElementRef> = document.select(&RESULT_LINK).collect();
-    let snippets: Vec<ElementRef> = document.select(&RESULT_SNIPPET).collect();
-    let total = links.len().min(snippets.len()).min(max_results);
+    let mut hits = Vec::new();
 
-    let mut hits = Vec::with_capacity(total);
-    for i in 0..total {
-        let Some(href) = links[i].value().attr("href") else {
-            continue;
-        };
-        let title = links[i].text().collect::<String>().trim().to_string();
-        if title.is_empty() {
-            continue;
+    // Check if table rows exist
+    let rows: Vec<ElementRef> = document.select(&RESULT_ROW).collect();
+    if !rows.is_empty() {
+        let mut current_link: Option<(String, String)> = None;
+        for row in rows {
+            if let Some(link) = row.select(&RESULT_LINK).next() {
+                if let Some(href) = link.value().attr("href") {
+                    let title = link.text().collect::<String>().trim().to_string();
+                    if !title.is_empty() {
+                        current_link = Some((href.to_string(), title));
+                    }
+                }
+            } else if let Some((href, title)) = current_link.take() {
+                let snippet = row
+                    .select(&RESULT_SNIPPET)
+                    .next()
+                    .map(|el| el.text().collect::<String>().trim().to_string())
+                    .unwrap_or_default();
+                let published_at = parse_date_from_snippet(&snippet);
+                let snippet = strip_date_prefix(&snippet);
+                let rank = hits.len();
+                hits.push(Hit {
+                    url: normalize_result_url(&href),
+                    title,
+                    snippet,
+                    published_at,
+                    relevance_score: positional_relevance(rank, max_results),
+                    engine: "duckduckgo",
+                });
+                if hits.len() >= max_results {
+                    break;
+                }
+            }
         }
-        let snippet = snippets[i].text().collect::<String>().trim().to_string();
-        let published_at = parse_date_from_snippet(&snippet);
-        let snippet = strip_date_prefix(&snippet);
-        hits.push(Hit {
-            url: normalize_result_url(href),
-            title,
-            snippet,
-            published_at,
-            relevance_score: positional_relevance(i, total),
-            engine: "duckduckgo",
-        });
     }
+
+    // Fallback if rows didn't match (e.g. customized or mock HTML)
+    if hits.is_empty() {
+        let links: Vec<ElementRef> = document.select(&RESULT_LINK).collect();
+        let snippets: Vec<ElementRef> = document.select(&RESULT_SNIPPET).collect();
+        let total = links.len().min(max_results);
+
+        for (i, link) in links.iter().enumerate().take(total) {
+            let Some(href) = link.value().attr("href") else {
+                continue;
+            };
+            let title = link.text().collect::<String>().trim().to_string();
+            if title.is_empty() {
+                continue;
+            }
+            let snippet = snippets
+                .get(i)
+                .map(|s| s.text().collect::<String>().trim().to_string())
+                .unwrap_or_default();
+            let published_at = parse_date_from_snippet(&snippet);
+            let snippet = strip_date_prefix(&snippet);
+            hits.push(Hit {
+                url: normalize_result_url(href),
+                title,
+                snippet,
+                published_at,
+                relevance_score: positional_relevance(i, total),
+                engine: "duckduckgo",
+            });
+        }
+    }
+
     hits
 }
 

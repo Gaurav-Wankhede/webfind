@@ -1,11 +1,6 @@
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Arc;
-
-use webfind::cli::Commands;
 use webfind::engine::device_profile::{SessionManager, StickySessions};
 use webfind::engine::fetcher::{Fetcher, RotateUserAgent};
-use webfind::engine::proxy_pool::{ProxyEndpoint, ProxyPool};
+use webfind::engine::proxy_pool::ProxyPool;
 use webfind::engine::util::split_comma;
 use webfind::render::{BoxFormat, MarkdownFormat, RenderContext, RenderFormat};
 use webfind::schema::content::StructuredContent;
@@ -25,6 +20,7 @@ fn print_fetch_markdown(content: &StructuredContent, show_links: bool, show_keyw
     print!("{}", output);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     url: String,
     urls: Vec<String>,

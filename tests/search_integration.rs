@@ -1,7 +1,5 @@
-use std::sync::Arc;
-
 use chrono::{TimeZone, Utc};
-use webfind::engine::indexer::{attach_content, build_metadata};
+use webfind::engine::indexer::build_metadata;
 use webfind::engine::ranker::Ranker;
 use webfind::engine::search_engine::{InMemorySearchEngine, SearchEngine};
 use webfind::report::format_response;

@@ -95,21 +95,8 @@ pub async fn discover_seeds(
         }
     }
 
-    // If live discovery found nothing (offline/blocked), fall back to the most
-    // obvious query-derived domain candidate so the caller can still attempt a
-    // crawl instead of receiving a hard "no seeds" error.
-    if final_seeds.is_empty() {
-        let keywords = extract_keywords(query);
-        if let Some(first) = keywords.first() {
-            let fallback = format!("https://{}.com", first);
-            if !seen.contains(&fallback) {
-                final_seeds.push(DiscoveredSeed {
-                    url: fallback,
-                    relevance: 0.1,
-                });
-            }
-        }
-    }
+    // If live discovery and catalog found nothing, do not fabricate a fake domain like https://{keyword}.com.
+    // Instead, rely on authentic verified search results or return an actionable error.
 
     // Prefer high-quality seeds. If none reach the quality bar, fall back to
     // the best candidates rather than erroring. The fallback seed above
@@ -147,7 +134,19 @@ pub async fn discover_seeds(
         );
     }
 
-    Ok(final_seeds.into_iter().map(|s| s.url).collect())
+    let sanitized: Vec<String> = final_seeds
+        .into_iter()
+        .filter_map(|s| crate::engine::security_gate::sanitize_url(&s.url).ok())
+        .collect();
+
+    if sanitized.is_empty() {
+        anyhow::bail!(
+            "All candidate seeds for query '{}' were rejected by the security gate (SSRF or malformed URL).",
+            query,
+        );
+    }
+
+    Ok(sanitized)
 }
 
 #[derive(Debug, Clone)]
@@ -195,7 +194,7 @@ fn discover_from_catalog(query: &str) -> Vec<DiscoveredSeed> {
                 let base = 0.95 + 0.05 * ((url_keyword_hits - 1) as f64).min(1.0);
                 // Reddit is community content, not primary sources — slight
                 // penalty so authoritative docs (doc.rust-lang.org, etc.) win ties.
-                if crate::engine::reddit::is_reddit_url(&source.url) {
+                if crate::engine::reddit::is_reddit_url(source.url) {
                     (base - 0.03).max(0.75)
                 } else {
                     base

@@ -115,15 +115,12 @@ impl HumanClient {
         // Generate a fresh privacy fingerprint per request when enabled.
         // CPU-bound work is moved off the async reactor.
         let fingerprint = if let Some(generator) = self.fingerprint_generator.as_ref() {
-            match tokio::task::spawn_blocking({
+            tokio::task::spawn_blocking({
                 let generator = generator.clone();
                 move || generator.generate_for_tool("request").ok()
             })
             .await
-            {
-                Ok(fp) => fp,
-                Err(_) => None,
-            }
+            .unwrap_or_default()
         } else {
             None
         };
@@ -137,7 +134,7 @@ impl HumanClient {
                     .connect_timeout(Duration::from_secs(10))
                     .gzip(true)
                     .build()
-                    .map_err(|e| HumanClientError::Request(e))?,
+                    .map_err(HumanClientError::Request)?,
                 Err(e) => return Err(HumanClientError::Request(e)),
             }
         } else {
@@ -163,8 +160,8 @@ impl HumanClient {
         let resp = req.send().await?;
 
         // Track success/failure in proxy pool.
-        if let Some(ref pool) = self.proxy_pool {
-            if let Some(ref pid) = proxy_url {
+        if let Some(ref pool) = self.proxy_pool
+            && let Some(ref pid) = proxy_url {
                 let result = if resp.status().is_success() {
                     pool.report_success(pid, 0)
                 } else if resp.status().as_u16() == 403 || resp.status().as_u16() == 429 {
@@ -176,7 +173,6 @@ impl HumanClient {
                     tracing::warn!("failed to report proxy status: {e}");
                 }
             }
-        }
 
         // Track fingerprint health.
         let status_code = resp.status().as_u16();

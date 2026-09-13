@@ -144,15 +144,14 @@ impl LlmsIndex {
                     heading: heading.trim().to_string(),
                     entries: Vec::new(),
                 });
-            } else if let Some(rest) = line.strip_prefix("- ") {
-                if let Some(entry) = Self::parse_entry(rest) {
+            } else if let Some(rest) = line.strip_prefix("- ")
+                && let Some(entry) = Self::parse_entry(rest) {
                     let section = current_section.get_or_insert_with(|| LlmsSection {
                         heading: String::new(),
                         entries: Vec::new(),
                     });
                     section.entries.push(entry);
                 }
-            }
             // Non-heading context paragraphs are deliberately ignored: the
             // proposal allows free-form prose that has no crawlable structure.
         }
@@ -354,7 +353,7 @@ impl SiteExplorer {
             *counts.entry(kw).or_insert(0) += 1;
         }
         let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|a| std::cmp::Reverse(a.1));
         blueprint.topic_keywords = sorted.into_iter().take(20).map(|(kw, _)| kw).collect();
     }
 

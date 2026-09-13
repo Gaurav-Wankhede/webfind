@@ -142,7 +142,7 @@ mod tests {
             site_name: None,
             score: 0.0,
             scores: crate::schema::response::ScoreBreakdown {
-                bm25: 0.0,
+                bm25: None,
                 vector: None,
                 graph: None,
                 freshness: None,

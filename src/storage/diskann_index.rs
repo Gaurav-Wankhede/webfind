@@ -151,7 +151,7 @@ impl DiskAnnIndex {
             .filter_map(|(id, dist)| {
                 self.id_to_url.get(&id).map(|url| {
                     // DiskANN cosine distance = 1 - similarity.
-                    let similarity = (1.0 - dist).max(0.0).min(1.0);
+                    let similarity = (1.0 - dist).clamp(0.0, 1.0);
                     (url.clone(), similarity as f64)
                 })
             })
@@ -273,13 +273,10 @@ async fn collect_embeddings(
 
 /// Decode a little-endian f32 blob into a Vec<f32>.
 fn bytes_to_vec(bytes: &[u8]) -> Option<Vec<f32>> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return None;
     }
-    let dims = bytes.len() / 4;
-    let mut vec = Vec::with_capacity(dims);
-    for chunk in bytes.chunks_exact(4) {
-        vec.push(f32::from_le_bytes(chunk.try_into().ok()?));
-    }
-    Some(vec)
+    // High-performance slice casting using bytemuck: copies directly from aligned chunks
+    let floats: &[f32] = bytemuck::try_cast_slice(bytes).ok()?;
+    Some(floats.to_vec())
 }

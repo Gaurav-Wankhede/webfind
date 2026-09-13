@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use futures::future::join_all;
+use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Semaphore;
 
 pub mod client;
@@ -23,7 +23,7 @@ pub use client::Client;
 pub use engines::{
     arxiv, bing, crates_io, ddg, hn, lobsters, marginalia, mdn, mojeek, stackoverflow, wikipedia,
 };
-pub use rrf::{FusedHit, aggregate_fused, reciprocal_rank_fusion};
+pub use rrf::{FusedHit, aggregate_fused, normalize_rrf_scores, reciprocal_rank_fusion};
 pub use util::{
     aggregation_key, canonical_url, decode_bing_tracker_url, decode_ddg_redirect_url,
     extract_keywords, keyword_match_count, normalize_result_url, parse_date_from_snippet,
@@ -205,7 +205,35 @@ impl LiveIndex {
             });
         }
 
-        let reports = join_all(futures).await;
+        let mut unordered = FuturesUnordered::new();
+        for f in futures {
+            unordered.push(f);
+        }
+
+        let mut reports = Vec::with_capacity(self.engines.len());
+        let mut total_hits_seen = 0;
+        let target_hits = opts.max_results.saturating_mul(2).max(10);
+        let min_engines = 3.min(self.engines.len());
+
+        while let Some(report) = unordered.next().await {
+            total_hits_seen += report.hits.len();
+            reports.push(report);
+
+            // Speculative early return: if we already received responses from key engines
+            // and accumulated ample candidate hits, do not stall on slow/hanging endpoints.
+            if reports.len() >= min_engines
+                && total_hits_seen >= target_hits
+                && start.elapsed().as_millis() >= 1_200
+            {
+                tracing::debug!(
+                    "LiveIndex early completion: got {} hits from {} engines in {}ms",
+                    total_hits_seen,
+                    reports.len(),
+                    start.elapsed().as_millis()
+                );
+                break;
+            }
+        }
 
         let lists: Vec<(&[Hit], f64)> = reports
             .iter()

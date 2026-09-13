@@ -38,7 +38,7 @@ fn sample_response() -> SearchResponse {
         site_name: Some("Rust".to_string()),
         score: 12.5,
         scores: ScoreBreakdown {
-            bm25: 10.0,
+            bm25: Some(10.0),
             vector: Some(2.5),
             graph: Some(1.0),
             freshness: Some(0.5),

@@ -8388,8 +8388,9 @@ dependencies = [
 
 [[package]]
 name = "webfind"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
+ "ahash",
  "anndists",
  "anyhow",
  "askama",
@@ -8397,6 +8398,7 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "blake3",
+ "bytemuck",
  "bytes",
  "chromiumoxide",
  "chrono",
@@ -8417,6 +8419,7 @@ dependencies = [
  "libsql",
  "lingua",
  "mimalloc",
+ "parking_lot 0.12.5",
  "rand 0.10.2",
  "readability-rust",
  "regex",
@@ -8430,6 +8433,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "simdutf8",
  "sitemap",
  "socket2 0.6.5",
  "spider",

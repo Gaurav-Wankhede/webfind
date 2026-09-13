@@ -24,6 +24,7 @@ pub mod ranker;
 pub mod reddit;
 pub mod research_service;
 pub mod search_engine;
+pub mod security_gate;
 pub mod seed_catalog;
 pub mod site_policy;
 pub mod util;

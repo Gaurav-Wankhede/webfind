@@ -161,7 +161,7 @@ impl Crawler {
             Some(ProxyPool::from_cidr(
                 cidr,
                 8080,
-                self.proxy_protocol.clone(),
+                self.proxy_protocol,
                 10,
             )?)
         } else if !self.proxy_list.is_empty() {
@@ -202,7 +202,7 @@ impl Crawler {
             .embedder
             .as_ref()
             .map(|e| InMemorySearchEngine::with_embedder(e.clone()))
-            .unwrap_or_else(InMemorySearchEngine::new);
+            .unwrap_or_default();
 
         // 4. Process pages as they come in
         let batch_size = 50;
@@ -222,14 +222,12 @@ impl Crawler {
             }
 
             // Cache-aware extraction: skip recently-cached URLs when requested.
-            if self.skip_cached {
-                if let Some(ref cache) = self.cache {
-                    if !cache.should_fetch(&url) {
+            if self.skip_cached
+                && let Some(ref cache) = self.cache
+                    && !cache.should_fetch(&url) {
                         stats.pages_skipped_cache += 1;
                         continue;
                     }
-                }
-            }
 
             // Extract structured content from the HTML we already have
             match fetcher.extract_from_html(
@@ -250,19 +248,16 @@ impl Crawler {
                     }
 
                     // Near-duplicate detection against previously cached entries.
-                    if let Some(ref cache) = self.cache {
-                        if let Some(existing) = cache.get(&url) {
-                            if let (Some(old), Some(new)) = (
+                    if let Some(ref cache) = self.cache
+                        && let Some(existing) = cache.get(&url)
+                            && let (Some(old), Some(new)) = (
                                 existing.simhash,
                                 Some(SimHash::compute(&content.content_text)),
-                            ) {
-                                if SimHash::hamming_distance(old, new) <= 15 {
+                            )
+                                && SimHash::hamming_distance(old, new) <= 15 {
                                     stats.pages_skipped_dup += 1;
                                     continue;
                                 }
-                            }
-                        }
-                    }
 
                     batch.push(content);
 
@@ -335,7 +330,7 @@ impl Crawler {
             Some(ProxyPool::from_cidr(
                 cidr,
                 8080,
-                self.proxy_protocol.clone(),
+                self.proxy_protocol,
                 10,
             )?)
         } else if !self.proxy_list.is_empty() {
@@ -383,11 +378,10 @@ impl Crawler {
                 continue;
             }
 
-            if let Some(ref cache) = self.cache {
-                if self.skip_cached && !cache.should_fetch(&url) {
+            if let Some(ref cache) = self.cache
+                && self.skip_cached && !cache.should_fetch(&url) {
                     continue;
                 }
-            }
 
             if let Ok(content) = fetcher.extract_from_html(
                 &html,
@@ -397,11 +391,10 @@ impl Crawler {
                 url.starts_with("https://"),
                 0,
                 None,
-            ) {
-                if content.is_valid_content {
+            )
+                && content.is_valid_content {
                     results.push(content);
                 }
-            }
         }
 
         let _ = crawl_handle.await;

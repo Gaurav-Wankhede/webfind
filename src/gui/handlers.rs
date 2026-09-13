@@ -24,7 +24,7 @@ use crate::gui::state::GuiState;
 use crate::gui::templates;
 use crate::schema::content::StructuredContent;
 use crate::schema::request::{ContentType, OutputFormat, SearchDepth, SearchRequest};
-use crate::schema::response::{ScoreBreakdown, SearchResult};
+use crate::schema::response::SearchResult;
 
 /// Cache key for GUI research results: (query, max_pages, seed, categories).
 type QueryCacheKey = (String, u32, Option<String>, Vec<String>);

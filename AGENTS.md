@@ -6,6 +6,16 @@ WebFind is a **pure CLI** system — there is no MCP server. Local models call t
 so each run builds durable graph-memory awareness that later searches reuse.
 No temp JSON operations.
 
+## Binary Location & System Location Awareness
+
+WebFind is installed globally via `cargo install --path . --force && cargo clean`. The binary is available directly on the system `$PATH`:
+
+- **macOS / Linux**: `~/.cargo/bin/webfind` (or simply `webfind`)
+- **Windows**: `%USERPROFILE%\.cargo\bin\webfind.exe` (or `webfind.exe`)
+- **Fallback Project Binary**: `target/release/webfind` (when working inside repo)
+
+> **Agent Execution Rule**: Always invoke `webfind` directly as a first-class CLI tool. If running in an environment where `~/.cargo/bin` is not yet in the subshell PATH, resolve directly to `~/.cargo/bin/webfind` (UNIX) or `%USERPROFILE%\.cargo\bin\webfind.exe` (Windows).
+
 ## Why pure CLI (no MCP)
 
 - **Single call, full implementation** — one command crawls, persists to the DB,

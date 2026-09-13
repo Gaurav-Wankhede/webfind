@@ -62,14 +62,11 @@ impl Ranker {
                 .map(|m| if m.has_structured_data { 0.05 } else { 0.0 })
                 .unwrap_or(0.0);
 
-            let quality = r
-                .metrics
-                .as_ref()
-                .map(|m| Self::quality_score(m.reading_ease, m.grade_level))
-                .unwrap_or(0.5)
-                + structured_boost;
-            let quality = quality.clamp(0.0, 1.0);
-            r.scores.quality = Some(quality);
+            let quality = r.metrics.as_ref().map(|m| {
+                (Self::quality_score(m.reading_ease, m.grade_level) + structured_boost)
+                    .clamp(0.0, 1.0)
+            });
+            r.scores.quality = quality;
 
             let graph = graph_scores
                 .and_then(|scores| scores.get(&r.url))
@@ -85,12 +82,23 @@ impl Ranker {
 
             let authority = *domain_authority.get(&r.domain).unwrap_or(&0.0);
 
-            let final_score = w_bm25 * r.scores.bm25
+            // Compute score dynamically over present signals without phantom defaults.
+            let (quality_term, active_w_quality) = match quality {
+                Some(q) => (w_quality * q, w_quality),
+                None => (0.0, 0.0),
+            };
+            let weight_sum = w_bm25 + w_fresh + active_w_quality + w_graph + w_vector + w_authority;
+            let raw_final = w_bm25 * r.scores.bm25.unwrap_or(0.0)
                 + w_fresh * freshness
-                + w_quality * quality
+                + quality_term
                 + w_graph * graph
                 + w_vector * vector
                 + w_authority * authority;
+            let final_score = if weight_sum > 0.0 {
+                (raw_final / weight_sum).clamp(0.0, 1.0)
+            } else {
+                raw_final
+            };
 
             r.scores.final_score = final_score;
             r.score = final_score;
@@ -118,8 +126,8 @@ impl Ranker {
     fn domain_authority(
         graph_scores: Option<&HashMap<String, f64>>,
         results: &[SearchResult],
-    ) -> HashMap<String, f64> {
-        let mut sums: HashMap<String, (f64, usize)> = HashMap::new();
+    ) -> ahash::AHashMap<String, f64> {
+        let mut sums: ahash::AHashMap<String, (f64, usize)> = ahash::AHashMap::new();
         for r in results {
             let page_auth = graph_scores
                 .and_then(|scores| scores.get(&r.url))
@@ -138,7 +146,7 @@ impl Ranker {
 
     /// Down-rank repeated domains in the top results.
     fn apply_diversity_penalty(mut results: Vec<SearchResult>) -> Vec<SearchResult> {
-        let mut domain_counts: HashMap<String, usize> = HashMap::new();
+        let mut domain_counts: ahash::AHashMap<String, usize> = ahash::AHashMap::new();
         for r in results.iter_mut() {
             let count = domain_counts.entry(r.domain.clone()).or_insert(0);
             if *count > 0 {
@@ -291,7 +299,7 @@ mod tests {
             site_name: None,
             score: 0.0,
             scores: ScoreBreakdown {
-                bm25: 0.5,
+                bm25: Some(0.5),
                 vector: None,
                 graph: None,
                 freshness: None,
@@ -318,7 +326,7 @@ mod tests {
         };
         let mut boosted = base.clone();
         boosted.url = "https://example.com/boosted".to_string();
-        boosted.scores.bm25 = 0.5;
+        boosted.scores.bm25 = Some(0.5);
         let request = SearchRequest {
             query: "test".to_string(),
             depth: SearchDepth::Standard,
@@ -368,7 +376,7 @@ mod tests {
             site_name: None,
             score: 0.0,
             scores: ScoreBreakdown {
-                bm25: 0.9,
+                bm25: Some(0.9),
                 vector: None,
                 graph: None,
                 freshness: None,
@@ -395,11 +403,11 @@ mod tests {
         };
         let mut dup2 = dup.clone();
         dup2.url = "https://example.com/b".to_string();
-        dup2.scores.bm25 = 0.85;
+        dup2.scores.bm25 = Some(0.85);
         let mut unique = dup.clone();
         unique.url = "https://other.com/c".to_string();
         unique.domain = "other.com".to_string();
-        unique.scores.bm25 = 0.7;
+        unique.scores.bm25 = Some(0.7);
 
         let request = SearchRequest {
             query: "test".to_string(),

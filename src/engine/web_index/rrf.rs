@@ -6,8 +6,7 @@
 //! conventional default. A per-list `weight` lets callers favor one source over
 //! another (e.g. fresh live results over a stale local index).
 
-use std::collections::HashMap;
-
+use ahash::AHashMap;
 use chrono::{DateTime, Utc};
 
 use super::Hit;
@@ -42,7 +41,7 @@ pub struct FusedHit {
 #[must_use]
 pub fn reciprocal_rank_fusion(lists: &[(&[Hit], f64)], k: u32) -> Vec<FusedHit> {
     let k = k.max(1);
-    let mut by_url: HashMap<String, FusedHit> = HashMap::new();
+    let mut by_url: AHashMap<String, FusedHit> = AHashMap::new();
 
     for (list, weight) in lists {
         let weight = weight.max(0.0);
@@ -79,6 +78,30 @@ pub fn reciprocal_rank_fusion(lists: &[(&[Hit], f64)], k: u32) -> Vec<FusedHit> 
     fused
 }
 
+/// Normalize raw RRF scores in-place to the `[0.0, 1.0]` range via min-max scaling.
+///
+/// Raw RRF fractions top out at `weight / (k + 1)` ≈ 0.033 for k=60, which
+/// looks artificially low to users. This maps the best hit to 1.0 and the
+/// worst to 0.0. When all scores are identical (or a single hit exists), every
+/// score is set to 1.0.
+#[must_use]
+pub fn normalize_rrf_scores(mut hits: Vec<FusedHit>) -> Vec<FusedHit> {
+    if hits.is_empty() {
+        return hits;
+    }
+    let max = hits.iter().map(|h| h.score).fold(f64::NEG_INFINITY, f64::max);
+    let min = hits.iter().map(|h| h.score).fold(f64::INFINITY, f64::min);
+    let range = max - min;
+    for h in &mut hits {
+        h.score = if range < f64::EPSILON {
+            1.0
+        } else {
+            (h.score - min) / range
+        };
+    }
+    hits
+}
+
 /// Aggregate RRF-fused hits into concept groups and rank them.
 ///
 /// Engines return different URLs for the same concept (tokio.rs/,
@@ -94,7 +117,7 @@ pub fn reciprocal_rank_fusion(lists: &[(&[Hit], f64)], k: u32) -> Vec<FusedHit> 
 #[must_use]
 pub fn aggregate_fused(fused: Vec<FusedHit>, query: &str) -> Vec<FusedHit> {
     let keywords = extract_keywords(query);
-    let mut by_key: HashMap<String, FusedHit> = HashMap::new();
+    let mut by_key: AHashMap<String, FusedHit> = AHashMap::new();
 
     for hit in fused {
         let key = aggregation_key(&hit.url);
@@ -119,8 +142,9 @@ pub fn aggregate_fused(fused: Vec<FusedHit>, query: &str) -> Vec<FusedHit> {
             .filter(|key| key.starts_with(&format!("{host}/")))
             .max_by(|a, b| by_key[*a].score.total_cmp(&by_key[*b].score))
             .cloned();
-        if let Some(path_key) = best_path_key {
-            let target = by_key.get_mut(&path_key).expect("key exists in map");
+        if let Some(path_key) = best_path_key
+            && let Some(target) = by_key.get_mut(&path_key)
+        {
             absorb(target, &homepage, &keywords);
             by_key.remove(&host);
         }
@@ -357,5 +381,45 @@ mod tests {
             first.iter().map(|f| f.url.clone()).collect::<Vec<_>>(),
             second.iter().map(|f| f.url.clone()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn normalize_empty_is_noop() {
+        assert!(normalize_rrf_scores(vec![]).is_empty());
+    }
+
+    #[test]
+    fn normalize_single_hit_becomes_one() {
+        let hits = vec![fused_hit("https://a.example", "A", 0.032)];
+        let out = normalize_rrf_scores(hits);
+        assert!((out[0].score - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn normalize_scales_to_unit_interval() {
+        let hits = vec![
+            fused_hit("https://a.example", "A", 0.064),
+            fused_hit("https://b.example", "B", 0.032),
+            fused_hit("https://c.example", "C", 0.016),
+        ];
+        let out = normalize_rrf_scores(hits);
+        assert!((out[0].score - 1.0).abs() < 1e-9, "top must be 1.0");
+        assert!((out[2].score - 0.0).abs() < 1e-9, "bottom must be 0.0");
+        for h in &out {
+            assert!(h.score >= 0.0 && h.score <= 1.0, "score out of [0,1]: {}", h.score);
+        }
+        // Ordering preserved
+        assert!(out[0].score > out[1].score && out[1].score > out[2].score);
+    }
+
+    #[test]
+    fn normalize_identical_scores_all_become_one() {
+        let hits = vec![
+            fused_hit("https://a.example", "A", 0.032),
+            fused_hit("https://b.example", "B", 0.032),
+        ];
+        let out = normalize_rrf_scores(hits);
+        assert!((out[0].score - 1.0).abs() < 1e-9);
+        assert!((out[1].score - 1.0).abs() < 1e-9);
     }
 }

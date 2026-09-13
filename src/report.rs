@@ -55,8 +55,8 @@ fn to_report(response: &SearchResponse) -> String {
 
         // Score breakdown
         out.push_str(&format!(
-            "      Scores: BM25={:.3} | Vector={} | Graph={} | Fresh={} | Quality={} | Final={:.3}\n",
-            result.scores.bm25,
+            "      Scores: BM25={} | Vector={} | Graph={} | Fresh={} | Quality={} | Final={:.3}\n",
+            fmt_opt(result.scores.bm25),
             fmt_opt(result.scores.vector),
             fmt_opt(result.scores.graph),
             fmt_opt(result.scores.freshness),
@@ -123,8 +123,8 @@ fn to_markdown(response: &SearchResponse) -> String {
         out.push_str(&format!(
             "| BM25 | Vector | Graph | Fresh | Quality | Final |\n\
              |------|--------|-------|-------|---------|-------|\n\
-             | {:.3} | {} | {} | {} | {} | {:.3} |\n\n",
-            result.scores.bm25,
+             | {} | {} | {} | {} | {} | {:.3} |\n\n",
+            fmt_opt(result.scores.bm25),
             fmt_opt(result.scores.vector),
             fmt_opt(result.scores.graph),
             fmt_opt(result.scores.freshness),
@@ -187,7 +187,7 @@ mod tests {
                 site_name: None,
                 score: 1.0,
                 scores: ScoreBreakdown {
-                    bm25: 1.0,
+                    bm25: Some(1.0),
                     vector: None,
                     graph: None,
                     freshness: None,

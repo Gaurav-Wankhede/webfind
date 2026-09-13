@@ -3,7 +3,6 @@ use std::time::Instant;
 
 use anyhow::Context;
 
-use webfind::cli::{DirectionArg, OutputArg};
 use webfind::engine::bg_worker::BackgroundWorker;
 use webfind::engine::bulk_crawler::{BulkDomainCrawler, FollowExternalLinks, RespectRobots};
 use webfind::engine::crawl_graph::CrawlGraphStore;
@@ -169,7 +168,7 @@ pub async fn run(
             let indexer = embedder
                 .as_ref()
                 .map(|e| InMemorySearchEngine::with_embedder(e.clone()))
-                .unwrap_or_else(InMemorySearchEngine::new);
+                .unwrap_or_default();
             match indexer.index_batch(&contents).await {
                 Ok(_) => {
                     stats.pages_indexed = contents.iter().filter(|c| c.is_valid_content).count();

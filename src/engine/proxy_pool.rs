@@ -140,11 +140,10 @@ impl ProxyEndpoint {
         if h.banned {
             return Ok(false);
         }
-        if let Some(until) = h.cooldown_until {
-            if until > Instant::now() {
+        if let Some(until) = h.cooldown_until
+            && until > Instant::now() {
                 return Ok(false);
             }
-        }
         Ok(h.consecutive_failures < 3)
     }
 

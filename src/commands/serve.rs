@@ -66,8 +66,8 @@ pub async fn run(
 
     let indexer: Arc<dyn SearchEngine + Send + Sync> = Arc::new(
         embedder
-            .map(|e| InMemorySearchEngine::with_embedder(e))
-            .unwrap_or_else(InMemorySearchEngine::new),
+            .map(InMemorySearchEngine::with_embedder)
+            .unwrap_or_default(),
     );
 
     let rate_limit = webfind::config::resolve_rate_limit(cfg, rate_limit);

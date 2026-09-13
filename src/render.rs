@@ -432,12 +432,11 @@ pub fn word_wrap(text: &str, width: usize) -> Vec<String> {
     let mut current = String::new();
 
     for word in text.split_whitespace() {
-        if current.len() + word.len() + 1 > width {
-            if !current.is_empty() {
+        if current.len() + word.len() + 1 > width
+            && !current.is_empty() {
                 lines.push(current);
                 current = String::new();
             }
-        }
         if !current.is_empty() {
             current.push(' ');
         }

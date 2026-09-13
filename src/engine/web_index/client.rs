@@ -27,6 +27,7 @@ const BLOCK_MARKERS: &[&str] = &[
     "just a moment",
     "verify you are human",
     "cf-challenge",
+    "anomaly.js",
 ];
 
 /// Shared, cloneable HTTP client with user-agent rotation.

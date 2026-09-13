@@ -147,13 +147,13 @@ pub fn resolve_graph_store(config: &WebfindConfig, cli: Option<GraphStoreArg>) -
     cli.or_else(|| {
         std::env::var("WEBFIND_GRAPH_STORE")
             .ok()
-            .and_then(|s| GraphStoreArg::from_str(&s))
+            .and_then(|s| s.parse().ok())
     })
     .or_else(|| {
         config
             .graph_store
             .as_ref()
-            .and_then(|s| GraphStoreArg::from_str(s))
+            .and_then(|s| s.parse().ok())
     })
     .unwrap_or(GraphStoreArg::Turso)
 }

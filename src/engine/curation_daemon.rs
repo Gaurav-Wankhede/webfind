@@ -85,6 +85,10 @@ impl CurationDaemon {
         }
     }
 
+    pub fn embedder(&self) -> Option<Arc<dyn Embedder>> {
+        self.embedder.clone()
+    }
+
     /// Run the daemon forever: repeatedly sweep the curated catalog, honoring
     /// each source's recrawl cadence and pausing between sweeps.
     pub async fn run_forever(&self) -> Result<()> {

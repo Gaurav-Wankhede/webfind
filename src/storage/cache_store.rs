@@ -157,7 +157,7 @@ impl CacheStore {
         let interval_days = if entry.fetch_count <= 1 {
             1
         } else {
-            (2_i64).pow((entry.fetch_count - 1).min(4) as u32).min(30)
+            (2_i64).pow((entry.fetch_count - 1).min(4)).min(30)
         };
         age > chrono::Duration::days(interval_days)
     }
@@ -229,18 +229,18 @@ impl SimHash {
             let mut hasher = DefaultHasher::new();
             window.hash(&mut hasher);
             let h = hasher.finish();
-            for i in 0..64 {
+            for (i, v) in vec.iter_mut().enumerate() {
                 let bit = (h >> i) & 1;
                 if bit == 1 {
-                    vec[i] += 1;
+                    *v += 1;
                 } else {
-                    vec[i] -= 1;
+                    *v -= 1;
                 }
             }
         }
         let mut hash = 0u64;
-        for i in 0..64 {
-            if vec[i] > 0 {
+        for (i, &v) in vec.iter().enumerate() {
+            if v > 0 {
                 hash |= 1 << i;
             }
         }

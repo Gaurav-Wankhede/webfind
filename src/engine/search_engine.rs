@@ -184,7 +184,7 @@ impl SearchEngine for InMemorySearchEngine {
                     site_name: doc.site_name.clone(),
                     score,
                     scores: ScoreBreakdown {
-                        bm25: score,
+                        bm25: Some(score),
                         vector: None,
                         graph: None,
                         freshness: None,
@@ -280,7 +280,7 @@ impl SearchEngine for InMemorySearchEngine {
                     .map(|entry| {
                         let id = entry.key().clone();
                         let vec = entry.value();
-                        let score = cosine(&query_vec, &vec, qnorm);
+                        let score = cosine(&query_vec, vec, qnorm);
                         (id, score)
                     })
                     .collect();

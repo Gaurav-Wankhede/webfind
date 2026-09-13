@@ -57,6 +57,37 @@ pub fn attach_content(results: &mut [SearchResult], contents: &[StructuredConten
             r.modified_at = c.modified_at;
             r.author = c.author.clone();
             r.site_name = c.site_name.clone();
+            if !c.keywords.is_empty() {
+                r.keywords = Some(c.keywords.clone());
+            }
+            r.favicon = c.favicon.clone();
+            r.language = c.language.clone();
+            r.content_type = c.content_type.clone();
+            let avg_words = if c.sentence_count > 0 {
+                c.word_count as f64 / c.sentence_count as f64
+            } else {
+                0.0
+            };
+            // Gunning fog index: 0.4 * ((words / sentences) + 100 * (complex_words / words))
+            // When syllable data is not pre-computed, estimate complex words via Flesch-Kincaid grade:
+            // FK = 0.39 * (words/sentences) + 11.8 * (syllables/words) - 15.59
+            let fog = if c.sentence_count > 0 && c.word_count > 0 {
+                let estimated_complex_pct = ((c.grade_level - (0.39 * avg_words) + 15.59).max(0.0) / 11.8) * 0.3;
+                (0.4 * (avg_words + (estimated_complex_pct * 100.0).clamp(0.0, 100.0))).clamp(0.0, 30.0)
+            } else {
+                c.grade_level.clamp(0.0, 30.0)
+            };
+            r.metrics = Some(crate::schema::response::ContentMetrics {
+                reading_ease: c.reading_ease,
+                grade_level: c.grade_level,
+                fog_index: (fog * 10.0).round() / 10.0,
+                sentence_count: c.sentence_count,
+                avg_words_per_sentence: (avg_words * 10.0).round() / 10.0,
+                language: c.language.clone(),
+                language_confidence: c.language_confidence,
+                has_structured_data: !c.json_ld.is_empty() || c.schema_type.is_some(),
+                schema_type: c.schema_type.clone(),
+            });
         }
     }
 }

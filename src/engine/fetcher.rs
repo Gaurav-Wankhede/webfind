@@ -207,15 +207,17 @@ impl Fetcher {
             ));
         }
 
-        // Zero-copy body read: `bytes()` borrows reqwest's internal buffer, and
-        // `from_utf8_lossy` borrows it again as `&str` when the body is valid
-        // UTF-8 (the common case), avoiding a full-body `String` allocation.
-        // Non-UTF-8 bodies are decoded lossily instead of erroring.
+        // SIMD-accelerated zero-copy body read: validates UTF-8 at CPU hardware speed
+        // (AVX2 / ARM NEON) and borrows the buffer directly without allocation.
+        // Non-UTF-8 bodies decode lossily as fallback.
         let body_bytes = response
             .bytes()
             .await
             .context("failed to read response body")?;
-        let body = String::from_utf8_lossy(&body_bytes);
+        let body = match simdutf8::compat::from_utf8(&body_bytes) {
+            Ok(valid_str) => std::borrow::Cow::Borrowed(valid_str),
+            Err(_) => String::from_utf8_lossy(&body_bytes),
+        };
 
         let mut content = match kind {
             ContentKind::Html => self.extract_from_html(
@@ -327,7 +329,10 @@ impl Fetcher {
             .bytes()
             .await
             .context("failed to read Reddit HTML body")?;
-        let body = String::from_utf8_lossy(&body_bytes);
+        let body = match simdutf8::compat::from_utf8(&body_bytes) {
+            Ok(valid_str) => std::borrow::Cow::Borrowed(valid_str),
+            Err(_) => String::from_utf8_lossy(&body_bytes),
+        };
         let elapsed = start.elapsed().as_millis() as u64;
 
         self.extract_from_html(&body, url, &final_url, status, ssl_valid, elapsed, None)
@@ -371,7 +376,7 @@ impl Fetcher {
         let grade_level = textstat::flesch_kincaid_grade(&collapsed);
         let keywords = extract_keywords(&collapsed, 15);
         let (language, language_confidence) = whatlang::detect(&collapsed)
-            .map(|i| (i.lang().code().to_string(), i.confidence() as f64))
+            .map(|i| (i.lang().code().to_string(), i.confidence()))
             .unwrap_or_else(|| ("en".to_string(), 0.3));
         let content_markdown = collapsed.clone();
 
@@ -424,6 +429,7 @@ impl Fetcher {
     }
 
     /// Extract StructuredContent from raw HTML.
+    #[allow(clippy::too_many_arguments)]
     pub fn extract_from_html(
         &self,
         html: &str,
@@ -441,8 +447,14 @@ impl Fetcher {
             .ok()
             .and_then(|mut r| r.parse());
 
-        // Fallback body text when readability cannot isolate the article.
-        let fallback_text = fallback_body_text(&doc);
+        // 1b. Documentation & official site semantic container extraction
+        let doc_container = extract_doc_container(&doc);
+
+        // Fallback body text when readability and doc container cannot isolate the article.
+        let fallback_text = doc_container
+            .as_ref()
+            .map(|(_, text)| text.clone())
+            .unwrap_or_else(|| fallback_body_text(&doc));
 
         // 2. Metadata from <head>
         let meta = extract_meta(&doc);
@@ -485,6 +497,7 @@ impl Fetcher {
         let raw_html = article
             .as_ref()
             .and_then(|a| a.content.clone())
+            .or_else(|| doc_container.map(|(html, _)| html))
             .unwrap_or_else(|| format!("<div>{}</div>", html_escape(&content_text)));
         let content_html = clean_content_html(&raw_html);
 
@@ -686,6 +699,7 @@ fn parse_content_type_header(ct: Option<&str>) -> (ContentKind, Option<String>) 
 }
 
 /// Extract useful text from plain text, JSON, or XML/feed responses.
+#[allow(clippy::too_many_arguments)]
 fn extract_from_text(
     body: &str,
     original_url: &str,
@@ -872,14 +886,13 @@ fn extract_meta(doc: &Html) -> PageMeta {
     let mut author = None;
 
     // <title>
-    if let Ok(sel) = Selector::parse("title") {
-        if let Some(el) = doc.select(&sel).next() {
+    if let Ok(sel) = Selector::parse("title")
+        && let Some(el) = doc.select(&sel).next() {
             let t: String = el.text().collect::<Vec<_>>().join("").trim().to_string();
             if !t.is_empty() {
                 title = Some(t);
             }
         }
-    }
 
     // <meta> tags
     if let Ok(sel) = Selector::parse("meta[name],meta[property]") {
@@ -919,11 +932,10 @@ fn extract_meta(doc: &Html) -> PageMeta {
                             updated_time = Some(content.to_string());
                         }
                     }
-                    "last-modified" | "last_modified" => {
-                        if last_modified.is_none() {
+                    "last-modified" | "last_modified"
+                        if last_modified.is_none() => {
                             last_modified = Some(content.to_string());
                         }
-                    }
                     _ => {}
                 }
             }
@@ -931,13 +943,11 @@ fn extract_meta(doc: &Html) -> PageMeta {
     }
 
     // <link rel="canonical">
-    if let Ok(sel) = Selector::parse("link[rel=canonical]") {
-        if let Some(el) = doc.select(&sel).next() {
-            if let Some(href) = el.value().attr("href") {
+    if let Ok(sel) = Selector::parse("link[rel=canonical]")
+        && let Some(el) = doc.select(&sel).next()
+            && let Some(href) = el.value().attr("href") {
                 canonical_url = Some(href.to_string());
             }
-        }
-    }
 
     PageMeta {
         title,
@@ -1127,26 +1137,22 @@ fn extract_images(doc: &Html) -> Vec<ImageInfo> {
 // ── Favicon ─────────────────────────────────────────────────────────────────
 
 fn extract_favicon(doc: &Html) -> Option<String> {
-    if let Ok(sel) = Selector::parse("link[rel~=\"icon\"]") {
-        if let Some(el) = doc.select(&sel).next() {
-            if let Some(href) = el.value().attr("href") {
+    if let Ok(sel) = Selector::parse("link[rel~=\"icon\"]")
+        && let Some(el) = doc.select(&sel).next()
+            && let Some(href) = el.value().attr("href") {
                 return Some(href.to_string());
             }
-        }
-    }
     Some("/favicon.ico".to_string())
 }
 
 // ── RSS ─────────────────────────────────────────────────────────────────────
 
 fn extract_rss(doc: &Html) -> Option<String> {
-    if let Ok(sel) = Selector::parse("link[type=\"application/rss+xml\"]") {
-        if let Some(el) = doc.select(&sel).next() {
-            if let Some(href) = el.value().attr("href") {
+    if let Ok(sel) = Selector::parse("link[type=\"application/rss+xml\"]")
+        && let Some(el) = doc.select(&sel).next()
+            && let Some(href) = el.value().attr("href") {
                 return Some(href.to_string());
             }
-        }
-    }
     None
 }
 
@@ -1156,19 +1162,17 @@ fn detect_language(text: &str, html: &str) -> (String, f64) {
     if let Some(info) = whatlang::detect(text) {
         let lang = info.lang().code().to_string();
         let conf = info.confidence();
-        return (lang, conf as f64);
+        return (lang, conf);
     }
 
     // Fallback: check html lang attribute
     let doc = Html::parse_document(html);
-    if let Ok(sel) = Selector::parse("html[lang]") {
-        if let Some(el) = doc.select(&sel).next() {
-            if let Some(lang) = el.value().attr("lang") {
+    if let Ok(sel) = Selector::parse("html[lang]")
+        && let Some(el) = doc.select(&sel).next()
+            && let Some(lang) = el.value().attr("lang") {
                 let code = lang.split('-').next().unwrap_or("en").to_string();
                 return (code, 0.5);
             }
-        }
-    }
 
     ("en".to_string(), 0.3)
 }
@@ -1217,7 +1221,7 @@ pub(crate) fn count_sentences(text: &str) -> u32 {
     text.unicode_sentences().count() as u32
 }
 
-pub(crate) fn estimate_reading_time(word_count: u32) -> u32 {
+pub fn estimate_reading_time(word_count: u32) -> u32 {
     (word_count as f64 / 238.0 * 60.0).ceil() as u32
 }
 
@@ -1233,7 +1237,8 @@ pub(crate) fn normalize_text(text: &str) -> String {
 }
 
 fn html_to_markdown(html: &str) -> String {
-    html2text::from_read(html.as_bytes(), 120).unwrap_or_default()
+    let raw_md = html2text::from_read(html.as_bytes(), 120).unwrap_or_default();
+    purge_doc_boilerplate(&raw_md)
 }
 
 // ── Regex entity extraction ───────────────────────────────────────────────
@@ -1400,11 +1405,10 @@ fn clean_content_html(html: &str) -> String {
 
     // Step 3: traverse the body and rebuild clean HTML
     let mut out = String::with_capacity(no_comments.len());
-    if let Ok(body_sel) = Selector::parse("body") {
-        if let Some(body) = doc.select(&body_sel).next() {
+    if let Ok(body_sel) = Selector::parse("body")
+        && let Some(body) = doc.select(&body_sel).next() {
             traverse_clean(body, &mut out);
         }
-    }
 
     // Step 4: normalize whitespace
     normalize_html_whitespace(&out)
@@ -1461,14 +1465,119 @@ const CLEAN_KEEP: &[&str] = &[
 const CLEAN_REMOVE: &[&str] = &[
     "script", "style", "noscript", "iframe", "canvas", "svg", "nav", "header", "footer", "aside",
     "form", "button", "input", "select", "textarea", "label", "option", "head", "link", "meta",
+    "dialog",
 ];
+
+/// Helper to identify noisy classes/IDs for cookies, anchors, sidebar menus, and copy buttons
+fn is_noise_element(el: &scraper::ElementRef) -> bool {
+    let val = el.value();
+    
+    // 1. Aria hidden decorative elements
+    if val.attr("aria-hidden") == Some("true") {
+        return true;
+    }
+
+    // 2. Class-based noise check
+    if let Some(classes) = val.attr("class") {
+        let cls = classes.to_ascii_lowercase();
+        // Rustdoc / Sphinx / GitHub / Wikipedia / SO / Substack / Medium / Discourse noise elements
+        if cls.contains("anchor")
+            || cls.contains("headerlink")
+            || cls.contains("srclink")
+            || cls.contains("src-link")
+            || cls.contains("view-source")
+            || cls.split_whitespace().any(|c| c == "src")
+            || cls.contains("copy-button")
+            || cls.contains("copy-icon")
+            || cls.contains("collapse-toggle")
+            || cls.contains("cookie")
+            || cls.contains("consent")
+            || cls.contains("onetrust")
+            || cls.contains("didomi")
+            || cls.contains("sidebar")
+            || cls.contains("extra-services")
+            || cls.contains("submission-history")
+            || cls.contains("katex-html")
+            || cls.contains("bc-table")
+            || cls.contains("baseline-indicator")
+            || cls.contains("breadcrumb")
+            || cls.contains("mw-editsection")
+            || cls.contains("reference")
+            || cls.contains("post-signature")
+            || cls.contains("user-info")
+            || cls.contains("js-voting-container")
+            || cls.contains("js-vote-count")
+            || cls.contains("comments-link")
+            || cls.contains("subline")
+            || cls.contains("file-navigation")
+            || cls.contains("repository-content-header")
+            || cls.contains("blob-num")
+            || cls.contains("line-numbers")
+            || cls.contains("subscribe")
+            || cls.contains("newsletter")
+            || cls.contains("social-share")
+            || cls.contains("share-bar")
+            || cls.contains("reaction")
+            || cls.contains("clap")
+            || cls.contains("author-card")
+            || cls.contains("author-bio")
+            || cls.contains("related-posts")
+            || cls.contains("recommended")
+            || cls.contains("topic-timeline")
+            || cls.contains("topic-map")
+            || cls.contains("page-rating")
+            || cls.contains("feedback-prompt")
+            // Cross-domain: Marketing, Law, Real Estate, Healthcare, Finance
+            || cls.contains("affiliate")
+            || cls.contains("ad-disclosure")
+            || cls.contains("sponsored")
+            || cls.contains("disclaimer")
+            || cls.contains("modal")
+            || cls.contains("popup")
+            || cls.contains("overlay")
+            || cls.contains("signup-wall")
+            || cls.contains("lead-form")
+            || cls.contains("quote-widget")
+            || cls.contains("mortgage-calculator")
+            || cls.contains("rate-quote")
+            || cls.contains("contact-agent")
+            || cls.contains("enrollment")
+            || cls.contains("cta-banner")
+            || cls.contains("no-print")
+            || cls.contains("print-only")
+        {
+            return true;
+        }
+    }
+
+    // 3. ID-based noise check
+    if let Some(id) = val.attr("id") {
+        let id_lower = id.to_ascii_lowercase();
+        if id_lower.contains("cookie")
+            || id_lower.contains("consent")
+            || id_lower.contains("onetrust")
+            || id_lower.contains("sidebar")
+            || id_lower.contains("mw-navigation")
+            || id_lower.contains("subscribe")
+            || id_lower.contains("newsletter")
+            || id_lower.contains("modal")
+            || id_lower.contains("popup")
+            || id_lower.contains("disclaimer")
+            || id_lower == "toc"
+        {
+            return true;
+        }
+    }
+
+    false
+}
 
 /// Recursive DOM traversal: rebuilds clean HTML from the scraper tree.
 fn traverse_clean(el: scraper::ElementRef, out: &mut String) {
     let tag = el.value().name();
     let tag_lower = tag.to_ascii_lowercase();
 
-    if CLEAN_REMOVE.contains(&tag_lower.as_str()) {
+    if CLEAN_REMOVE.contains(&tag_lower.as_str()) || is_noise_element(&el) {
         return;
     }
 
@@ -1504,11 +1613,10 @@ fn traverse_clean(el: scraper::ElementRef, out: &mut String) {
     out.push_str(tag_lower.as_str());
 
     // Preserve href on links (traceability / citation)
-    if tag_lower == "a" {
-        if let Some(href) = el.value().attr("href") {
+    if tag_lower == "a"
+        && let Some(href) = el.value().attr("href") {
             out.push_str(&format!(" href=\"{}\"", html_escape(href)));
         }
-    }
 
     out.push('>');
 
@@ -1608,19 +1716,96 @@ fn extract_h1(doc: &Html) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+/// Extract semantic documentation container (<article>, <main>, role="main", docs containers).
+/// Returns (clean_inner_html, clean_text).
+fn extract_doc_container(doc: &Html) -> Option<(String, String)> {
+    const DOC_SELECTORS: &[&str] = &[
+        "article",
+        "main",
+        "[role=\"main\"]",
+        ".markdown-body",
+        ".mw-parser-output",
+        "#answers",
+        "blockquote.abstract",
+        ".article-content",
+        ".docs-content",
+        ".markdown-section",
+        ".documentation",
+        ".document",
+        ".rfcMarkup",
+        "#content",
+        "#main-content",
+        "#page-content",
+    ];
+
+    for sel_str in DOC_SELECTORS {
+        if let Ok(sel) = Selector::parse(sel_str)
+            && let Some(el) = doc.select(&sel).next() {
+                let mut text_parts = Vec::new();
+                let skip_sel = Selector::parse(
+                    "script,style,noscript,iframe,canvas,svg,nav,header,footer,aside,form,button",
+                )
+                .ok();
+                collect_text_nodes(el, &skip_sel, &mut text_parts);
+                let raw_text = normalize_text(&text_parts.join(" "));
+                let purged_text = purge_doc_boilerplate(&raw_text);
+
+                if !purged_text.is_empty() && purged_text.len() >= 40 {
+                    let inner_html = el.html();
+                    return Some((inner_html, purged_text));
+                }
+            }
+    }
+    None
+}
+
+/// Strip documentation boilerplate, feedback questions, and community widgets.
+fn purge_doc_boilerplate(text: &str) -> String {
+    let boilerplate_markers = [
+        "was this helpful?",
+        "give feedback about this article",
+        "need more help? try these next steps",
+        "was this article helpful?",
+        "send feedback about our help center",
+        "post to the help community",
+        "thanks for reading! subscribe for free",
+        "leave a comment",
+        "sign up to continue reading",
+        "ready for more? subscribe",
+        // Cross-domain boilerplate delimiters
+        "the information on this website is for informational purposes only and is not intended as medical advice",
+        "this information is not intended to be legal advice",
+        "this content is for educational purposes only and does not constitute financial advice",
+        "we may receive a commission if you click on a link",
+        "advertiser disclosure: the offers that appear",
+    ];
+
+    let lower = text.to_lowercase();
+    let mut cutoff = text.len();
+
+    for marker in boilerplate_markers {
+        if let Some(pos) = lower.find(marker)
+            && pos < cutoff && pos > 0 {
+                cutoff = pos;
+            }
+    }
+
+    text[..cutoff].trim().to_string()
+}
+
 /// Strip scripts, styles, and noscript tags, then collect visible body text.
 fn fallback_body_text(doc: &Html) -> String {
     let mut text_parts = Vec::new();
-    if let Ok(body_sel) = Selector::parse("body") {
-        if let Some(body) = doc.select(&body_sel).next() {
+    if let Ok(body_sel) = Selector::parse("body")
+        && let Some(body) = doc.select(&body_sel).next() {
             let skip_sel = Selector::parse(
                 "script,style,noscript,iframe,canvas,svg,nav,header,footer,aside,form,button",
             )
             .ok();
             collect_text_nodes(body, &skip_sel, &mut text_parts);
         }
-    }
-    normalize_text(&text_parts.join(" "))
+    let raw_text = normalize_text(&text_parts.join(" "));
+    purge_doc_boilerplate(&raw_text)
 }
 
 fn collect_text_nodes(
@@ -1630,6 +1815,9 @@ fn collect_text_nodes(
 ) {
     for child in node.children() {
         if let Some(child_el) = scraper::ElementRef::wrap(child) {
+            if is_noise_element(&child_el) {
+                continue;
+            }
             if skip_sel
                 .as_ref()
                 .map(|_sel| {
@@ -1664,7 +1852,7 @@ pub(crate) fn title_from_url(url: &str) -> String {
         .unwrap_or(url);
     path.rsplit('/')
         .find(|s| !s.is_empty())
-        .map(|s| percent_decode(s))
+        .map(percent_decode)
         .unwrap_or_else(|| extract_domain(url))
         .trim()
         .to_string()
@@ -1678,12 +1866,11 @@ fn percent_decode(s: &str) -> String {
         if c == '%' {
             let a = chars.next();
             let b = chars.next();
-            if let (Some(a), Some(b)) = (a, b) {
-                if let Ok(byte) = u8::from_str_radix(&format!("{}{}", a, b), 16) {
+            if let (Some(a), Some(b)) = (a, b)
+                && let Ok(byte) = u8::from_str_radix(&format!("{}{}", a, b), 16) {
                     out.push(byte as char);
                     continue;
                 }
-            }
         }
         out.push(c);
     }
@@ -1884,5 +2071,154 @@ mod tests {
         let e = extract_entities("Just some plain text with no structured data here.");
         assert!(e.is_empty());
         assert!(e.emails.is_empty() && e.phones.is_empty());
+    }
+
+    #[test]
+    fn test_doc_container_and_boilerplate_purging() {
+        let html = r#"<!DOCTYPE html><html><head><title>API Docs</title></head>
+<body>
+<nav><a href="/home">Home</a></nav>
+<article>
+  <h1>API Overview</h1>
+  <p>The API provides programmatic access to your resources.</p>
+  <div class="feedback">Was this helpful? Submit feedback to our help community.</div>
+</article>
+<footer>Footer links and copyright</footer>
+</body></html>"#;
+        let doc = Html::parse_document(html);
+        let extracted = extract_doc_container(&doc);
+        assert!(extracted.is_some());
+        let (_, text) = extracted.unwrap();
+        assert!(text.contains("API Overview"));
+        assert!(text.contains("programmatic access to your resources"));
+        assert!(!text.to_lowercase().contains("was this helpful"));
+        assert!(!text.to_lowercase().contains("submit feedback"));
+    }
+
+    #[test]
+    fn test_programming_doc_and_research_paper_noise_removal() {
+        // Simulates Rustdoc anchor §, copy button, cookie banner, and arXiv abstract
+        let html = r##"<!DOCTYPE html><html><head><title>Vec in std::vec</title></head>
+<body>
+<div id="onetrust-consent-sdk" class="cookie-banner"><p>Accept all tracking cookies</p></div>
+<nav class="sidebar"><ul><li>Methods</li></ul></nav>
+<main>
+  <h1>Struct Vec<a class="anchor" href="#vec">§</a></h1>
+  <div class="code-block">
+    <button class="copy-button">Copy code</button>
+    <pre><code>pub struct Vec&lt;T&gt; { /* fields */ }</code></pre>
+  </div>
+  <blockquote class="abstract">
+    <span class="descriptor">Abstract:</span> We present a new deep learning architecture.
+  </blockquote>
+  <div class="extra-services">
+    <a href="/pdf/123">Download PDF</a>
+    <button>Export BibTeX</button>
+  </div>
+</main>
+</body></html>"##;
+        let doc = Html::parse_document(html);
+        let extracted = extract_doc_container(&doc);
+        assert!(extracted.is_some());
+        let (_, text) = extracted.unwrap();
+
+        // Must keep core content
+        assert!(text.contains("Struct Vec"));
+        assert!(text.contains("pub struct Vec"));
+        assert!(text.contains("We present a new deep learning architecture"));
+
+        // Must purge all noise elements
+        assert!(!text.contains("§"), "Anchor symbol § must be stripped");
+        assert!(!text.contains("Copy code"), "Copy button must be stripped");
+        assert!(!text.contains("Accept all tracking cookies"), "Cookie banner must be stripped");
+        assert!(!text.contains("Download PDF"), "arXiv extra services must be stripped");
+        assert!(!text.contains("Export BibTeX"), "BibTeX export buttons must be stripped");
+    }
+
+    #[test]
+    fn test_wikipedia_and_stackoverflow_noise_removal() {
+        let html = r##"<!DOCTYPE html><html><head><title>Transformer Architecture</title></head>
+<body>
+<div id="mw-navigation">Navigation sidebar and portals</div>
+<div class="mw-parser-output">
+  <h2>Overview<span class="mw-editsection"><a href="#">[edit]</a></span></h2>
+  <p>Transformers use multi-head self-attention.<sup class="reference"><a href="#cite">[1]</a></sup></p>
+  <div class="post-signature user-info">answered 2 hours ago by user123 (15.2k reputation)</div>
+  <div class="js-voting-container"><button class="js-vote-count">142 votes</button></div>
+</div>
+</body></html>"##;
+        let doc = Html::parse_document(html);
+        let extracted = extract_doc_container(&doc);
+        assert!(extracted.is_some());
+        let (_, text) = extracted.unwrap();
+
+        // Must retain authentic core knowledge
+        assert!(text.contains("Overview"));
+        assert!(text.contains("Transformers use multi-head self-attention"));
+
+        // Must strip Wikipedia and SO UI clutter
+        assert!(!text.contains("[edit]"), "Wikipedia [edit] links must be stripped");
+        assert!(!text.contains("[1]"), "Wikipedia reference superscripts must be stripped");
+        assert!(!text.contains("user123"), "User reputation flair must be stripped");
+        assert!(!text.contains("142 votes"), "Vote counters must be stripped");
+        assert!(!text.contains("Navigation sidebar"), "Wikipedia navigation must be stripped");
+    }
+
+    #[test]
+    fn test_blog_and_forum_noise_removal() {
+        let html = r##"<!DOCTYPE html><html><head><title>System Architecture Guide</title></head>
+<body>
+<article class="post">
+  <h1>Distributed Raft Consensus</h1>
+  <div class="social-share-bar"><button>Share on Twitter</button></div>
+  <p>Raft guarantees strong consistency across replicas using leader heartbeats.</p>
+  <div class="reactions-widget"><button class="clap-button">500 claps</button></div>
+  <div class="author-card">Written by Alex. Passionate about cloud infra.</div>
+  <div class="newsletter-subscribe">Ready for more? Subscribe for free!</div>
+</article>
+</body></html>"##;
+        let doc = Html::parse_document(html);
+        let extracted = extract_doc_container(&doc);
+        assert!(extracted.is_some());
+        let (_, text) = extracted.unwrap();
+
+        // Must retain core knowledge
+        assert!(text.contains("Distributed Raft Consensus"));
+        assert!(text.contains("Raft guarantees strong consistency across replicas"));
+
+        // Must strip social, claps, author promo, and newsletter prompts
+        assert!(!text.contains("Share on Twitter"));
+        assert!(!text.contains("500 claps"));
+        assert!(!text.contains("Passionate about cloud infra"));
+        assert!(!text.contains("Subscribe for free"));
+    }
+
+    #[test]
+    fn test_cross_domain_noise_removal() {
+        let html = r##"<!DOCTYPE html><html><head><title>Property Deed and Mortgage Overview</title></head>
+<body>
+<div class="affiliate-disclosure"><p>Advertiser disclosure: We may receive compensation from partners.</p></div>
+<article>
+  <h1>Understanding Title Deeds</h1>
+  <div class="lead-modal popup"><p>Get pre-approved for a mortgage today!</p></div>
+  <p>A deed is a signed legal document that transfers ownership of an asset to a new owner.</p>
+  <div class="mortgage-calculator widget">Calculate your monthly rate</div>
+  <div class="disclaimer-footer">This information is not intended to be legal advice.</div>
+</article>
+</body></html>"##;
+        let doc = Html::parse_document(html);
+        let extracted = extract_doc_container(&doc);
+        assert!(extracted.is_some());
+        let (_, text) = extracted.unwrap();
+
+        // Must retain authentic core knowledge
+        assert!(text.contains("Understanding Title Deeds"));
+        assert!(text.contains("A deed is a signed legal document that transfers ownership"));
+
+        // Must strip affiliate, lead modal, mortgage widget, and legal advice disclaimers
+        assert!(!text.contains("Advertiser disclosure"));
+        assert!(!text.contains("Get pre-approved for a mortgage"));
+        assert!(!text.contains("Calculate your monthly rate"));
+        assert!(!text.contains("legal advice"));
     }
 }

@@ -206,6 +206,7 @@ pub enum RespectRobots {
 }
 
 impl BulkDomainCrawler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         proxy_pool: ProxyPool,
         pages_per_session: usize,
@@ -485,24 +486,21 @@ impl BulkDomainCrawler {
 
             // /research should only discover and fetch URLs that are not already
             // present in the knowledge graph as crawled pages.
-            if let Some(ref store) = self.graph_store {
-                if let Some(node) = store.get_url(&url).await {
-                    if node.crawled {
+            if let Some(ref store) = self.graph_store
+                && let Some(node) = store.get_url(&url).await
+                    && node.crawled {
                         // Dequeue before skipping. The selected URL is the
                         // highest-relevance entry in the queue; leaving it in
                         // place makes the next iteration select it again and
                         // `continue` forever (re-crawls re-enqueue sitemap /
                         // link URLs that earlier crawls already marked crawled).
                         let mut domains = self.domains.lock().await;
-                        if let Some(d) = domains.get_mut(&domain) {
-                            if let Some(pos) = d.queue.iter().position(|(u, _, _)| u == &url) {
+                        if let Some(d) = domains.get_mut(&domain)
+                            && let Some(pos) = d.queue.iter().position(|(u, _, _)| u == &url) {
                                 d.queue.remove(pos);
                             }
-                        }
                         continue;
                     }
-                }
-            }
 
             // Wait for per-domain rate limit / backoff.
             self.wait_for_slot(&domain).await;
@@ -763,10 +761,9 @@ impl BulkDomainCrawler {
             consecutive_failures: 0,
         };
 
-        info!(
-            "rotated session for {} -> proxy {:?}",
-            domain, crawl_session.proxy_url
-        );
+        if let Some(ref p) = crawl_session.proxy_url {
+            info!("rotated session for {} -> proxy {}", domain, p);
+        }
 
         {
             let mut domains = self.domains.lock().await;
@@ -822,6 +819,7 @@ impl BulkDomainCrawler {
         state.backoff_until = Some(Instant::now() + backoff);
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn record_url(
         &self,
         url: &str,

@@ -113,31 +113,27 @@ pub fn parse_reddit_listing(json_str: &str) -> Result<Vec<RedditListingItem>> {
         // Listing page: an array with `data.children` containing posts
         serde_json::Value::Array(arr) if !arr.is_empty() => {
             // First element is the listing data
-            if let Some(data) = arr[0].get("data") {
-                if let Some(children) = data.get("children") {
-                    if let Some(children_arr) = children.as_array() {
+            if let Some(data) = arr[0].get("data")
+                && let Some(children) = data.get("children")
+                    && let Some(children_arr) = children.as_array() {
                         for child in children_arr {
                             if let Some(item) = parse_listing_child(child) {
                                 items.push(item);
                             }
                         }
                     }
-                }
-            }
         }
         // Single post: has `data.children` with one post and optionally `data.children` in [1] for comments
         serde_json::Value::Object(_) => {
-            if let Some(data) = value.get("data") {
-                if let Some(children) = data.get("children") {
-                    if let Some(children_arr) = children.as_array() {
+            if let Some(data) = value.get("data")
+                && let Some(children) = data.get("children")
+                    && let Some(children_arr) = children.as_array() {
                         for child in children_arr {
                             if let Some(item) = parse_listing_child(child) {
                                 items.push(item);
                             }
                         }
                     }
-                }
-            }
         }
         _ => {}
     }

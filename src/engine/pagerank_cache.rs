@@ -58,11 +58,10 @@ impl PageRankCache {
     ) -> Result<HashMap<String, f64>> {
         let current_version = store.graph_version().await;
 
-        if let Some(cached) = self.load()? {
-            if cached.graph_version == current_version {
+        if let Some(cached) = self.load()?
+            && cached.graph_version == current_version {
                 return Ok(cached.scores);
             }
-        }
 
         // Serialize recompute+save across all cache instances in this process
         // (see `COMPUTE_LOCK`). The double-check after acquiring the lock lets
@@ -70,11 +69,10 @@ impl PageRankCache {
         // recomputing PageRank.
         let _guard = compute_lock().lock().await;
 
-        if let Some(cached) = self.load()? {
-            if cached.graph_version == current_version {
+        if let Some(cached) = self.load()?
+            && cached.graph_version == current_version {
                 return Ok(cached.scores);
             }
-        }
 
         let scores = compute_pagerank(store, iterations, damping).await;
         self.save(&CachedPageRank {

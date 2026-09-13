@@ -59,7 +59,7 @@ pub async fn run(
 
 /// Resolve the destination path: absolute paths are used as-is; otherwise the
 /// path is joined to the configured data directory.
-fn resolve_dest(cfg: &webfind::config::WebfindConfig, to: PathBuf) -> PathBuf {
+fn resolve_dest(_cfg: &webfind::config::WebfindConfig, to: PathBuf) -> PathBuf {
     if to.is_absolute() {
         return to;
     }

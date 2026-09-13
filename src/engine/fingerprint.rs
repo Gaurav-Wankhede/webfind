@@ -921,9 +921,9 @@ impl FingerprintGenerator {
 
         // 1. Try to reuse a working IP.
         let working = self.health.working_ips();
-        if !working.is_empty() {
-            if let Some(ip) = working.choose(&mut rng) {
-                if let Some(h) = self.health.all().into_iter().find(|h| &h.ip == ip) {
+        if !working.is_empty()
+            && let Some(ip) = working.choose(&mut rng)
+                && let Some(h) = self.health.all().into_iter().find(|h| &h.ip == ip) {
                     let fingerprint = Fingerprint {
                         id: h.fingerprint_id.clone(),
                         ip: h.ip.clone(),
@@ -944,8 +944,6 @@ impl FingerprintGenerator {
                     };
                     return Ok(fingerprint);
                 }
-            }
-        }
 
         // 2. Generate a new fingerprint from a random ISP range.
         let total_weight: f64 = self.isp_ranges.iter().map(|i| i.weight).sum();
@@ -963,9 +961,9 @@ impl FingerprintGenerator {
         let isp_count = self.isp_ranges.len();
         for offset in 0..isp_count {
             let isp = &self.isp_ranges[(selected_idx + offset) % isp_count];
-            if let Some(cidr) = isp.cidrs.choose(&mut rng) {
-                if let Ok(ip) = random_ip_from_cidr(cidr) {
-                    if !is_reserved_ip(&ip) && !self.health.is_discarded(&ip) && self.mark_used(&ip)
+            if let Some(cidr) = isp.cidrs.choose(&mut rng)
+                && let Ok(ip) = random_ip_from_cidr(cidr)
+                    && !is_reserved_ip(&ip) && !self.health.is_discarded(&ip) && self.mark_used(&ip)
                     {
                         let region = *isp
                             .regions
@@ -1008,8 +1006,6 @@ impl FingerprintGenerator {
                             created_at: Utc::now(),
                         });
                     }
-                }
-            }
         }
 
         Err(FingerprintError::Exhausted(
@@ -1056,9 +1052,7 @@ fn build_accept_from_browser(browser: Browser) -> String {
 }
 
 fn build_accept_from_ua(user_agent: &str) -> String {
-    if user_agent.contains("Firefox") {
-        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into()
-    } else if user_agent.contains("Safari") && !user_agent.contains("Chrome") {
+    if user_agent.contains("Firefox") || (user_agent.contains("Safari") && !user_agent.contains("Chrome")) {
         "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into()
     } else {
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"

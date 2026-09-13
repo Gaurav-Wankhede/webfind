@@ -14,7 +14,6 @@
 //! These tests use a real file-based database (not `:memory:`) because backup
 //! requires a file on disk that can be copied and reopened.
 
-use std::path::PathBuf;
 
 use tempfile::TempDir;
 use webfind::engine::crawl_graph::{CrawlGraphStore, DiscoverySource, UrlNode};

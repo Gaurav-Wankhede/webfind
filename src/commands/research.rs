@@ -187,11 +187,15 @@ pub async fn run(
         None
     };
 
+    attach_content(&mut results, &contents);
+
     let ranker = Ranker::new();
     results = ranker.rank(results, &request, None, vector_scores.as_ref());
 
-    if include_content {
-        attach_content(&mut results, &contents);
+    if !include_content {
+        for r in &mut results {
+            r.content = None;
+        }
     }
 
     let graph_summary = if include_graph {

@@ -113,11 +113,10 @@ impl TursoStore {
     /// a user cares about for a disk budget). For `:memory:` stores it falls back
     /// to an approximate logical sum so tests exercise the pruning path.
     pub async fn db_size_bytes(&self) -> Result<u64> {
-        if self.db_path != ":memory:" {
-            if let Ok(meta) = std::fs::metadata(&self.db_path) {
+        if self.db_path != ":memory:"
+            && let Ok(meta) = std::fs::metadata(&self.db_path) {
                 return Ok(meta.len());
             }
-        }
         // Approximate logical size for in-memory stores: sum of page_content and
         // url_nodes BLOBs/TEXT so pruning still has a signal.
         let mut rows = self
@@ -291,6 +290,7 @@ impl TursoStore {
     ///
     /// Returns `(nodes_inserted, edges_inserted)`. On error the transaction is
     /// rolled back and no partial rows remain.
+    #[allow(clippy::type_complexity)]
     pub async fn migrate_batch(
         &self,
         nodes: &[(UrlNode, Option<String>, Option<Vec<f32>>)],
@@ -377,17 +377,23 @@ impl TursoStore {
     /// Turso's stored embeddings). Safe to call multiple times — subsequent
     /// calls are no-ops if the index is already built.
     pub async fn build_vector_index(&self) -> Result<()> {
-        let mut guard = self
-            .vector_index
-            .lock()
-            .map_err(|_| anyhow::anyhow!("vector index lock poisoned"))?;
-        if guard.is_some() {
-            return Ok(());
+        {
+            let guard = self
+                .vector_index
+                .lock()
+                .map_err(|_| anyhow::anyhow!("vector index lock poisoned"))?;
+            if guard.is_some() {
+                return Ok(());
+            }
         }
         let path = self.db_path();
         let index = crate::storage::diskann_index::DiskAnnIndex::build_or_open(self, &path)
             .await
             .context("build DiskANN vector index")?;
+        let mut guard = self
+            .vector_index
+            .lock()
+            .map_err(|_| anyhow::anyhow!("vector index lock poisoned"))?;
         *guard = Some(index);
         Ok(())
     }
@@ -542,6 +548,16 @@ impl TursoStore {
             .await
             .context("seed graph version")?;
 
+        // Seed the fts version to match initial graph version so clean empty databases
+        // skip redundant FTS rebuilds until actual page content is indexed.
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO graph_meta (key, value) VALUES ('fts_version', 1)",
+                (),
+            )
+            .await
+            .context("seed fts version")?;
+
         // Forward migration: ensure the `excerpt` column exists on `url_nodes`.
         // `CREATE TABLE IF NOT EXISTS` cannot retrofit columns onto a pre-existing
         // database, so a file created before this column was added gets upgraded
@@ -691,7 +707,44 @@ impl TursoStore {
                 .await
                 .context("populate FTS index")?;
         }
+
+        // Record the graph version this FTS index was built from so read-only
+        // searches can skip rebuilding it when the graph hasn't changed.
+        let version = self.graph_version().await;
+        self.conn
+            .execute(
+                "INSERT INTO graph_meta (key, value) VALUES ('fts_version', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![version],
+            )
+            .await
+            .context("record fts version")?;
+
         Ok(())
+    }
+
+    /// Graph version the `urls_fts` index was built from, or `"0"` when
+    /// never built. Search compares this against `graph_version()` to skip
+    /// re-indexing on unchanged graphs.
+    pub async fn fts_version(&self) -> String {
+        let mut rows = match self
+            .conn
+            .query(
+                "SELECT value FROM graph_meta WHERE key = 'fts_version'",
+                (),
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("failed to read fts version: {}", e);
+                return "0".to_string();
+            }
+        };
+        match rows.next().await {
+            Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0).to_string(),
+            _ => "0".to_string(),
+        }
     }
 
     /// BM25 full-text search over the FTS5 index (FR-2).
@@ -702,6 +755,26 @@ impl TursoStore {
     /// writes.
     pub async fn bm25_search(&self, query: &str, limit: usize) -> Result<Vec<(String, f64)>> {
         let limit = limit.clamp(1, 500) as i64;
+
+        // Sanitize tokens so raw punctuation or hyphens (e.g. anti-patterns)
+        // are treated as quoted terms rather than FTS5 column filters or syntax operators.
+        let sanitized_query: String = query
+            .split_whitespace()
+            .map(|word| {
+                let clean: String = word
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                    .collect();
+                format!("\"{}\"", clean.replace('"', ""))
+            })
+            .filter(|token| token != "\"\"")
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        if sanitized_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let mut rows = self
             .conn
             .query(
@@ -712,7 +785,7 @@ impl TursoStore {
                 ORDER BY score
                 LIMIT ?2
                 "#,
-                params![query, limit],
+                params![sanitized_query, limit],
             )
             .await
             .context("FTS5 bm25 query")?;
@@ -721,8 +794,8 @@ impl TursoStore {
         loop {
             match rows.next().await {
                 Ok(Some(row)) => {
-                    let url: String = row.get(0).ok().unwrap_or_default();
-                    let score: f64 = row.get(1).unwrap_or(0.0);
+                    let url: String = row.get(0).context("read url from FTS5 result")?;
+                    let score: f64 = row.get(1).context("read bm25 score from FTS5 result")?;
                     if !url.is_empty() {
                         hits.push((url, score));
                     }
@@ -745,13 +818,11 @@ impl TursoStore {
         limit: usize,
     ) -> Result<Vec<(String, f64)>> {
         // Use the DiskANN index when it has been built — sublinear ANN search.
-        if let Ok(guard) = self.vector_index.lock() {
-            if let Some(index) = guard.as_ref() {
-                if !index.is_empty() {
+        if let Ok(guard) = self.vector_index.lock()
+            && let Some(index) = guard.as_ref()
+                && !index.is_empty() {
                     return Ok(index.search(query_embedding, limit));
                 }
-            }
-        }
 
         // Fallback: brute-force cosine over stored embeddings.
         let mut rows = self
@@ -778,17 +849,14 @@ impl TursoStore {
                         Ok(b) => b,
                         Err(_) => continue,
                     };
-                    let dims = bytes.len() / 4;
-                    let mut vec = Vec::with_capacity(dims);
-                    for chunk in bytes.chunks_exact(4) {
-                        vec.push(f32::from_le_bytes(
-                            chunk.try_into().expect("4-byte f32 chunk"),
-                        ));
-                    }
-                    if vec.len() != q.len() {
+                    let floats: &[f32] = match bytemuck::try_cast_slice(&bytes) {
+                        Ok(f) => f,
+                        Err(_) => continue,
+                    };
+                    if floats.len() != q.len() {
                         continue; // dimension mismatch — skip
                     }
-                    scored.push((url, cosine(q, q_norm, &vec)));
+                    scored.push((url, cosine(q, q_norm, floats)));
                 }
                 Ok(None) => break,
                 Err(e) => return Err(e).context("iterate embeddings"),
@@ -918,11 +986,8 @@ impl TursoStore {
         loop {
             match rows.next().await {
                 Ok(Some(row)) => {
-                    let url: String = match row.get(0) {
-                        Ok(u) => u,
-                        Err(_) => continue,
-                    };
-                    let score: f64 = row.get(1).unwrap_or(0.0);
+                    let url: String = row.get(0).context("read url from pagerank cache")?;
+                    let score: f64 = row.get(1).context("read score from pagerank cache")?;
                     out.push((url, score));
                 }
                 Ok(None) => break,
@@ -956,37 +1021,58 @@ impl TursoStore {
         };
         let pagerank = self.pagerank_scores_top(limit).await?;
 
-        // Accumulate RRF scores keyed by URL.
+        // Accumulate RRF scores keyed by URL, tracking each signal separately.
         let mut rrf: std::collections::HashMap<String, HybridHit> =
             std::collections::HashMap::new();
         for (rank, (url, _)) in bm25.iter().enumerate() {
+            let rrf_contrib = 1.0 / (K + rank as f64 + 1.0);
             let entry = rrf.entry(url.clone()).or_insert_with(|| HybridHit {
                 url: url.clone(),
                 score: 0.0,
                 signals: Vec::new(),
+                bm25_score: None,
+                vector_score: None,
+                graph_score: None,
             });
-            entry.score += 1.0 / (K + rank as f64 + 1.0);
-            entry.signals.push("bm25".to_string());
+            entry.score += rrf_contrib;
+            entry.bm25_score = Some(entry.bm25_score.unwrap_or(0.0) + rrf_contrib);
+            if !entry.signals.contains(&"bm25".to_string()) {
+                entry.signals.push("bm25".to_string());
+            }
         }
         for (rank, (url, _)) in vector.iter().enumerate() {
+            let rrf_contrib = 1.0 / (K + rank as f64 + 1.0);
             let entry = rrf.entry(url.clone()).or_insert_with(|| HybridHit {
                 url: url.clone(),
                 score: 0.0,
                 signals: Vec::new(),
+                bm25_score: None,
+                vector_score: None,
+                graph_score: None,
             });
-            entry.score += 1.0 / (K + rank as f64 + 1.0);
-            entry.signals.push("vector".to_string());
+            entry.score += rrf_contrib;
+            entry.vector_score = Some(entry.vector_score.unwrap_or(0.0) + rrf_contrib);
+            if !entry.signals.contains(&"vector".to_string()) {
+                entry.signals.push("vector".to_string());
+            }
         }
         // PageRank is a global centrality score, not query-specific — rank all
         // cached URLs by score descending to form the graph list for RRF.
         for (rank, (url, _)) in pagerank.iter().take(limit).enumerate() {
+            let rrf_contrib = 1.0 / (K + rank as f64 + 1.0);
             let entry = rrf.entry(url.clone()).or_insert_with(|| HybridHit {
                 url: url.clone(),
                 score: 0.0,
                 signals: Vec::new(),
+                bm25_score: None,
+                vector_score: None,
+                graph_score: None,
             });
-            entry.score += 1.0 / (K + rank as f64 + 1.0);
-            entry.signals.push("graph".to_string());
+            entry.score += rrf_contrib;
+            entry.graph_score = Some(entry.graph_score.unwrap_or(0.0) + rrf_contrib);
+            if !entry.signals.contains(&"graph".to_string()) {
+                entry.signals.push("graph".to_string());
+            }
         }
 
         let mut hits: Vec<HybridHit> = rrf.into_values().collect();
@@ -1050,6 +1136,9 @@ impl TursoStore {
                 excerpt,
                 score: hit.score,
                 signals: hit.signals,
+                bm25_score: hit.bm25_score,
+                vector_score: hit.vector_score,
+                graph_score: hit.graph_score,
             });
         }
         Ok(out)
@@ -1062,6 +1151,12 @@ pub struct HybridHit {
     pub url: String,
     pub score: f64,
     pub signals: Vec<String>,
+    /// Raw RRF contribution from the BM25 signal (None when not matched).
+    pub bm25_score: Option<f64>,
+    /// Raw RRF contribution from the vector signal (None when not matched).
+    pub vector_score: Option<f64>,
+    /// Raw RRF contribution from the graph/PageRank signal (None when not matched).
+    pub graph_score: Option<f64>,
 }
 
 /// A renderable search hit with a title + excerpt derived from stored content.
@@ -1072,6 +1167,9 @@ pub struct TursoSearchHit {
     pub excerpt: String,
     pub score: f64,
     pub signals: Vec<String>,
+    pub bm25_score: Option<f64>,
+    pub vector_score: Option<f64>,
+    pub graph_score: Option<f64>,
 }
 
 /// Derive a display title from the first line of an excerpt, falling back to

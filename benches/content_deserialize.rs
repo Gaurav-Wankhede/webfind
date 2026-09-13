@@ -1,6 +1,5 @@
 use chrono::Utc;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use serde_json;
 use webfind::schema::content::StructuredContent;
 
 fn create_test_json(n: usize) -> Vec<String> {

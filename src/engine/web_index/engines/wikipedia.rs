@@ -1,8 +1,11 @@
-//! Wikipedia engine adapter: queries the MediaWiki opensearch API.
+//! Wikipedia engine adapter: queries the MediaWiki query API with generator=search
+//! and extract/info properties for rich, informative snippets and canonical URLs.
 //!
 //! Free, keyless, and returns authoritative encyclopedic results that dilute
 //! brand-collision outcomes from the general engines (e.g. "next" → Next.js,
 //! not the UK retailer).
+
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -14,9 +17,24 @@ use crate::engine::web_index::{Engine, EngineOptions, Error, Hit};
 /// Descriptive user agent; Wikipedia's API policy prefers real identifiers.
 const USER_AGENT: &str = "webfind/0.1 (+https://github.com/Gaurav-Wankhede/webfind)";
 
-/// OpenSearch response: `[query, titles[], snippets[], urls[]]`.
 #[derive(Debug, Deserialize)]
-struct OpenSearchBody(Vec<serde_json::Value>);
+struct WikiPage {
+    title: Option<String>,
+    index: Option<u32>,
+    extract: Option<String>,
+    canonicalurl: Option<String>,
+    fullurl: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WikiQuery {
+    pages: Option<HashMap<String, WikiPage>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WikiResponse {
+    query: Option<WikiQuery>,
+}
 
 /// Wikipedia adapter.
 pub struct WikipediaEngine {
@@ -39,11 +57,16 @@ impl WikipediaEngine {
             .unwrap_or("en")
             .to_lowercase();
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("action", "opensearch");
+        serializer.append_pair("action", "query");
+        serializer.append_pair("generator", "search");
+        serializer.append_pair("gsrsearch", query);
+        serializer.append_pair("gsrlimit", &opts.max_results.clamp(1, 20).to_string());
+        serializer.append_pair("prop", "extracts|info");
+        serializer.append_pair("inprop", "url");
+        serializer.append_pair("exintro", "1");
+        serializer.append_pair("explaintext", "1");
+        serializer.append_pair("exsentences", "2");
         serializer.append_pair("format", "json");
-        serializer.append_pair("search", query);
-        serializer.append_pair("limit", &opts.max_results.clamp(1, 20).to_string());
-        serializer.append_pair("namespace", "0");
         format!(
             "https://{language}.wikipedia.org/w/api.php?{}",
             serializer.finish()
@@ -63,52 +86,53 @@ impl Engine for WikipediaEngine {
             .client
             .fetch(&url, USER_AGENT, opts, "application/json", &[])
             .await?;
-        let parsed: OpenSearchBody = serde_json::from_str(&body)?;
+        let parsed: WikiResponse = serde_json::from_str(&body)?;
         Ok(parse_results(parsed, opts.max_results))
     }
 }
 
-/// Parse the OpenSearch 4-array shape into ranked hits.
+/// Parse Wikipedia search generator response into ranked hits.
 #[must_use]
-fn parse_results(body: OpenSearchBody, max_results: usize) -> Vec<Hit> {
-    if body.0.len() < 4 {
+fn parse_results(body: WikiResponse, max_results: usize) -> Vec<Hit> {
+    let Some(query) = body.query else {
         return Vec::new();
-    }
-    let titles = body.0[1]
-        .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>());
-    let snippets = body.0[2]
-        .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>());
-    let urls = body.0[3]
-        .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>());
-    let (Some(titles), Some(urls)) = (titles, urls) else {
+    };
+    let Some(pages_map) = query.pages else {
         return Vec::new();
     };
 
-    let total = titles.len().min(urls.len()).min(max_results);
+    let mut pages: Vec<WikiPage> = pages_map.into_values().collect();
+    // Sort by Wikipedia's generator search index
+    pages.sort_by_key(|p| p.index.unwrap_or(u32::MAX));
+
+    let total = pages.len().min(max_results);
     let mut hits = Vec::with_capacity(total);
-    for i in 0..total {
-        let title = titles[i];
-        let url = urls[i];
+
+    for (i, page) in pages.into_iter().take(total).enumerate() {
+        let Some(title) = page.title else { continue };
+        let url = page
+            .canonicalurl
+            .or(page.fullurl)
+            .unwrap_or_default();
         if title.is_empty() || url.is_empty() {
             continue;
         }
+
+        let snippet = page
+            .extract
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .unwrap_or_default();
+
         hits.push(Hit {
-            url: url.to_string(),
-            title: title.to_string(),
-            snippet: snippets
-                .as_ref()
-                .and_then(|s| s.get(i))
-                .copied()
-                .unwrap_or("")
-                .to_string(),
+            url,
+            title,
+            snippet,
             published_at: None,
             relevance_score: positional_relevance(i, total),
             engine: "wikipedia",
         });
     }
+
     hits
 }
 
@@ -116,14 +140,30 @@ fn parse_results(body: OpenSearchBody, max_results: usize) -> Vec<Hit> {
 mod tests {
     use super::*;
 
-    fn body() -> OpenSearchBody {
-        OpenSearchBody(serde_json::from_str(
-            r#"["rust",["Rust (programming language)","Rust"],["A language empowering everyone",""],["https://en.wikipedia.org/wiki/Rust_(programming_language)","https://en.wikipedia.org/wiki/Rust"]]"#,
-        ).expect("fixture parses"))
+    fn body() -> WikiResponse {
+        let raw = r#"{
+            "query": {
+                "pages": {
+                    "100": {
+                        "title": "Rust (programming language)",
+                        "index": 1,
+                        "extract": "Rust is a general-purpose programming language emphasizing performance and safety.",
+                        "canonicalurl": "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+                    },
+                    "200": {
+                        "title": "Rust",
+                        "index": 2,
+                        "extract": "Rust is an iron oxide.",
+                        "canonicalurl": "https://en.wikipedia.org/wiki/Rust"
+                    }
+                }
+            }
+        }"#;
+        serde_json::from_str(raw).expect("fixture parses")
     }
 
     #[test]
-    fn parses_opensearch_shape() {
+    fn parses_wikipedia_generator_shape() {
         let hits = parse_results(body(), 10);
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].title, "Rust (programming language)");
@@ -131,8 +171,9 @@ mod tests {
             hits[0].url,
             "https://en.wikipedia.org/wiki/Rust_(programming_language)"
         );
-        assert_eq!(hits[0].snippet, "A language empowering everyone");
+        assert!(hits[0].snippet.contains("general-purpose programming language"));
         assert_eq!(hits[0].engine, "wikipedia");
+        assert_eq!(hits[1].title, "Rust");
     }
 
     #[test]
@@ -141,8 +182,8 @@ mod tests {
     }
 
     #[test]
-    fn short_body_yields_no_hits() {
-        let short = OpenSearchBody(serde_json::from_str(r#"["rust"]"#).expect("fixture parses"));
-        assert!(parse_results(short, 10).is_empty());
+    fn empty_body_yields_no_hits() {
+        let empty = WikiResponse { query: None };
+        assert!(parse_results(empty, 10).is_empty());
     }
 }

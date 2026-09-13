@@ -109,7 +109,7 @@ pub fn extract_top_words(text: &str, top_n: usize) -> Vec<String> {
     }
 
     let mut pairs: Vec<(String, usize)> = counts.into_iter().collect();
-    pairs.sort_by(|a, b| b.1.cmp(&a.1));
+    pairs.sort_by_key(|a| std::cmp::Reverse(a.1));
     pairs.into_iter().take(top_n).map(|(w, _)| w).collect()
 }
 

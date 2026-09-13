@@ -26,18 +26,26 @@ Local Model (harness + system prompt) → webfind research (single call) → Cra
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start & Global Installation
+
+Install `webfind` globally across **Linux, macOS, and Windows** to your system's global binary folder, automatically wiping target build artifacts:
 
 ```bash
 git clone https://github.com/Gaurav-Wankhede/WebFind.git
 cd WebFind
-cargo build --release
+cargo install --path . --force && cargo clean
 ```
 
-Run a research query (single call — crawls, persists to the graph store, ranks, writes JSON):
+> **Universal Global Binary Locations (Already in your `$PATH`):**
+> - **macOS / Linux**: `~/.cargo/bin/webfind`
+> - **Windows**: `%USERPROFILE%\.cargo\bin\webfind.exe`
+>
+> Once installed, run `webfind` from any directory or terminal session without navigating to the project folder.
+
+### Run a research query (single call — crawls, persists to graph, ranks, writes JSON):
 
 ```bash
-./target/release/webfind research "Rust async runtime tokio 2026" \
+webfind research "Rust async runtime tokio 2026" \
   --max-pages 20 --delay 300 --deep --dynamic \
   --output /tmp/webfind_result.json
 ```

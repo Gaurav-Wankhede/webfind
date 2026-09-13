@@ -1,8 +1,8 @@
 [package]
 name = "webfind"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
-rust-version = "1.97.0"
+rust-version = "1.98.0"
 description = "Self-hosted native search engine for AI agents — pure CLI, zero cost"
 license = "MIT"
 repository = "https://github.com/Gaurav-Wankhede/webfind"
@@ -75,6 +75,8 @@ keyword_extraction = "1.5"
 stop-words = "0.8"
 textstat = "0.1"
 htmlescape = "0.3"
+simdutf8 = "0.1"
+ahash = "0.8"
 
 # Index
 tantivy = "0.26"
@@ -86,6 +88,8 @@ blake3 = "1.8.5"
 bytes = "1"
 url = "2"
 base64 = "0.22"
+bytemuck = { version = "1.25", features = ["derive"] }
+parking_lot = "0.12"
 
 # Vector index (DiskANN approximate nearest neighbor search, FR-1)
 anndists = "0.1"

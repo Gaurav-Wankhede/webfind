@@ -46,8 +46,8 @@ pub fn classify_content_type(content: &StructuredContent) -> &str {
     }
 
     // 3. Check OpenGraph type
-    if let Some(ref og) = content.open_graph {
-        if let Some(ref og_type) = og.r#type {
+    if let Some(ref og) = content.open_graph
+        && let Some(ref og_type) = og.r#type {
             let t = og_type.to_lowercase();
             if t == "article" && is_news_domain(&content.url) {
                 return "news";
@@ -59,16 +59,14 @@ pub fn classify_content_type(content: &StructuredContent) -> &str {
                 return "images";
             }
         }
-    }
 
     // 4. Check schema type
     if let Some(ref st) = content.schema_type {
         let s = st.to_lowercase();
-        if s.contains("news") || s.contains("article") {
-            if is_news_domain(&content.url) {
+        if (s.contains("news") || s.contains("article"))
+            && is_news_domain(&content.url) {
                 return "news";
             }
-        }
         if s.contains("techarticle") || s.contains("scholarlyarticle") || s.contains("document") {
             return "documentation";
         }

@@ -122,15 +122,23 @@ where
     let auto_discover = options.seed.is_none();
     let mut all_seeds: Vec<String> = Vec::new();
     if let Some(seed) = &options.seed {
-        all_seeds.push(seed.trim().to_string());
+        if let Ok(clean) = crate::engine::security_gate::sanitize_url(seed.trim()) {
+            all_seeds.push(clean);
+        } else {
+            tracing::warn!("User-supplied seed '{}' rejected by security gate (SSRF/invalid)", seed);
+        }
     }
     if let Some(seeds_str) = &options.seeds {
-        all_seeds.extend(
-            seeds_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
-        );
+        for s in seeds_str.split(',') {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                if let Ok(clean) = crate::engine::security_gate::sanitize_url(trimmed) {
+                    all_seeds.push(clean);
+                } else {
+                    tracing::warn!("User-supplied seed '{}' rejected by security gate (SSRF/invalid)", trimmed);
+                }
+            }
+        }
     }
 
     if all_seeds.is_empty() {

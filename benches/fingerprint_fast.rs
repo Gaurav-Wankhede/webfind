@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use webfind::engine::fingerprint::{FingerprintError, FingerprintGenerator};
+use webfind::engine::fingerprint::FingerprintGenerator;
 
 fn bench_fingerprint_generation(c: &mut Criterion) {
     let mut group = c.benchmark_group("fingerprint_generation");

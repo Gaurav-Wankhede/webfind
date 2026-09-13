@@ -1,5 +1,4 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use std::sync::Arc;
 use tokio::runtime::Runtime;
 use webfind::engine::search_engine::{InMemorySearchEngine, SearchEngine};
 use webfind::schema::content::StructuredContent;
