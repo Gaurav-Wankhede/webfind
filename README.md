@@ -1,34 +1,128 @@
-# WebFind
+<div align="center">
 
-> Self-hosted web research for free & local LLMs — single binary, zero cost, no cloud, no auth.
+<img src="docs/assets/title.svg" alt="WebFind" width="740" />
 
-WebFind gives **free and locally-hosted models** the live web research that paid plans gate behind web search. When you use a paid model (Claude, Codex), web search is built into the harness. But on **free / local models**, web search doesn't work — that's exactly the gap WebFind fills.
+**Self-hosted web research engine for free & local LLMs — single binary, zero cost, no cloud, no API keys.**
 
-WebFind crawls, indexes, ranks, and searches the live web, then hands fresh cited results to your model over the **pure CLI**. Every crawled record is **persisted to the embedded Turso graph store**, so each run builds durable graph-memory awareness that later searches reuse. Everything runs on your machine: no API keys, no cloud, no authentication.
+[![Rust 1.98+](https://img.shields.io/badge/rust-1.98%2B-blue.svg?logo=rust&style=flat-square)](https://www.rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
+[![Platform: Linux | macOS | Windows](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg?style=flat-square)](#quick-start--installation)
+[![Architecture: Pure CLI + Axum Web UI](https://img.shields.io/badge/architecture-Pure%20CLI%20%2B%20Web%20UI-cyan.svg?style=flat-square)](#architecture)
+
+<p align="center">
+  <a href="#key-features">Features</a> •
+  <a href="#prerequisites">Prerequisites</a> •
+  <a href="#installing-rust">Install Rust</a> •
+  <a href="#quick-start--installation">Installation</a> •
+  <a href="#ai-agent-integration-pure-cli">AI Integration</a> •
+  <a href="#cli-command-guide">CLI Guide</a> •
+  <a href="#architecture">Architecture</a>
+</p>
+
+</div>
+
+---
+
+## Why WebFind?
+
+When you use hosted frontier AI models (Claude, Codex, ChatGPT Pro), web search is tightly integrated into the provider harness. But on **free and locally-hosted models** (Ollama, DeepSeek, Qwen, Mistral, Llama), live web search is gated or absent — degrading model answers with stale hallucinated knowledge.
+
+**WebFind fills that gap with zero external dependencies:**
+- **Single-Call AI Harness Protocol:** One command crawls, persists to an embedded graph store, indexes, ranks, and returns grounded cited results in JSON.
+- **Embedded Turso/libSQL Memory:** Crawled records persist in a durable local graph (`url_nodes` + `link_edges` + `page_content`). Future searches reuse the accumulated graph.
+- **Hybrid Retrieval:** BM25 full-text search combined with local dense vector embeddings (`fastembed-rs`) and PageRank fused via Reciprocal Rank Fusion (RRF).
+- **Dual Personality:** Operates as a blazing-fast **pure CLI** for autonomous coding agents and provides a **Google-style Web Interface (GUI)** with live Server-Sent Events (SSE) crawl streaming for humans.
 
 ```
-Local Model (harness + system prompt) → webfind research (single call) → Crawl & Persist to Turso Graph → BM25 + Vector + PageRank → JSON result file → back to the model
+Local Model (Agent Harness) -> webfind research (single CLI call) -> Crawl & Turso Graph Store -> Hybrid BM25 + Vector + PageRank -> Grounded JSON Context
 ```
 
 ---
 
-## 🌟 Key Features
+## Key Features
 
-- 🖥️ **Google-Style Web Interface**: Modern, responsive Web UI built with Axum, HTMX, Tailwind CSS, real-time SSE research streaming, auto-complete search suggestions, and category filtering.
-- 🧪 **Pure CLI (no MCP)**: One command crawls, persists to the DB, indexes, ranks, and emits results. No server to keep alive, no round-trip state. Local models call the binary directly via a harness / system prompt.
-- 🧠 **Durable Graph Memory**: Every record is persisted to the Turso DB (`url_nodes` + `link_edges` + `page_content`). No temp JSON — records live in the database and future queries search the accumulated graph.
-- ⚡ **Hybrid BM25 + Dense Vector Search**: High-performance full-text search combined with dense vector embeddings (`fastembed-rs`) for semantic search re-ranking, fused with Reciprocal Rank Fusion.
-- 🕸️ **Deep Web Crawler**: High-concurrency crawler with `robots.txt` compliance, rate limiting, domain session stickiness, User-Agent rotation, proxy CIDR pool routing, and headless Chromium (CDP) for JavaScript-rendered / infinite-scroll pages.
-- ⏱️ **No-Timeout Deep Research**: `--deep` removes the crawl deadline and backoff caps (90s request timeout) so long-running investigations can finish.
-- 📊 **Turso Embedded Graph & PageRank**: Single-file SQLite (Turso/libSQL) for the link graph, vector index (DiskANN), full-text index (FTS5), and PageRank — zero external database.
-- 🎯 **Clean Noise-Free Extraction for AI Agents**: Strips scripts, styles, ads, navigation, headers, and footers. Focuses on core structural elements to deliver high-density, token-efficient content (inspired by Firecrawl).
-- 🔒 **Encryption at Rest**: Optional SQLCipher AES-256-CBC encryption for the Turso database file.
+- **Google-Style Web Interface**: Fast, responsive Web UI built with Axum, HTMX, Tailwind CSS, real-time SSE research streaming, auto-complete search suggestions, and domain category filtering.
+- **Pure CLI (Zero-MCP Overhead)**: One command executes end-to-end research. No background daemon to babysit, no complex MCP handshakes, and zero round-trip protocol latency.
+- **Durable Graph Memory**: Every crawl is persisted directly into embedded Turso/libSQL. No ephemeral temp JSON files — research compounds into a local knowledge base.
+- **Hybrid BM25 + Dense Vector Search**: High-performance lexical search merged with local vector embeddings (`fastembed-rs`) and graph PageRank via Reciprocal Rank Fusion (RRF).
+- **High-Concurrency Web Crawler**: Full `robots.txt` compliance, domain session stickiness, adaptive rate limiting, User-Agent rotation, proxy CIDR pool routing, and headless Chromium (CDP) for dynamic SPAs.
+- **Uncapped Deep Mode (`--deep`)**: Removes crawl deadlines and backoff caps (with 90s request timeouts) to let comprehensive multi-page investigations finish reliably.
+- **High-Density Noise Stripping**: Filters scripts, styles, advertisements, tracking, navigation bars, and footers to pass token-efficient, high-signal Markdown extracts to your LLM.
+- **Zero Cloud & Zero Cost**: Self-hosted on your machine. No monthly subscriptions, no rate-limited search APIs, and optional AES-256-CBC encryption at rest.
 
 ---
 
-## 🚀 Quick Start & Global Installation
+## Architecture
 
-Install `webfind` globally across **Linux, macOS, and Windows** to your system's global binary folder, automatically wiping target build artifacts:
+WebFind bridges local AI agents and human research through a unified, high-performance Rust core:
+
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="WebFind Architecture Diagram" width="100%" />
+</p>
+
+---
+
+## Prerequisites
+
+Before installing and compiling WebFind from source, verify that your machine has the following dependencies installed:
+
+| Prerequisite | Minimum Version | Required For | Verification Command |
+|---|---|---|---|
+| **Rust toolchain** | `1.98.0+` (Rust 2024 Edition) | Building the `webfind` binary & native dependencies | `rustc --version` |
+| **C / C++ Compiler & Linker** | `clang` / `gcc` / MSVC | Compiling `libsql-ffi` and native C libraries | `cc --version` (or `clang --version`) |
+| **Git** | Any modern version | Cloning the repository | `git --version` |
+| **Chromium** *(Optional)* | Any modern release | Dynamic JS rendering / SPA scraping (`--dynamic`) | `which chromium || which google-chrome` |
+| **Docker** *(Optional)* | 20.10+ | Running the Web UI and HTTP daemon via containers | `docker --version` |
+
+---
+
+## Installing Rust
+
+WebFind utilizes modern Rust features (Edition 2024, Rust 1.98+). Follow the instructions below for your operating system to set up or update your Rust environment:
+
+### macOS and Linux
+
+Install Rust using the official `rustup` installer:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Follow the on-screen instructions (Option `1` - default installation). Once installed, refresh your shell profile:
+
+```bash
+source "$HOME/.cargo/env"
+```
+
+Verify that Rust and Cargo are available:
+
+```bash
+rustc --version
+cargo --version
+```
+
+If you already have Rust installed, update to the latest stable toolchain:
+
+```bash
+rustup update stable
+```
+
+### Windows
+
+1. Download and run **`rustup-init.exe`** from [rustup.rs](https://rustup.rs).
+2. If prompted, install the **Microsoft C++ Build Tools** (Visual Studio Installer with the "Desktop development with C++" workload).
+3. Restart your PowerShell or Command Prompt window and verify:
+
+```powershell
+rustc --version
+cargo --version
+```
+
+---
+
+## Quick Start & Installation
+
+Install `webfind` globally across **Linux, macOS, and Windows**. This compiles the release binary directly into your system's global Cargo bin directory:
 
 ```bash
 git clone https://github.com/Gaurav-Wankhede/WebFind.git
@@ -40,55 +134,50 @@ cargo install --path . --force && cargo clean
 > - **macOS / Linux**: `~/.cargo/bin/webfind`
 > - **Windows**: `%USERPROFILE%\.cargo\bin\webfind.exe`
 >
-> Once installed, run `webfind` from any directory or terminal session without navigating to the project folder.
+> Once installed, you can invoke `webfind` from any directory or terminal session without navigating to the project folder.
 
-### Run a research query (single call — crawls, persists to graph, ranks, writes JSON):
+### Run Your First Research Query
+
+Run a deep research crawl in a single call. WebFind crawls seed URLs, indexes content, ranks with BM25 + Vector + PageRank, persists the graph to `webfind.db`, and outputs structured JSON:
 
 ```bash
-webfind research "Rust async runtime tokio 2026" \
+webfind research "Rust async runtime tokio" \
   --max-pages 20 --delay 300 --deep --dynamic \
   --output /tmp/webfind_result.json
 ```
 
-Read `/tmp/webfind_result.json` — records are already persisted to `webfind.db` for graph-memory awareness.
+Inspect `/tmp/webfind_result.json` — your local model harness can read this file directly to ground its answers.
 
-## 🌐 Optional: HTTP + Web UI (Docker)
+---
 
-For the Google-style Web UI and the REST API, run the self-contained service with Docker Compose:
+## Web Interface & Docker Deployment
+
+For human use, WebFind includes a modern Google-style Web Interface and REST API. You can launch the complete service using Docker Compose:
 
 ```bash
 docker compose up -d --build
 ```
 
-### Services & Endpoints
+### Endpoints & Services
 
-| Service | Access URL | Description |
+| Interface | URL | Description |
 |---|---|---|
-| 🌐 **Web UI** | `http://localhost:5750` | Google-style search engine interface with live SSE research streaming |
-| ⚡ **REST API** | `http://localhost:5748` | Direct REST endpoints (`/search`, `/research`, `/health`) |
+| **Web UI** | `http://localhost:5750` | Search interface with autocomplete, category filters, and live SSE crawl streaming |
+| **REST API** | `http://localhost:5748` | REST API endpoints for remote ingestion (`/search`, `/research`, `/health`) |
 
-All data (Turso DB, cache) lives in the `/data` volume. Backup is a file copy: `cp webfind.db backup.db`.
+All persistent data (Turso DB, link graph, cache) resides in the `./data` volume. Backing up the database is as simple as:
 
----
-
-## 🖥️ Web Interface (GUI)
-
-Access the Web UI at **`http://localhost:5750`**:
-
-- **Instant Search & Autocomplete**: Real-time suggestion dropdown as you type.
-- **Category Filtering**: Filter results by Tech, News, Science, Business, and Custom categories.
-- **Live SSE Research Streaming**: Watch WebFind crawl seed URLs, discover links, and extract content live with progress tracking.
-- **Rendered Content & Snippets**: Read extracted content directly with readability scores and highlighted query terms.
+```bash
+cp webfind.db backup.db
+```
 
 ---
 
-## 🧪 AI Agent Integration (Pure CLI)
+## AI Agent Integration (Pure CLI)
 
-WebFind is a **pure CLI** system — there is no MCP server. Local models call the `webfind` binary directly via a harness / system prompt.
+WebFind is intentionally architected as a **pure CLI system** — avoiding the brittle state machines, connection drops, and memory leaks of persistent MCP servers. Local agent harnesses call the `webfind` binary directly.
 
-### The single-call pattern
-
-Run one CLI call, write the JSON result to a file, then read that file with a file-read tool:
+### The Single-Call Pattern
 
 ```bash
 webfind research "your query here" \
@@ -96,104 +185,80 @@ webfind research "your query here" \
   --output /tmp/webfind_result.json
 ```
 
-- **stdout / `--output` file** = one JSON document (`query`, `total_results`, `results[]`, `searched_at`).
-- **stderr** = progress (`Researching: …`, `Crawl + persist complete …`), logs, warnings.
-- Records are persisted to the Turso graph store; future `webfind search` queries reuse the accumulated graph.
+- **stdout / `--output` file**: Returns a clean JSON document containing `query`, `total_results`, `results[]` (with `rank`, `title`, `url`, `domain`, `excerpt`, and sanitized `content`), and timestamp.
+- **stderr**: Real-time progress indicators (`Researching: ...`, `Crawl + persist complete ...`), diagnostics, and crawl telemetry.
+- **Graph Awareness**: All discovered URLs and pages persist to `webfind.db`. Future searches automatically leverage past crawls.
 
-**Key flags:** `--max-pages`, `--limit`, `--include-content` (default true), `--dynamic` (CDP Chromium), `--deep` (no timeout + stealth/scroll), `--seed` (auto-discovers from curated catalog if omitted), `--graph-store turso|memory`, `--turso-path`, `--output`.
+### Essential Flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--max-pages N` | `100` | Maximum pages to crawl in this run |
+| `--limit N` | `10` | Maximum ranked search results to return |
+| `--include-content` | `true` | Include sanitized full markdown/text content per result |
+| `--dynamic` | `false` | Enable headless Chromium (CDP) for JavaScript-rendered SPAs |
+| `--deep` | `false` | Uncapped mode: disables timeouts/backoff caps for exhaustive crawls |
+| `--seed URL` | `auto` | Explicit seed URL (auto-discovers from catalog if omitted) |
+| `--graph-store turso\|memory` | `turso` | Persistence backend (`turso` for durable graph or `memory`) |
+| `--turso-path PATH` | `webfind.db` | Target path for the embedded Turso/libSQL database file |
+| `--output PATH` | `stdout` | Target file path for the formatted JSON results |
 
 ---
 
-## 💻 CLI Command Guide
+## CLI Command Guide
 
 ```bash
-# Deep research crawl: crawl + persist to graph + search, write JSON result
+# Deep research: crawl + persist to graph + search, output structured JSON
 webfind research "rust async runtime" --max-pages 20 --deep --dynamic --output /tmp/r.json
 
-# Search the accumulated index/graph
-webfind search "rust async" --limit 10 --hybrid
+# Search the existing accumulated local graph and full-text index
+webfind search "tokio channels" --limit 10 --hybrid
 
-# Crawl & persist a domain graph into the embedded Turso store
+# Crawl and persist a domain graph into the embedded Turso store
 webfind crawl --seed https://news.ycombinator.com --depth 3 --max-pages 100
 
-# Fetch page content with headless Chromium for JS-heavy SPAs
+# Fetch and extract clean content from a JavaScript-heavy SPA
 webfind fetch https://react.dev --dynamic --dynamic-wait-ms 3000
 
-# Traverse the link graph in Turso
+# Inspect the link graph in Turso for a given domain or URL
 webfind graph https://doc.rust-lang.org/ --depth 2
 
-# Check engine and index status
+# Check database health, total indexed documents, and engine status
 webfind status
 ```
 
 ---
 
-## 🌐 REST API Endpoints (HTTP mode)
+## REST API Endpoints
 
-| Endpoint | Method | Query Parameters / Body | Description |
+When running in HTTP / server mode, WebFind exposes high-performance REST and streaming endpoints:
+
+| Endpoint | Method | Parameters | Description |
 |---|---|---|---|
-| `/health` | GET | - | Health status & index document count |
-| `/search` | GET | `q`, `limit`, `hybrid` | Search local index |
-| `/research` | GET | `seed`, `q`, `max_pages`, `depth` | Live crawl, index, and return ranked search |
-| `/api/web/suggest` | GET | `q` | Real-time autocomplete suggestions |
-| `/api/web/categories` | GET | - | Retrieve domain categories & filter stats |
-| `/api/web/research/stream` | GET | `seed`, `q`, `depth`, `max_pages` | Server-Sent Events (SSE) stream for live research |
+| `/health` | `GET` | - | Health status and indexed document count |
+| `/search` | `GET` | `q`, `limit`, `hybrid` | Query local full-text & vector index |
+| `/research` | `GET` | `seed`, `q`, `max_pages`, `depth` | Execute live crawl, index, and return ranked results |
+| `/api/web/suggest` | `GET` | `q` | Real-time autocomplete suggestions |
+| `/api/web/categories` | `GET` | - | Retrieve domain categories and index stats |
+| `/api/web/research/stream` | `GET` | `seed`, `q`, `depth`, `max_pages` | Server-Sent Events (SSE) stream for live crawl visualization |
 
 ---
 
-## 🏗️ Architecture
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                          Clients & Consumers                           │
-│  ┌───────────────────────────────┐   ┌──────────────────────────────┐  │
-│  │  AI Agent (pure CLI, harness) │   │  Human Web UI (HTMX + SSE)   │  │
-│  └───────────────┬───────────────┘   └──────────────┬───────────────┘  │
-└──────────────────┼──────────────────────────────────┼──────────────────┘
-                   │  webfind research --output JSON  │ GET / HTTP
-┌──────────────────▼──────────────────────────────────▼──────────────────┐
-│                        WebFind Engine (Rust)                           │
-│                                                                        │
-│  ┌──────────────────────┐  ┌────────────────────┐  ┌────────────────┐  │
-│  │   Crawler Engine     │  │  Headless Browser  │  │   Proxy Pool   │  │
-│  │ (robots.txt, delay)  │  │ (Chromium / CDP)   │  │ (CIDR / SOCKS) │  │
-│  └──────────┬───────────┘  └─────────┬──────────┘  └────────────────┘  │
-│             ▼                        ▼                                 │
-│  ┌──────────────────────────────────────────────┐                      │
-│  │          Indexer (BM25 + Vector)             │                      │
-│  │     BM25 + FastEmbed / DiskANN               │                      │
-│  └──────────────────────┬───────────────────────┘                      │
-│                         │                                              │
-│  ┌──────────────────────▼───────────────────────┐                      │
-│  │          Hybrid Ranker & Scorer (RRF)        │                      │
-│  │      (BM25 + Dense Vector + PageRank)        │                      │
-│  └──────────────────────┬───────────────────────┘                      │
-│                         │ embedded Turso (webfind.db)                  │
-│  ┌──────────────────────▼───────────────────────┐                      │
-│  │              Turso / libSQL Store            │                      │
-│  │   url_nodes · link_edges · page_content      │                      │
-│  │   Link Graph, FTS5, DiskANN Vector, PageRank │                      │
-│  └──────────────────────────────────────────────┘                      │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## ⚙️ Environment Variables
+## Configuration & Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `WEBFIND_DATA_DIR` | cwd | Directory for the Turso DB and cache storage |
-| `WEBFIND_GRAPH_STORE` | `turso` | Graph backend (`turso` or `memory`) |
-| `WEBFIND_TURSO_PATH` | `webfind.db` | Path to the embedded Turso/libSQL database file |
-| `WEBFIND_GUI_PORT` | `4749` | Web UI HTTP server port |
+| `WEBFIND_DATA_DIR` | Current directory | Root directory for Turso database and local cache |
+| `WEBFIND_GRAPH_STORE` | `turso` | Graph memory store (`turso` or `memory`) |
+| `WEBFIND_TURSO_PATH` | `webfind.db` | Embedded Turso/libSQL database file location |
+| `WEBFIND_GUI_PORT` | `4749` | Web UI and HTTP server listening port |
 | `WEBFIND_RATE_LIMIT` | `60` | Per-IP rate limiting (requests per second; `0` disables) |
-| `WEBFIND_BODY_LIMIT` | `1048576` | Max request body size in bytes |
-| `WEBFIND_CORS_ORIGINS` | *(empty)* | Comma-separated allowed origins (empty = restrictive, no CORS) |
-| `WEBFIND_CONFIG` | `./webfind.toml` | Config file path |
+| `WEBFIND_BODY_LIMIT` | `1048576` | Maximum request body size in bytes (1MB) |
+| `WEBFIND_CORS_ORIGINS` | *(empty)* | Comma-separated allowed CORS origins |
+| `WEBFIND_CONFIG` | `./webfind.toml` | Custom configuration file path |
 
 ---
 
-## 📜 License
+## License
 
-[MIT](LICENSE)
+WebFind is open-source software licensed under the [MIT License](LICENSE).
