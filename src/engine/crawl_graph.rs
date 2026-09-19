@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use ahash::AHashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -93,22 +94,18 @@ pub trait CrawlGraphStore: Send + Sync {
     ) -> Result<()>;
 
     /// Traverse the graph from `start` up to `max_depth` hops in `direction`,
-    /// returning the set of reachable URLs (including `start`).
-    ///
-    /// The default implementation walks edges with an in-memory BFS. Backends
-    /// that can express this more efficiently — e.g. Turso/libSQL recursive
-    /// CTEs — override it for a single-query traversal.
-    async fn traverse(
+    /// returning each reachable URL along with its shortest traversal depth from `start`.
+    async fn traverse_with_depth(
         &self,
         start: &str,
         max_depth: u32,
         direction: TraversalDirection,
-    ) -> Vec<String> {
-        let mut visited = HashSet::new();
+    ) -> Vec<TraversalNode> {
+        let mut depth_map: HashMap<String, u32> = HashMap::new();
         let mut current = vec![start.to_string()];
-        visited.insert(start.to_string());
+        depth_map.insert(start.to_string(), 0);
 
-        for _ in 0..max_depth {
+        for d in 1..=max_depth {
             let mut next = Vec::new();
             for url in &current {
                 let edges: Vec<LinkEdge> = match direction {
@@ -132,7 +129,8 @@ pub trait CrawlGraphStore: Send + Sync {
                             }
                         }
                     };
-                    if visited.insert(neighbor.clone()) {
+                    if !depth_map.contains_key(&neighbor) {
+                        depth_map.insert(neighbor.clone(), d);
                         next.push(neighbor);
                     }
                 }
@@ -143,8 +141,35 @@ pub trait CrawlGraphStore: Send + Sync {
             current = next;
         }
 
-        visited.into_iter().collect()
+        let mut nodes: Vec<TraversalNode> = depth_map
+            .into_iter()
+            .map(|(url, depth)| TraversalNode { url, depth })
+            .collect();
+        nodes.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.url.cmp(&b.url)));
+        nodes
     }
+
+    /// Traverse the graph from `start` up to `max_depth` hops in `direction`,
+    /// returning the set of reachable URLs (including `start`).
+    async fn traverse(
+        &self,
+        start: &str,
+        max_depth: u32,
+        direction: TraversalDirection,
+    ) -> Vec<String> {
+        self.traverse_with_depth(start, max_depth, direction)
+            .await
+            .into_iter()
+            .map(|n| n.url)
+            .collect()
+    }
+}
+
+/// A node visited during graph traversal with its hop depth from the root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraversalNode {
+    pub url: String,
+    pub depth: u32,
 }
 
 /// Direction for graph traversal.
@@ -169,6 +194,16 @@ pub async fn traverse_graph(
     store.traverse(start, max_depth, direction).await
 }
 
+/// Breadth-first traversal of the crawl graph up to `max_depth` with node depths.
+pub async fn traverse_graph_with_depth(
+    store: Arc<dyn CrawlGraphStore>,
+    start: &str,
+    max_depth: u32,
+    direction: TraversalDirection,
+) -> Vec<TraversalNode> {
+    store.traverse_with_depth(start, max_depth, direction).await
+}
+
 /// Compute PageRank-style centrality scores for every URL in the graph.
 ///
 /// Returns a map from URL to a score in the range (0.0, 1.0]. Nodes with no
@@ -185,8 +220,8 @@ pub async fn compute_pagerank(
         return HashMap::new();
     }
 
-    let mut out_degree: HashMap<String, usize> = HashMap::new();
-    let mut incoming: HashMap<String, Vec<String>> = HashMap::new();
+    let mut out_degree: AHashMap<String, usize> = AHashMap::new();
+    let mut incoming: AHashMap<String, Vec<String>> = AHashMap::new();
     for edge in edges {
         *out_degree.entry(edge.from.clone()).or_insert(0) += 1;
         incoming.entry(edge.to.clone()).or_default().push(edge.from);
@@ -201,11 +236,11 @@ pub async fn compute_pagerank(
     // starting point: inactive nodes are already at their fixed point, and
     // active nodes converge to the same PageRank fixed point regardless of
     // initialization.
-    let mut scores: HashMap<String, f64> = nodes.iter().map(|u| (u.clone(), base)).collect();
+    let mut scores: AHashMap<String, f64> = nodes.iter().map(|u| (u.clone(), base)).collect();
     let active: Vec<&String> = nodes.iter().filter(|u| incoming.contains_key(*u)).collect();
 
     for _ in 0..iterations.max(1) {
-        let mut new_scores = HashMap::with_capacity(active.len());
+        let mut new_scores = AHashMap::with_capacity(active.len());
         for url in &active {
             let mut rank = base;
             if let Some(in_nodes) = incoming.get(*url) {
@@ -223,7 +258,7 @@ pub async fn compute_pagerank(
         }
     }
 
-    scores
+    scores.into_iter().collect()
 }
 
 /// In-memory graph store for tests and local crawls.

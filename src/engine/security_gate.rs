@@ -29,9 +29,17 @@ pub enum SecurityGateError {
 /// - Cloud metadata service (169.254.169.254)
 /// - Broadcast & Unspecified (0.0.0.0, 255.255.255.255, ::)
 pub fn is_forbidden_ip(ip: IpAddr) -> bool {
+    // When explicitly enabled via environment variable (e.g. integration tests),
+    // allow loopback (127.0.0.1, ::1) so tests can crawl mock servers.
+    let allow_local = std::env::var("WEBFIND_ALLOW_LOCAL_SEEDS").map(|v| v == "1" || v == "true").unwrap_or(false);
+
     match ip {
         IpAddr::V4(ipv4) => {
-            ipv4.is_loopback()
+            let is_loop = ipv4.is_loopback();
+            if is_loop && allow_local {
+                return false;
+            }
+            is_loop
                 || ipv4.is_private()
                 || ipv4.is_link_local()
                 || ipv4.is_broadcast()
@@ -39,7 +47,11 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
                 || ipv4.octets() == [169, 254, 169, 254]
         }
         IpAddr::V6(ipv6) => {
-            ipv6.is_loopback() || ipv6.is_unspecified() || ipv6.segments()[0] & 0xffc0 == 0xfe80
+            let is_loop = ipv6.is_loopback();
+            if is_loop && allow_local {
+                return false;
+            }
+            is_loop || ipv6.is_unspecified() || ipv6.segments()[0] & 0xffc0 == 0xfe80
         }
     }
 }

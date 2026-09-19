@@ -15,6 +15,7 @@ pub mod fingerprint;
 pub mod graph_summary;
 pub mod human_client;
 pub mod indexer;
+pub mod metadata_sniffer;
 pub mod pagerank_cache;
 pub mod pipeline;
 pub mod proxy_pool;

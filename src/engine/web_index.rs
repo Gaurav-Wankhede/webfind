@@ -21,7 +21,8 @@ pub mod util;
 
 pub use client::Client;
 pub use engines::{
-    arxiv, bing, crates_io, ddg, hn, lobsters, marginalia, mdn, mojeek, stackoverflow, wikipedia,
+    arxiv, bing, bing_news, crates_io, ddg, devdocs, github_code, hn, lobsters, marginalia, mdn,
+    mojeek, semantic_scholar, stackoverflow, wikipedia,
 };
 pub use rrf::{FusedHit, aggregate_fused, normalize_rrf_scores, reciprocal_rank_fusion};
 pub use util::{
@@ -127,6 +128,11 @@ pub trait Engine: Send + Sync {
     /// Stable engine identifier, surfaced in hits and reports.
     fn name(&self) -> &'static str;
 
+    /// Whether this engine should be queried for the given query. Defaults to `true`.
+    fn should_query(&self, _query: &str) -> bool {
+        true
+    }
+
     /// Search the engine and return its ranked hits.
     ///
     /// # Errors
@@ -170,20 +176,26 @@ impl LiveIndex {
     /// this method and never closed, so this is unreachable.
     pub async fn search(&self, query: &str, opts: &EngineOptions) -> Outcome {
         let start = Instant::now();
-        let semaphore = Arc::new(Semaphore::new(opts.max_concurrency.max(1)));
-        let mut futures = Vec::with_capacity(self.engines.len());
+        let active_engines: Vec<Arc<dyn Engine>> = self
+            .engines
+            .iter()
+            .filter(|e| e.should_query(query))
+            .cloned()
+            .collect();
+        let queried_count = active_engines.len();
+        let max_permits = opts.max_concurrency.max(queried_count).max(1);
+        let semaphore = Arc::new(Semaphore::new(max_permits));
+        let mut futures = Vec::with_capacity(queried_count);
 
-        for engine in &self.engines {
-            let permit = semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .expect("semaphore is never closed");
-            let engine = Arc::clone(engine);
+        for engine in active_engines {
+            let semaphore = Arc::clone(&semaphore);
             let query = query.to_string();
             let opts = opts.clone();
             futures.push(async move {
-                let _permit = permit;
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .expect("semaphore is never closed");
                 let engine_start = Instant::now();
                 let result = engine.search(&query, &opts).await;
                 let latency_ms =
@@ -214,24 +226,46 @@ impl LiveIndex {
         let mut total_hits_seen = 0;
         let target_hits = opts.max_results.saturating_mul(2).max(10);
         let min_engines = 3.min(self.engines.len());
+        let max_duration = std::time::Duration::from_millis(opts.timeout_ms.max(1000));
 
-        while let Some(report) = unordered.next().await {
-            total_hits_seen += report.hits.len();
-            reports.push(report);
-
-            // Speculative early return: if we already received responses from key engines
-            // and accumulated ample candidate hits, do not stall on slow/hanging endpoints.
-            if reports.len() >= min_engines
-                && total_hits_seen >= target_hits
-                && start.elapsed().as_millis() >= 1_200
-            {
+        loop {
+            if start.elapsed() >= max_duration {
                 tracing::debug!(
-                    "LiveIndex early completion: got {} hits from {} engines in {}ms",
-                    total_hits_seen,
-                    reports.len(),
+                    "LiveIndex deadline reached ({}ms), proceeding with collected results",
                     start.elapsed().as_millis()
                 );
                 break;
+            }
+
+            let remaining = max_duration.saturating_sub(start.elapsed());
+            match tokio::time::timeout(remaining, unordered.next()).await {
+                Ok(Some(report)) => {
+                    total_hits_seen += report.hits.len();
+                    reports.push(report);
+
+                    // Speculative early return: if we already received responses from key engines
+                    // and accumulated ample candidate hits, do not stall on slow/hanging endpoints.
+                    if reports.len() >= min_engines
+                        && total_hits_seen >= target_hits
+                        && start.elapsed().as_millis() >= 750
+                    {
+                        tracing::debug!(
+                            "LiveIndex early completion: got {} hits from {} engines in {}ms",
+                            total_hits_seen,
+                            reports.len(),
+                            start.elapsed().as_millis()
+                        );
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::debug!(
+                        "LiveIndex timeout reached across remaining engines after {}ms",
+                        start.elapsed().as_millis()
+                    );
+                    break;
+                }
             }
         }
 
@@ -253,9 +287,9 @@ impl LiveIndex {
             query: query.to_string(),
             fused,
             reports,
-            total_engines: self.engines.len(),
+            total_engines: queried_count,
             engines_ok,
-            engines_failed: self.engines.len() - engines_ok,
+            engines_failed: queried_count.saturating_sub(engines_ok),
             latency_ms,
         }
     }

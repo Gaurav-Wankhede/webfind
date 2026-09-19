@@ -20,6 +20,9 @@
       <a href="{{ result.url }}" target="_blank" rel="noopener" class="text-xs text-emerald-500 truncate block hover:underline">{{ result.url }}</a>
       <p class="text-sm text-slate-300 line-clamp-2 mt-0.5">{{ result.snippet }}</p>
       <div class="flex items-center gap-3 mt-1.5 text-xs text-slate-500">
+        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-cyan-950 text-cyan-400 border border-cyan-800/50">
+          #{{ result.rank }} · {{ format!("{:.0}%", result.score * 100.0) }} match
+        </span>
         <span>Crawled {{ result.crawled_at.format("%Y-%m-%d") }}</span>
         {% if result.author.is_some() %}
           <span>· {{ result.author.as_ref().unwrap() }}</span>

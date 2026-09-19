@@ -189,6 +189,7 @@ impl SearchEngine for InMemorySearchEngine {
                         graph: None,
                         freshness: None,
                         quality: None,
+                        ax_score: None,
                         final_score: score,
                     },
                     content: None,
@@ -196,6 +197,10 @@ impl SearchEngine for InMemorySearchEngine {
                     metrics: None,
                     favicon: None,
                     thumbnail: None,
+                    llms_txt: None,
+                    ai_catalog: None,
+                    openapi_spec: None,
+                    mcp_server: None,
                     language: doc.language.clone(),
                     content_type: doc.content_type.clone(),
                 }

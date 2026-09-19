@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 180" width="100%" height="100%">
+  <defs>
+    <linearGradient id="flowBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090d16"/>
+      <stop offset="100%" stop-color="#030712"/>
+    </linearGradient>
+    <linearGradient id="accentCyan" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="accentPurple" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#ec4899"/>
+    </linearGradient>
+    <linearGradient id="accentEmerald" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#14b8a6"/>
+    </linearGradient>
+    <filter id="nodeShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.6"/>
+    </filter>
+    <marker id="arrowHead" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+
+  <style>
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  </style>
+
+  <!-- Background Canvas -->
+  <rect width="920" height="180" rx="14" fill="url(#flowBg)" stroke="#1e293b" stroke-width="1.5"/>
+
+  <!-- Step 1: Agent Harness -->
+  <g transform="translate(30, 35)">
+    <rect width="180" height="110" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.5" filter="url(#nodeShadow)"/>
+    <rect x="0" y="0" width="180" height="4" rx="2" fill="url(#accentCyan)"/>
+    <text x="16" y="32" class="sans" font-size="13" font-weight="700" fill="#f8fafc">Local AI Agent</text>
+    <text x="16" y="52" class="sans" font-size="11" fill="#94a3b8">Ollama / DeepSeek / Qwen</text>
+    <rect x="16" y="68" width="148" height="28" rx="6" fill="#020617" stroke="#1e293b"/>
+    <text x="24" y="86" class="mono" font-size="10" font-weight="600" fill="#38bdf8">single CLI call</text>
+  </g>
+
+  <!-- Connector 1 -> 2 -->
+  <path d="M 210 90 L 260 90" stroke="#38bdf8" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#arrowHead)"/>
+
+  <!-- Step 2: WebFind Engine -->
+  <g transform="translate(265, 35)">
+    <rect width="185" height="110" rx="10" fill="#0f172a" stroke="#0284c7" stroke-width="1.5" filter="url(#nodeShadow)"/>
+    <rect x="0" y="0" width="185" height="4" rx="2" fill="url(#accentCyan)"/>
+    <text x="16" y="32" class="sans" font-size="13" font-weight="700" fill="#f8fafc">WebFind Core</text>
+    <text x="16" y="52" class="mono" font-size="10" fill="#38bdf8">webfind deep-search</text>
+    <text x="16" y="72" class="sans" font-size="11" fill="#94a3b8">Autonomous Spider + CDP</text>
+    <text x="16" y="90" class="sans" font-size="10" fill="#64748b">15 search engines + Crawl</text>
+  </g>
+
+  <!-- Connector 2 -> 3 -->
+  <path d="M 450 90 L 500 90" stroke="#38bdf8" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#arrowHead)"/>
+
+  <!-- Step 3: Turso Graph Memory -->
+  <g transform="translate(505, 35)">
+    <rect width="180" height="110" rx="10" fill="#0f172a" stroke="#6366f1" stroke-width="1.5" filter="url(#nodeShadow)"/>
+    <rect x="0" y="0" width="180" height="4" rx="2" fill="url(#accentPurple)"/>
+    <text x="16" y="32" class="sans" font-size="13" font-weight="700" fill="#f8fafc">Graph Store</text>
+    <text x="16" y="52" class="sans" font-size="11" fill="#c084fc">Embedded Turso / libSQL</text>
+    <text x="16" y="72" class="sans" font-size="10" fill="#94a3b8">BM25 + Vector + PageRank</text>
+    <text x="16" y="90" class="mono" font-size="10" fill="#a855f7">RRF Score Normalization</text>
+  </g>
+
+  <!-- Connector 3 -> 4 -->
+  <path d="M 685 90 L 735 90" stroke="#38bdf8" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#arrowHead)"/>
+
+  <!-- Step 4: Grounded JSON -->
+  <g transform="translate(740, 35)">
+    <rect width="150" height="110" rx="10" fill="#0f172a" stroke="#059669" stroke-width="1.5" filter="url(#nodeShadow)"/>
+    <rect x="0" y="0" width="150" height="4" rx="2" fill="url(#accentEmerald)"/>
+    <text x="14" y="32" class="sans" font-size="13" font-weight="700" fill="#f8fafc">Grounded Context</text>
+    <text x="14" y="52" class="mono" font-size="10" fill="#34d399">--output JSON</text>
+    <text x="14" y="72" class="sans" font-size="10" fill="#94a3b8">Citations &amp; Metadata</text>
+    <text x="14" y="90" class="sans" font-size="10" fill="#10b981">Zero Hallucinations</text>
+  </g>
+</svg>

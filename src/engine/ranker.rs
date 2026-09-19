@@ -16,13 +16,15 @@ const W_FRESH: f64 = 0.15;
 const W_QUALITY: f64 = 0.10;
 const W_GRAPH: f64 = 0.10;
 const W_AUTHORITY: f64 = 0.10;
+const W_AX: f64 = 0.20;
 
-const H_BM25: f64 = 0.40;
-const H_FRESH: f64 = 0.12;
-const H_QUALITY: f64 = 0.08;
-const H_GRAPH: f64 = 0.10;
+const H_BM25: f64 = 0.35;
+const H_FRESH: f64 = 0.10;
+const H_QUALITY: f64 = 0.07;
+const H_GRAPH: f64 = 0.08;
 const H_VECTOR: f64 = 0.20;
-const H_AUTHORITY: f64 = 0.10;
+const H_AUTHORITY: f64 = 0.08;
+const H_AX: f64 = 0.12;
 
 /// Diversity penalty factor per prior occurrence of the same domain.
 const DIVERSITY_PENALTY: f64 = 0.85;
@@ -32,8 +34,49 @@ impl Ranker {
         Self
     }
 
+    /// Calculate Machine-Readability Index (S_AX) evaluating structured agent readiness:
+    /// - Has_Structured_Manifest (+0.35): llms.txt or ai-catalog.json present
+    /// - Clean_Markdown_Available (+0.25): markdown or structured code available
+    /// - Has_OpenAPI_or_MCP (+0.20): OpenAPI schema or MCP server declared
+    /// - Direct_API_Affordance (+0.20): copy-executable commands or structured schema
+    #[must_use]
+    pub fn calculate_ax_score(r: &SearchResult) -> Option<f64> {
+        let mut score: f64 = 0.0;
+        let mut has_any = false;
+
+        if r.llms_txt.is_some() || r.ai_catalog.is_some() {
+            score += 0.35;
+            has_any = true;
+        }
+
+        if let Some(content) = &r.content
+            && (content.markdown.is_some() || content.text.contains("```") || content.text.contains('|'))
+        {
+            score += 0.25;
+            has_any = true;
+        }
+
+        if r.openapi_spec.is_some() || r.mcp_server.is_some() {
+            score += 0.20;
+            has_any = true;
+        }
+
+        if let Some(metrics) = &r.metrics
+            && metrics.has_structured_data
+        {
+            score += 0.20;
+            has_any = true;
+        }
+
+        if has_any {
+            Some(score.clamp(0.0, 1.0))
+        } else {
+            None
+        }
+    }
+
     /// Re-rank results by combining BM25 with freshness, quality, graph, vector,
-    /// authority and domain-diversity signals.
+    /// authority, machine-readability (S_AX) and domain-diversity signals.
     pub fn rank(
         &self,
         mut results: Vec<SearchResult>,
@@ -42,10 +85,10 @@ impl Ranker {
         vector_scores: Option<&HashMap<String, f64>>,
     ) -> Vec<SearchResult> {
         let use_vector = vector_scores.map(|m| !m.is_empty()).unwrap_or(false);
-        let (w_bm25, w_fresh, w_quality, w_graph, w_vector, w_authority) = if use_vector {
-            (H_BM25, H_FRESH, H_QUALITY, H_GRAPH, H_VECTOR, H_AUTHORITY)
+        let (w_bm25, w_fresh, w_quality, w_graph, w_vector, w_authority, w_ax) = if use_vector {
+            (H_BM25, H_FRESH, H_QUALITY, H_GRAPH, H_VECTOR, H_AUTHORITY, H_AX)
         } else {
-            (W_BM25, W_FRESH, W_QUALITY, W_GRAPH, 0.0, W_AUTHORITY)
+            (W_BM25, W_FRESH, W_QUALITY, W_GRAPH, 0.0, W_AUTHORITY, W_AX)
         };
 
         // Build domain authority from per-URL graph scores.
@@ -68,11 +111,8 @@ impl Ranker {
             });
             r.scores.quality = quality;
 
-            let graph = graph_scores
-                .and_then(|scores| scores.get(&r.url))
-                .copied()
-                .unwrap_or(0.0);
-            r.scores.graph = Some(graph);
+            let graph = graph_scores.and_then(|scores| scores.get(&r.url)).copied();
+            r.scores.graph = graph;
 
             let vector = vector_scores
                 .and_then(|scores| scores.get(&r.url))
@@ -82,18 +122,30 @@ impl Ranker {
 
             let authority = *domain_authority.get(&r.domain).unwrap_or(&0.0);
 
+            let ax = Self::calculate_ax_score(r);
+            r.scores.ax_score = ax;
+
             // Compute score dynamically over present signals without phantom defaults.
             let (quality_term, active_w_quality) = match quality {
                 Some(q) => (w_quality * q, w_quality),
                 None => (0.0, 0.0),
             };
-            let weight_sum = w_bm25 + w_fresh + active_w_quality + w_graph + w_vector + w_authority;
+            let (graph_term, active_w_graph) = match graph {
+                Some(g) => (w_graph * g, w_graph),
+                None => (0.0, 0.0),
+            };
+            let (ax_term, active_w_ax) = match ax {
+                Some(a) => (w_ax * a, w_ax),
+                None => (0.0, 0.0),
+            };
+            let weight_sum = w_bm25 + w_fresh + active_w_quality + active_w_graph + w_vector + w_authority + active_w_ax;
             let raw_final = w_bm25 * r.scores.bm25.unwrap_or(0.0)
                 + w_fresh * freshness
                 + quality_term
-                + w_graph * graph
+                + graph_term
                 + w_vector * vector
-                + w_authority * authority;
+                + w_authority * authority
+                + ax_term;
             let final_score = if weight_sum > 0.0 {
                 (raw_final / weight_sum).clamp(0.0, 1.0)
             } else {
@@ -122,7 +174,7 @@ impl Ranker {
         results
     }
 
-    /// Compute domain-level authority as the mean graph score of pages on that domain.
+    /// Compute domain-level authority as a combination of graph authority and institutional TLD/domain heuristics.
     fn domain_authority(
         graph_scores: Option<&HashMap<String, f64>>,
         results: &[SearchResult],
@@ -139,9 +191,85 @@ impl Ranker {
         }
         sums.into_iter()
             .map(|(domain, (sum, count))| {
-                (domain, if count > 0 { sum / count as f64 } else { 0.0 })
+                let mean_graph = if count > 0 { sum / count as f64 } else { 0.0 };
+                let institutional_boost = Self::institutional_authority_boost(&domain);
+                (domain, (mean_graph + institutional_boost).clamp(0.0, 1.0))
             })
             .collect()
+    }
+
+    /// Baseline authority boost based on top-level domain and verified institutional domains.
+    fn institutional_authority_boost(domain: &str) -> f64 {
+        let d = domain.to_ascii_lowercase();
+
+        // 1. Sovereign Government, Military & Intergovernmental (.gov, .mil, .int, sovereign ccTLDs)
+        if d.ends_with(".gov")
+            || d.ends_with(".gov.uk")
+            || d.ends_with(".mil")
+            || d.ends_with(".gov.au")
+            || d.ends_with(".int")
+            || d.ends_with(".europa.eu")
+        {
+            return 0.35;
+        }
+
+        // 2. Accredited Higher Education & National Research Institutes (.edu, .ac.uk, .edu.au)
+        if d.ends_with(".edu") || d.ends_with(".ac.uk") || d.ends_with(".edu.au") {
+            return 0.30;
+        }
+
+        // 3. Primary Reference, Global Health, Central Banks & Scientific Repositories
+        const PRIMARY_INSTITUTIONS: &[&str] = &[
+            // Encyclopedias & Heritage
+            "wikipedia.org", "wikimedia.org", "archive.org", "gutenberg.org", "jstor.org",
+            // Physics, Math & Computer Science
+            "arxiv.org", "semanticscholar.org", "ieee.org", "acm.org", "cern.ch",
+            // Life Sciences & Medicine
+            "nih.gov", "ncbi.nlm.nih.gov", "nature.com", "science.org", "cell.com",
+            "thelancet.com", "nejm.org", "plos.org", "biorxiv.org", "medrxiv.org",
+            "cochranelibrary.com", "mayoclinic.org", "who.int", "cdc.gov",
+            // Academic Publishers & University Presses
+            "springer.com", "wiley.com", "oup.com", "cambridge.org", "sciencedirect.com", "pnas.org", "iop.org", "acs.org",
+            // Central Banking & Macroeconomics
+            "federalreserve.gov", "stlouisfed.org", "ecb.europa.eu", "bankofengland.co.uk", "bis.org", "imf.org", "worldbank.org", "oecd.org",
+            // Standards Organizations
+            "w3.org", "ietf.org", "iso.org", "nist.gov",
+        ];
+        if PRIMARY_INSTITUTIONS.iter().any(|&inst| d == inst || d.ends_with(&format!(".{inst}"))) {
+            return 0.28;
+        }
+
+        // 4. Recognized Primary Journalistic, Investigative & Wire Services
+        const REPUTABLE_PRESS: &[&str] = &[
+            // Global Wire Services
+            "reuters.com", "apnews.com", "afp.com", "upi.com",
+            // Investigative Non-Profits
+            "propublica.org", "icij.org", "bellingcat.com", "theintercept.com",
+            // Major Investigative Newspapers & Periodicals
+            "bbc.com", "bbc.co.uk", "bloomberg.com", "wsj.com", "ft.com", "economist.com",
+            "theguardian.com", "nytimes.com", "washingtonpost.com", "theatlantic.com",
+            "newyorker.com", "foreignaffairs.com",
+            // Fact-Checking & Consumer Verification
+            "snopes.com", "factcheck.org", "politifact.com", "consumerreports.org",
+        ];
+        if REPUTABLE_PRESS.iter().any(|&press| d == press || d.ends_with(&format!(".{press}"))) {
+            return 0.22;
+        }
+
+        // 5. Artisan, Culinary Science & Authority Portals
+        const AUTHORITY_CRAFT: &[&str] = &[
+            "seriouseats.com", "kingarthurbaking.com", "americastestkitchen.com",
+        ];
+        if AUTHORITY_CRAFT.iter().any(|&craft| d == craft || d.ends_with(&format!(".{craft}"))) {
+            return 0.16;
+        }
+
+        // 6. Standard non-profit organizational registry (.org)
+        if d.ends_with(".org") {
+            return 0.08;
+        }
+
+        0.0
     }
 
     /// Down-rank repeated domains in the top results.
@@ -304,6 +432,7 @@ mod tests {
                 graph: None,
                 freshness: None,
                 quality: None,
+                ax_score: None,
                 final_score: 0.0,
             },
             content: None,
@@ -321,6 +450,10 @@ mod tests {
             }),
             favicon: None,
             thumbnail: None,
+            llms_txt: None,
+            ai_catalog: None,
+            openapi_spec: None,
+            mcp_server: None,
             language: "en".to_string(),
             content_type: "text".to_string(),
         };
@@ -381,6 +514,7 @@ mod tests {
                 graph: None,
                 freshness: None,
                 quality: None,
+                ax_score: None,
                 final_score: 0.0,
             },
             content: None,
@@ -398,6 +532,10 @@ mod tests {
             }),
             favicon: None,
             thumbnail: None,
+            llms_txt: None,
+            ai_catalog: None,
+            openapi_spec: None,
+            mcp_server: None,
             language: "en".to_string(),
             content_type: "text".to_string(),
         };
@@ -432,5 +570,63 @@ mod tests {
         assert_eq!(ranked[0].url, "https://example.com/a");
         assert_eq!(ranked[1].url, "https://other.com/c");
         assert_eq!(ranked[2].url, "https://example.com/b");
+    }
+
+    #[test]
+    fn test_ax_score_machine_readability() {
+        use crate::schema::response::{ContentBlock, SearchResult};
+        let now = chrono::Utc::now();
+        let mut r = SearchResult {
+            rank: 1,
+            url: "https://api.example.com/docs".to_string(),
+            title: "API Docs".to_string(),
+            snippet: "Documentation".to_string(),
+            domain: "api.example.com".to_string(),
+            published_at: Some(now),
+            modified_at: None,
+            crawled_at: now,
+            author: None,
+            site_name: None,
+            score: 0.0,
+            scores: crate::schema::response::ScoreBreakdown {
+                bm25: None,
+                vector: None,
+                graph: None,
+                freshness: None,
+                quality: None,
+                ax_score: None,
+                final_score: 0.0,
+            },
+            content: Some(ContentBlock {
+                text: "### Events\n```bash\ncurl https://api.example.com/events\n```".to_string(),
+                excerpt: "Events API".to_string(),
+                word_count: 10,
+                reading_time_seconds: 3,
+                html: None,
+                markdown: Some("### Events\n```bash\ncurl https://api.example.com/events\n```".to_string()),
+            }),
+            keywords: None,
+            metrics: None,
+            favicon: None,
+            thumbnail: None,
+            llms_txt: Some("https://api.example.com/llms.txt".to_string()),
+            ai_catalog: None,
+            openapi_spec: Some("https://api.example.com/openapi.json".to_string()),
+            mcp_server: Some("npx -y @example/mcp-server".to_string()),
+            language: "en".to_string(),
+            content_type: "text".to_string(),
+        };
+
+        let ax = Ranker::calculate_ax_score(&r);
+        assert!(ax.is_some());
+        let val = ax.unwrap();
+        // Manifest (0.35) + Markdown/code (0.25) + OpenAPI/MCP (0.20) = 0.80
+        assert!((val - 0.80).abs() < 1e-5);
+
+        r.llms_txt = None;
+        r.openapi_spec = None;
+        r.mcp_server = None;
+        r.content = None;
+        assert_eq!(Ranker::calculate_ax_score(&r), None);
     }
 }

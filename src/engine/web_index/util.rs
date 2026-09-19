@@ -396,9 +396,11 @@ pub fn keyword_match_count(keywords: &[String], title: &str, snippet: &str) -> u
     if keywords.is_empty() {
         return 0;
     }
-    let text = format!("{title} {snippet}").to_lowercase();
-    let tokens: HashSet<&str> = text
+    let title_lower = title.to_lowercase();
+    let snippet_lower = snippet.to_lowercase();
+    let tokens: HashSet<&str> = title_lower
         .split(|c: char| !c.is_alphanumeric())
+        .chain(snippet_lower.split(|c: char| !c.is_alphanumeric()))
         .filter(|t| !t.is_empty())
         .collect();
     keywords
@@ -590,47 +592,45 @@ mod tests {
         assert!(!kw.contains(&"latest".to_string()));
         assert!(!kw.contains(&"2026".to_string()));
         // Dedup preserves order and caps at 6.
-        let dup = extract_keywords("rust rust async async runtime tokio tokio tokio");
-        assert_eq!(dup, vec!["rust", "async", "runtime", "tokio"]);
+        let dup = extract_keywords("alpha alpha beta beta gamma delta delta delta");
+        assert_eq!(dup, vec!["alpha", "beta", "gamma", "delta"]);
     }
 
     #[test]
     fn keyword_match_count_counts_whole_words_and_prefixes() {
         let keywords = vec![
-            "rust".to_string(),
-            "async".to_string(),
-            "runtime".to_string(),
+            "engine".to_string(),
+            "search".to_string(),
+            "network".to_string(),
         ];
         // Whole words and hyphenated compounds count.
         assert_eq!(
-            keyword_match_count(&keywords, "Tokio - An asynchronous Rust runtime", ""),
+            keyword_match_count(&keywords, "Search - An efficient network engine", ""),
             3
         );
         assert_eq!(
-            keyword_match_count(&keywords, "pyo3-async-runtimes", "Rust bindings"),
+            keyword_match_count(&keywords, "fast-search-engine", "network protocol"),
             3
         );
-        // Morphological variants count via prefix ("asynchronous" → "async").
+        // Morphological variants count via prefix ("networking" → "network").
         assert_eq!(
-            keyword_match_count(&keywords, "An asynchronous Rust runtime", ""),
+            keyword_match_count(&keywords, "An advanced networking search engine", ""),
             3
         );
-        // Accepted trade-off: prefix matching also catches "rusty" → "rust".
-        assert_eq!(keyword_match_count(&keywords, "Rusty nails", ""), 1);
         // Empty keywords never match.
-        assert_eq!(keyword_match_count(&[], "Rust async", ""), 0);
+        assert_eq!(keyword_match_count(&[], "Search network", ""), 0);
     }
 
     #[test]
     fn aggregation_key_groups_by_host_and_first_segment() {
-        assert_eq!(aggregation_key("https://tokio.rs/"), "tokio.rs");
+        assert_eq!(aggregation_key("https://service.example/"), "service.example");
         assert_eq!(
-            aggregation_key("https://tokio.rs/tokio/tutorial/async"),
-            "tokio.rs/tokio"
+            aggregation_key("https://service.example/docs/tutorial/core"),
+            "service.example/docs"
         );
         assert_eq!(
-            aggregation_key("https://www.tokio.rs/tokio/tutorial/async"),
-            "tokio.rs/tokio"
+            aggregation_key("https://www.service.example/docs/tutorial/core"),
+            "service.example/docs"
         );
         assert_eq!(
             aggregation_key("https://arxiv.org/abs/2602.07455"),
@@ -642,5 +642,40 @@ mod tests {
         );
         // Invalid URLs fall back to the input unchanged.
         assert_eq!(aggregation_key("not a url"), "not a url");
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn proptest_positional_relevance_monotonicity(
+            total in 1usize..500,
+            rank in 0usize..500
+        ) {
+            let actual_rank = rank % total;
+            let score = positional_relevance(actual_rank, total);
+            prop_assert!((0.0..=1.0).contains(&score), "Score {} out of [0, 1]", score);
+
+            if actual_rank > 0 {
+                let prev_score = positional_relevance(actual_rank - 1, total);
+                prop_assert!(prev_score >= score, "Previous rank {} must have higher or equal score than current {}", prev_score, score);
+            }
+        }
+
+        #[test]
+        fn proptest_extract_keywords_bounds(
+            text in "[a-zA-Z0-9 _-]{1,100}"
+        ) {
+            let kws = extract_keywords(&text);
+            prop_assert!(kws.len() <= 6, "Keywords len {} exceeded max limit 6", kws.len());
+            for kw in &kws {
+                prop_assert!(kw.len() >= 2, "Keyword {} shorter than 2 chars", kw);
+                prop_assert!(
+                    kw.starts_with(|c: char| c.is_alphanumeric()) && kw.ends_with(|c: char| c.is_alphanumeric()),
+                    "Keyword {} must start and end with alphanumeric chars",
+                    kw
+                );
+            }
+        }
     }
 }

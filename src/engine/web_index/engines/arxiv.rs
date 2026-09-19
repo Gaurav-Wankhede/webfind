@@ -55,6 +55,18 @@ impl Engine for ArxivEngine {
         "arxiv"
     }
 
+    fn should_query(&self, query: &str) -> bool {
+        let q = query.to_ascii_lowercase();
+        // Skip queries that are clearly non-academic or sports/celebrity/recipe/shopping
+        const ACADEMIC_HINTS: &[&str] = &[
+            "arxiv", "paper", "research", "study", "algorithm", "theorem", "analysis",
+            "benchmark", "consensus", "physics", "quantum", "neural", "deep learning",
+            "transformer", "model", "survey", "proof", "dataset", "optics", "math",
+            "astronomy", "exoplanet", "telescope", "biology", "genome",
+        ];
+        ACADEMIC_HINTS.iter().any(|hint| q.contains(hint)) || q.split_whitespace().count() >= 5
+    }
+
     async fn search(&self, query: &str, opts: &EngineOptions) -> Result<Vec<Hit>, Error> {
         let url = Self::build_url(query, opts);
         let body = self

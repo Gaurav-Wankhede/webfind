@@ -59,6 +59,19 @@ impl Engine for HnEngine {
         "hn-algolia"
     }
 
+    fn should_query(&self, query: &str) -> bool {
+        let q = query.to_ascii_lowercase();
+        // Skip obvious lifestyle/sports/cooking queries that don't belong on Hacker News
+        const EXCLUDED: &[&str] = &[
+            "recipe", "hydration", "baking", "sourdough", "premier league",
+            "nba", "football score", "transfer window", "celebrity", "horoscope",
+        ];
+        if EXCLUDED.iter().any(|&ex| q.contains(ex)) {
+            return false;
+        }
+        true
+    }
+
     async fn search(&self, query: &str, opts: &EngineOptions) -> Result<Vec<Hit>, Error> {
         let url = Self::build_url(query, opts);
         let body = self

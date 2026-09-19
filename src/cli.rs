@@ -22,7 +22,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Search the web index
+    /// Search the local index/graph or live web engines (pass --live for fresh DuckDuckGo/Bing results).
     Search {
         /// The search query
         query: String,
@@ -38,6 +38,10 @@ pub enum Commands {
         /// Output format
         #[arg(short, long, value_enum, default_value_t = OutputArg::Report)]
         output: OutputArg,
+
+        /// Write output to this file path instead of stdout (for agents/scripts).
+        #[arg(long)]
+        output_file: Option<std::path::PathBuf>,
 
         /// Language filter (ISO 639-1)
         #[arg(long)]
@@ -71,6 +75,11 @@ pub enum Commands {
         /// via RRF. Live-only results carry title/snippet but no stored content.
         #[arg(long, default_value = "false")]
         live: bool,
+
+        /// Deep research mode: runs autonomous multi-page crawl + CDP JS rendering
+        /// + persistent Turso graph memory ingestion.
+        #[arg(long, default_value = "false")]
+        deep: bool,
 
         /// Graph store to load PageRank from for ranking.
         #[arg(long, value_enum, env = "WEBFIND_GRAPH_STORE")]
@@ -293,8 +302,9 @@ pub enum Commands {
         source_ips: Option<String>,
     },
 
-    /// Crawl a seed URL and immediately search freshly indexed content.
-    Research {
+    /// Autonomous deep crawl, scraping, and real-time synthesis (deep-search)
+    #[command(name = "deep-search", alias = "research")]
+    DeepSearch {
         /// Seed URL to start crawling from. If omitted, WebFind auto-discovers seeds.
         #[arg(long)]
         seed: Option<String>,

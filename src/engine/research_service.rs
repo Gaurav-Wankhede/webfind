@@ -122,10 +122,9 @@ where
     let auto_discover = options.seed.is_none();
     let mut all_seeds: Vec<String> = Vec::new();
     if let Some(seed) = &options.seed {
-        if let Ok(clean) = crate::engine::security_gate::sanitize_url(seed.trim()) {
-            all_seeds.push(clean);
-        } else {
-            tracing::warn!("User-supplied seed '{}' rejected by security gate (SSRF/invalid)", seed);
+        match crate::engine::security_gate::sanitize_url(seed.trim()) {
+            Ok(clean) => all_seeds.push(clean),
+            Err(e) => eprintln!("[RESEARCH:exec] User-supplied seed '{}' rejected by security gate: {:?}", seed, e),
         }
     }
     if let Some(seeds_str) = &options.seeds {

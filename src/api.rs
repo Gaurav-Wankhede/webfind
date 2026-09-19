@@ -398,6 +398,7 @@ pub async fn search(
                     graph: None,
                     freshness: None,
                     quality: None,
+                    ax_score: None,
                     final_score: 0.0,
                 },
                 content: if params.include_content {
@@ -416,6 +417,10 @@ pub async fn search(
                 metrics: None,
                 favicon: c.favicon.clone(),
                 thumbnail: None,
+                llms_txt: None,
+                ai_catalog: None,
+                openapi_spec: None,
+                mcp_server: None,
                 language: c.language.clone(),
                 content_type: c.content_type.clone(),
             })
@@ -742,6 +747,7 @@ pub async fn research(
                         graph: None,
                         freshness: None,
                         quality: None,
+                        ax_score: None,
                         final_score: 0.0,
                     },
                     content: Some(crate::schema::response::ContentBlock {
@@ -756,6 +762,10 @@ pub async fn research(
                     metrics: None,
                     favicon: c.favicon.clone(),
                     thumbnail: None,
+                    llms_txt: None,
+                    ai_catalog: None,
+                    openapi_spec: None,
+                    mcp_server: None,
                     language: c.language.clone(),
                     content_type: c.content_type.clone(),
                 }

@@ -51,6 +51,16 @@ impl Engine for MdnEngine {
         "mdn"
     }
 
+    fn should_query(&self, query: &str) -> bool {
+        let q = query.to_ascii_lowercase();
+        const WEB_HINTS: &[&str] = &[
+            "javascript", "js", "css", "html", "dom", "web", "browser", "fetch",
+            "canvas", "svg", "wasm", "webrtc", "websocket", "indexeddb", "cookie",
+            "localstorage", "http", "api", "typescript", "ts", "worker",
+        ];
+        WEB_HINTS.iter().any(|hint| q.contains(hint))
+    }
+
     async fn search(&self, query: &str, opts: &EngineOptions) -> Result<Vec<Hit>, Error> {
         let url = Self::build_url(query, opts);
         let body = self

@@ -7,35 +7,43 @@ use super::client::Client;
 
 pub mod arxiv;
 pub mod bing;
+pub mod bing_news;
 pub mod crates_io;
 pub mod ddg;
+pub mod devdocs;
+pub mod github_code;
 pub mod hn;
 pub mod lobsters;
 pub mod marginalia;
 pub mod mdn;
 pub mod mojeek;
+pub mod semantic_scholar;
 pub mod stackoverflow;
 pub mod wikipedia;
 
 /// The default engine set, in query fan-out order.
 ///
-/// General web engines (duckduckgo, bing, mojeek, marginalia) always return
-/// results; the vertical engines (hn, lobsters, arxiv, wikipedia,
-/// stackoverflow, crates-io, mdn) return results only when the query matches
-/// their domain, and RRF down-weights their absence. All are key-free.
+/// General web engines (duckduckgo, bing, mojeek, marginalia, bing-news) always return
+/// results; the vertical engines (hn, lobsters, arxiv, semantic-scholar, wikipedia,
+/// stackoverflow, crates-io, mdn, devdocs, github-code) return results only when the query
+/// matches their domain, and RRF down-weights their absence. All are key-free.
 #[must_use]
 pub fn default_engines(client: Client) -> Vec<Arc<dyn Engine>> {
     vec![
         Arc::new(ddg::DuckDuckGoEngine::new(client.clone())),
         Arc::new(bing::BingEngine::new(client.clone())),
+        Arc::new(bing_news::BingNewsEngine::new(client.clone())),
         Arc::new(mojeek::MojeekEngine::new(client.clone())),
         Arc::new(marginalia::MarginaliaEngine::new(client.clone())),
         Arc::new(hn::HnEngine::new(client.clone())),
         Arc::new(lobsters::LobstersEngine::new(client.clone())),
         Arc::new(arxiv::ArxivEngine::new(client.clone())),
+        Arc::new(semantic_scholar::SemanticScholarEngine::new(client.clone())),
         Arc::new(wikipedia::WikipediaEngine::new(client.clone())),
         Arc::new(stackoverflow::StackOverflowEngine::new(client.clone())),
         Arc::new(crates_io::CratesIoEngine::new(client.clone())),
-        Arc::new(mdn::MdnEngine::new(client)),
+        Arc::new(mdn::MdnEngine::new(client.clone())),
+        Arc::new(devdocs::DevDocsEngine::new(client.clone())),
+        Arc::new(github_code::GithubCodeEngine::new(client)),
     ]
 }

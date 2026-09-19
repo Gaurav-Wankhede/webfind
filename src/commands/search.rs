@@ -29,15 +29,39 @@ fn store_hit_to_result(
     let domain = url::Url::parse(&hit.url)
         .map(|u| u.host_str().unwrap_or("").to_string())
         .unwrap_or_default();
+    let freshness: Option<f64> = hit.crawled_at.map(Ranker::freshness_score);
+
+    // If the hit has no title or its title is just its raw URL, format a clean title from the domain
+    let title = if hit.title.is_empty() || hit.title == hit.url {
+        if !domain.is_empty() {
+            domain.clone()
+        } else {
+            hit.url.clone()
+        }
+    } else {
+        hit.title.clone()
+    };
+
+    // If excerpt is empty (e.g. graph seed nodes), synthesize a descriptive snippet from the domain
+    let snippet = if hit.excerpt.trim().is_empty() {
+        if !domain.is_empty() {
+            format!("Indexed resource from {domain}")
+        } else {
+            format!("Indexed resource from {}", hit.url)
+        }
+    } else {
+        hit.excerpt.clone()
+    };
+
     SearchResult {
         rank,
         url: hit.url.clone(),
-        title: hit.title.clone(),
-        snippet: hit.excerpt.clone(),
+        title,
+        snippet: snippet.clone(),
         domain,
         published_at: None,
         modified_at: None,
-        crawled_at: Utc::now(),
+        crawled_at: hit.crawled_at.unwrap_or_else(Utc::now),
         author: None,
         site_name: None,
         score,
@@ -45,15 +69,16 @@ fn store_hit_to_result(
             bm25: hit.bm25_score,
             vector: hit.vector_score,
             graph: hit.graph_score,
-            freshness: None,
+            freshness,
             quality: None,
+            ax_score: None,
             final_score: score,
         },
         content: include_content.then(|| {
-            let wc = hit.excerpt.split_whitespace().count() as u32;
+            let wc = snippet.split_whitespace().count() as u32;
             ContentBlock {
-                text: hit.excerpt.clone(),
-                excerpt: hit.excerpt.clone(),
+                text: snippet.clone(),
+                excerpt: snippet,
                 word_count: wc,
                 reading_time_seconds: webfind::engine::fetcher::estimate_reading_time(wc),
                 html: None,
@@ -64,6 +89,10 @@ fn store_hit_to_result(
         metrics: None,
         favicon: None,
         thumbnail: None,
+        llms_txt: None,
+        ai_catalog: None,
+        openapi_spec: None,
+        mcp_server: None,
         language: "en".to_string(),
         content_type: "text/html".to_string(),
     }
@@ -126,6 +155,7 @@ fn live_fused_to_result(fused: &FusedHit, rank: u32, include_content: bool) -> S
             graph: None,
             freshness,
             quality,
+            ax_score: None,
             final_score,
         },
         content: include_content.then(|| {
@@ -143,6 +173,10 @@ fn live_fused_to_result(fused: &FusedHit, rank: u32, include_content: bool) -> S
         metrics: None,
         favicon: None,
         thumbnail: None,
+        llms_txt: None,
+        ai_catalog: None,
+        openapi_spec: None,
+        mcp_server: None,
         language: "en".to_string(),
         content_type: "text/html".to_string(),
     }
@@ -213,28 +247,12 @@ fn fuse_index_and_live<'a>(
 /// while still letting a URL present in both lists win decisively.
 const LIVE_FUSION_WEIGHT: f64 = 2.0;
 
-/// Merge store hits with live search-engine results via RRF.
-///
-/// Handles three edge cases that previously produced empty responses:
-///
-/// 1. **Zero results** (engines blocked or too-niche query): retry with a
-///    progressively relaxed query (drop trailing tokens) until at least one
-///    engine returns a hit, or all retries are exhausted.
-/// 2. **Sparse results** (< `limit`): fill up to `limit` with the best
-///    store-only hits not already in the fused set.
-/// 3. **Score display**: raw RRF fractions are normalized to [0,1] by
-///    `fuse_index_and_live`; `live_fused_to_result` attaches freshness +
-///    quality signals so the breakdown never shows placeholder dashes.
-async fn merge_live_results(
+/// Execute multi-pass live search across active engines.
+async fn execute_live_search(
     query: &str,
-    store_hits: &[TursoSearchHit],
-    limit: u32,
-    include_content: bool,
-    signals: &mut Vec<String>,
-) -> anyhow::Result<Vec<SearchResult>> {
+    fetch: usize,
+) -> anyhow::Result<webfind::engine::web_index::Outcome> {
     let live_index = LiveIndex::new().context("build live search index")?;
-    // Ask engines for 2× limit so we have room after dedup/fusing.
-    let fetch = (limit.max(1) * 2) as usize;
     let opts = EngineOptions {
         max_results: fetch,
         timeout_ms: 3_500,
@@ -265,6 +283,28 @@ async fn merge_live_results(
         }
     }
 
+    Ok(outcome)
+}
+
+/// Merge store hits with live search-engine results via RRF.
+///
+/// Handles three edge cases that previously produced empty responses:
+///
+/// 1. **Zero results** (engines blocked or too-niche query): fallback to store.
+/// 2. **Sparse results** (< `limit`): fill up to `limit` with the best
+///    store-only hits not already in the fused set.
+/// 3. **Score display**: raw RRF fractions are normalized to [0,1] by
+///    `fuse_index_and_live`; `live_fused_to_result` attaches freshness +
+///    quality signals so the breakdown never shows placeholder dashes.
+fn merge_live_results(
+    outcome: webfind::engine::web_index::Outcome,
+    store_hits: &[TursoSearchHit],
+    limit: u32,
+    include_content: bool,
+    signals: &mut Vec<String>,
+) -> anyhow::Result<Vec<SearchResult>> {
+    let fetch = (limit.max(1) * 2) as usize;
+
     // If all passes yield nothing, return whatever the store has.
     if outcome.fused.is_empty() {
         tracing::warn!("live: all query passes returned 0 results, falling back to store-only");
@@ -272,16 +312,20 @@ async fn merge_live_results(
             .iter()
             .take(limit.max(1) as usize)
             .collect();
-        // Min-max normalize store scores to [0,1] so the display scale matches
-        // live-fused results (store raw RRF fracs are ≈0.016-0.05, not [0,1]).
+        // Scale store scores to [0.40, 1.0] so the display scale matches
+        // live-fused results without collapsing the lowest store hit to 0.0.
         let max_s = fallback.iter().map(|h| h.score).fold(f64::NEG_INFINITY, f64::max);
         let min_s = fallback.iter().map(|h| h.score).fold(f64::INFINITY, f64::min);
-        let range = (max_s - min_s).max(f64::EPSILON);
+        let range = max_s - min_s;
         return Ok(fallback
             .iter()
             .enumerate()
             .map(|(i, h)| {
-                let normalized = (h.score - min_s) / range;
+                let normalized = if range < 1e-9 {
+                    1.0
+                } else {
+                    (0.40 + 0.60 * ((h.score - min_s) / range)).clamp(0.40, 1.0)
+                };
                 store_hit_to_result(h, (i + 1) as u32, normalized, include_content)
             })
             .collect());
@@ -327,20 +371,30 @@ async fn merge_live_results(
             .collect();
         let max_s = store_unseen.iter().map(|h| h.score).fold(f64::NEG_INFINITY, f64::max);
         let min_s = store_unseen.iter().map(|h| h.score).fold(f64::INFINITY, f64::min);
-        let range = (max_s - min_s).max(f64::EPSILON);
+        let range = max_s - min_s;
 
         for h in store_unseen {
             if results.len() >= limit.max(1) as usize {
                 break;
             }
             let rank = (results.len() + 1) as u32;
-            let norm_score = if range < f64::EPSILON {
+            let norm_score = if range < 1e-9 {
                 1.0
             } else {
-                ((h.score - min_s) / range).clamp(0.0, 1.0)
+                (0.40 + 0.60 * ((h.score - min_s) / range)).clamp(0.40, 1.0)
             };
             results.push(store_hit_to_result(h, rank, norm_score, include_content));
         }
+    }
+
+    // Sort results descending by their final combined score, and assign 1-based rank.
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (i, r) in results.iter_mut().enumerate() {
+        r.rank = (i + 1) as u32;
     }
 
     if !signals.iter().any(|s| s == "live") {
@@ -360,14 +414,45 @@ fn relax_query(query: &str, drop: usize) -> String {
         .join(" ")
 }
 
-/// Emit warn/debug lines for any engine failures in an outcome.
+/// Emit diagnostic lines with exact engine names and error reasons for any engine failures in an outcome.
 fn log_engine_failures(outcome: &webfind::engine::web_index::Outcome) {
     if outcome.engines_failed > 0 {
-        tracing::warn!(
-            "live search: {}/{} engines failed",
-            outcome.engines_failed,
-            outcome.total_engines
-        );
+        let failed_details: Vec<String> = outcome
+            .reports
+            .iter()
+            .filter(|r| r.error.is_some())
+            .map(|r| {
+                format!(
+                    "{} (error: {})",
+                    r.engine,
+                    r.error.as_ref().map_or("unknown", |e| match e {
+                        webfind::engine::web_index::Error::HttpStatus(_code) => "HTTP status",
+                        webfind::engine::web_index::Error::Blocked => "blocked by anti-bot/rate-limit",
+                        webfind::engine::web_index::Error::Timeout(_) => "timed out",
+                        webfind::engine::web_index::Error::Transport(_) => "network/transport error",
+                        webfind::engine::web_index::Error::Parse(_) => "parse error",
+                    })
+                )
+            })
+            .collect();
+
+        // If healthy engine quorum is met (>= 3 engines ok) and results were found, log as debug.
+        // If quorum is degraded or 0 hits returned, elevate to warn.
+        if outcome.engines_ok < 3 || outcome.fused.is_empty() {
+            tracing::warn!(
+                "live search: {}/{} engines degraded [engines: {}]",
+                outcome.engines_failed,
+                outcome.total_engines,
+                failed_details.join(", ")
+            );
+        } else {
+            tracing::debug!(
+                "live search: {}/{} non-primary engines degraded [engines: {}]",
+                outcome.engines_failed,
+                outcome.total_engines,
+                failed_details.join(", ")
+            );
+        }
         for report in &outcome.reports {
             if let Some(error) = &report.error {
                 tracing::debug!("engine {} failed: {error:?}", report.engine);
@@ -387,6 +472,7 @@ async fn turso_search(
     depth: webfind::cli::DepthArg,
     limit: u32,
     output: webfind::cli::OutputArg,
+    output_file: Option<std::path::PathBuf>,
     include_content: bool,
     turso_path: Option<String>,
     hybrid: bool,
@@ -413,8 +499,9 @@ async fn turso_search(
             .context("compute PageRank")?;
     }
 
-    // Embed the query for the vector signal (fall back to the deterministic
-    // dummy embedder when the ONNX model is unavailable).
+    // Embed the query for the vector signal. When --hybrid is active, use the
+    // full ONNX model; in standard mode, use the zero-latency deterministic
+    // embedder so vector signals are populated without loading the neural network.
     let embedding: Option<Vec<f32>> = if hybrid {
         match FastembedEmbedder::new() {
             Ok(e) => e.embed(&[query]).ok().and_then(|v| v.into_iter().next()),
@@ -427,7 +514,10 @@ async fn turso_search(
             }
         }
     } else {
-        None
+        DummyEmbedder
+            .embed(&[query])
+            .ok()
+            .and_then(|v| v.into_iter().next())
     };
 
     // Fetch extra store hits when merging with live results so the fusion has
@@ -437,10 +527,22 @@ async fn turso_search(
     } else {
         limit.max(1) as usize
     };
-    let hits = store
-        .search(query, embedding.as_deref(), store_limit)
-        .await
-        .context("hybrid search in Turso store")?;
+
+    let (hits, live_outcome) = if live {
+        let live_fetch = store_limit;
+        let store_fut = store.search(query, embedding.as_deref(), store_limit);
+        let live_fut = execute_live_search(query, live_fetch);
+        let (store_res, live_res) = tokio::join!(store_fut, live_fut);
+        let hits = store_res.context("hybrid search in Turso store")?;
+        let outcome = live_res.context("execute live search")?;
+        (hits, Some(outcome))
+    } else {
+        let hits = store
+            .search(query, embedding.as_deref(), store_limit)
+            .await
+            .context("hybrid search in Turso store")?;
+        (hits, None)
+    };
 
     let mut signals: Vec<String> = Vec::new();
     for h in &hits {
@@ -454,24 +556,35 @@ async fn turso_search(
         signals.push("bm25".to_string());
     }
 
-    let results = if live {
-        merge_live_results(query, &hits, limit, include_content, &mut signals).await?
+    let results = if let Some(outcome) = live_outcome {
+        merge_live_results(outcome, &hits, limit, include_content, &mut signals)?
     } else {
+        if hits.is_empty() {
+            eprintln!(
+                "note: 0 results found in local index for \"{query}\".\n      To query live search engines, run: webfind search \"{query}\" --live\n      For deep crawling and page synthesis, run: webfind deep-search \"{query}\""
+            );
+        }
         let max_s = hits.iter().map(|h| h.score).fold(f64::NEG_INFINITY, f64::max);
         let min_s = hits.iter().map(|h| h.score).fold(f64::INFINITY, f64::min);
-        let range = (max_s - min_s).max(f64::EPSILON);
+        let range = max_s - min_s;
         hits.iter()
             .enumerate()
             .map(|(i, h)| {
-                let norm_score = if range < f64::EPSILON {
+                let norm_score = if range < 1e-9 {
                     1.0
                 } else {
-                    ((h.score - min_s) / range).clamp(0.0, 1.0)
+                    (0.40 + 0.60 * ((h.score - min_s) / range)).clamp(0.40, 1.0)
                 };
                 store_hit_to_result(h, (i + 1) as u32, norm_score, include_content)
             })
             .collect()
     };
+
+    let index_freshness = store.index_freshness().await.unwrap_or(IndexFreshness {
+        oldest_page: None,
+        newest_page: None,
+        avg_age_days: 0.0,
+    });
 
     let response = SearchResponse {
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -490,16 +603,18 @@ async fn turso_search(
             engine_version: "webfind-turso".to_string(),
             searched_at: Utc::now(),
             signals_used: signals,
-            index_freshness: IndexFreshness {
-                oldest_page: None,
-                newest_page: None,
-                avg_age_days: 0.0,
-            },
+            index_freshness,
         },
     };
 
     let formatted = format_response(&response, &OutputFormat::from(output));
-    print!("{}", formatted);
+    if let Some(path) = output_file {
+        std::fs::write(&path, &formatted)
+            .with_context(|| format!("write search output to {}", path.display()))?;
+        eprintln!("Search result written to {}", path.display());
+    } else {
+        print!("{}", formatted);
+    }
     Ok(())
 }
 
@@ -510,6 +625,7 @@ pub async fn run(
     depth: webfind::cli::DepthArg,
     limit: u32,
     output: webfind::cli::OutputArg,
+    output_file: Option<std::path::PathBuf>,
     _language: Option<String>,
     _domains: Option<String>,
     include_content: bool,
@@ -533,6 +649,7 @@ pub async fn run(
         depth,
         limit,
         output,
+        output_file,
         include_content,
         turso_path,
         hybrid,
@@ -555,6 +672,7 @@ mod tests {
             bm25_score: Some(0.016),
             vector_score: None,
             graph_score: None,
+            crawled_at: None,
         }
     }
 
@@ -697,5 +815,40 @@ mod tests {
             "score={} expected={expected}",
             result.score
         );
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn proptest_relax_query_monotonically_shrinks(
+            words in prop::collection::vec("[a-z]{1,10}", 1..20),
+            drop in 0usize..25
+        ) {
+            let query = words.join(" ");
+            let relaxed = relax_query(&query, drop);
+            let original_token_count = words.len();
+            let relaxed_token_count = relaxed.split_whitespace().count();
+
+            let expected_count = original_token_count.saturating_sub(drop);
+            prop_assert_eq!(relaxed_token_count, expected_count);
+            prop_assert!(relaxed.len() <= query.len());
+        }
+
+        #[test]
+        fn proptest_live_fused_score_bounds(
+            base_score in 0.0f64..=1.0f64,
+            engine_count in 1usize..=10,
+            has_date in any::<bool>()
+        ) {
+            let mut hit = live_fused("https://example.com/page", "Title", base_score);
+            hit.engine_count = engine_count;
+            if has_date {
+                hit.published_at = Some(chrono::Utc::now());
+            }
+            let res = live_fused_to_result(&hit, 1, false);
+            prop_assert!(res.score >= 0.0 && res.score <= 1.0, "Score {} was out of bounds [0, 1]", res.score);
+            prop_assert_eq!(res.score, res.scores.final_score);
+        }
     }
 }

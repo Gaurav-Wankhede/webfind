@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 220" width="100%" height="100%">
+  <defs>
+    <linearGradient id="mathBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090d16"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+    <linearGradient id="cardGlow" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#0f172a" stop-opacity="0.8"/>
+    </linearGradient>
+    <linearGradient id="cyanLine" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="purpleLine" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#d946ef"/>
+    </linearGradient>
+    <linearGradient id="emeraldLine" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <filter id="mathCardShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <style>
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  </style>
+
+  <!-- Background -->
+  <rect width="920" height="220" rx="14" fill="url(#mathBg)" stroke="#1e293b" stroke-width="1.5"/>
+
+  <!-- Column 1: Reciprocal Rank Fusion (RRF) -->
+  <g transform="translate(25, 25)">
+    <rect width="270" height="170" rx="10" fill="url(#cardGlow)" stroke="#334155" stroke-width="1.2" filter="url(#mathCardShadow)"/>
+    <rect x="0" y="0" width="270" height="4" rx="2" fill="url(#cyanLine)"/>
+    <text x="18" y="30" class="sans" font-size="13" font-weight="700" fill="#f8fafc">1. Multi-Engine RRF Fusion</text>
+    <text x="18" y="52" class="mono" font-size="12" font-weight="600" fill="#38bdf8">RRF(d) = ∑ (wₑ / (k + rₑ(d)))</text>
+    <text x="18" y="78" class="sans" font-size="11" fill="#94a3b8">• Merges up to 15 search providers</text>
+    <text x="18" y="98" class="sans" font-size="11" fill="#94a3b8">• Parameter k = 60 dampens outliers</text>
+    <text x="18" y="118" class="sans" font-size="11" fill="#94a3b8">• wₑ weights authority per provider</text>
+    <rect x="18" y="132" width="234" height="24" rx="5" fill="#020617" stroke="#1e293b"/>
+    <text x="26" y="148" class="mono" font-size="10" fill="#67e8f9">DuckDuckGo, Bing, Crates, arXiv...</text>
+  </g>
+
+  <!-- Column 2: Calibrated Score Normalization -->
+  <g transform="translate(325, 25)">
+    <rect width="270" height="170" rx="10" fill="url(#cardGlow)" stroke="#6366f1" stroke-width="1.2" filter="url(#mathCardShadow)"/>
+    <rect x="0" y="0" width="270" height="4" rx="2" fill="url(#purpleLine)"/>
+    <text x="18" y="30" class="sans" font-size="13" font-weight="700" fill="#f8fafc">2. Score Normalization</text>
+    <text x="18" y="52" class="mono" font-size="12" font-weight="600" fill="#c084fc">S_norm = 0.40 + 0.60·(S-S_min)/Δ</text>
+    <text x="18" y="78" class="sans" font-size="11" fill="#94a3b8">• Rescales raw fraction ~0.03 to [0.4, 1.0]</text>
+    <text x="18" y="98" class="sans" font-size="11" fill="#94a3b8">• Eliminates zero-score collapse bug</text>
+    <text x="18" y="118" class="sans" font-size="11" fill="#94a3b8">• 0.40 confidence floor for candidates</text>
+    <rect x="18" y="132" width="234" height="24" rx="5" fill="#020617" stroke="#1e293b"/>
+    <text x="26" y="148" class="mono" font-size="10" fill="#e879f9">Tied scores map cleanly to 1.0</text>
+  </g>
+
+  <!-- Column 3: Composite Ranking & Monotonicity -->
+  <g transform="translate(625, 25)">
+    <rect width="270" height="170" rx="10" fill="url(#cardGlow)" stroke="#059669" stroke-width="1.2" filter="url(#mathCardShadow)"/>
+    <rect x="0" y="0" width="270" height="4" rx="2" fill="url(#emeraldLine)"/>
+    <text x="18" y="30" class="sans" font-size="13" font-weight="700" fill="#f8fafc">3. Final Composite Ranking</text>
+    <text x="18" y="52" class="mono" font-size="12" font-weight="600" fill="#34d399">S_final = S·0.75 + Freshness·0.25 + B</text>
+    <text x="18" y="78" class="sans" font-size="11" fill="#94a3b8">• Freshness decay: λ = ln(2)/180 days</text>
+    <text x="18" y="98" class="sans" font-size="11" fill="#94a3b8">• Cross-engine credibility bonus B ≤ 0.10</text>
+    <text x="18" y="118" class="sans" font-size="11" fill="#94a3b8">• Monotonic sort: S₁ ≥ S₂ ≥ ... ≥ Sₙ</text>
+    <rect x="18" y="132" width="234" height="24" rx="5" fill="#020617" stroke="#1e293b"/>
+    <text x="26" y="148" class="mono" font-size="10" fill="#6ee7b7">Verified by proptest properties</text>
+  </g>
+</svg>

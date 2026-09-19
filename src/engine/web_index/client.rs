@@ -49,7 +49,11 @@ impl Client {
     /// constructed (e.g. invalid TLS configuration).
     pub fn new() -> Result<Self, Error> {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(12))
+            .connect_timeout(Duration::from_secs(3))
+            .tcp_nodelay(true)
+            .pool_max_idle_per_host(10)
+            .pool_idle_timeout(Duration::from_secs(30))
             .build()
             .map_err(Error::Transport)?;
         Ok(Self {
@@ -84,6 +88,21 @@ impl Client {
         accept: &str,
         extra_headers: &[(&str, &str)],
     ) -> Result<String, Error> {
+        let (sec_ch_ua, sec_ch_ua_platform) = if user_agent.contains("Chrome") {
+            (
+                r#""Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126""#,
+                if user_agent.contains("Macintosh") {
+                    r#""macOS""#
+                } else if user_agent.contains("Windows") {
+                    r#""Windows""#
+                } else {
+                    r#""Linux""#
+                },
+            )
+        } else {
+            ("", "")
+        };
+
         let mut request = self
             .http
             .get(url)
@@ -93,7 +112,23 @@ impl Client {
                 opts.language.as_deref().unwrap_or("en-US,en;q=0.9"),
             )
             .header(reqwest::header::ACCEPT, accept)
+            .header(
+                reqwest::header::UPGRADE_INSECURE_REQUESTS,
+                "1",
+            )
+            .header("sec-fetch-dest", "document")
+            .header("sec-fetch-mode", "navigate")
+            .header("sec-fetch-site", "none")
+            .header("sec-fetch-user", "?1")
             .timeout(Duration::from_millis(opts.timeout_ms));
+
+        if !sec_ch_ua.is_empty() {
+            request = request
+                .header("sec-ch-ua", sec_ch_ua)
+                .header("sec-ch-ua-mobile", "?0")
+                .header("sec-ch-ua-platform", sec_ch_ua_platform);
+        }
+
         for (key, value) in extra_headers {
             request = request.header(*key, *value);
         }

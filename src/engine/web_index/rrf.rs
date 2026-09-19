@@ -78,12 +78,13 @@ pub fn reciprocal_rank_fusion(lists: &[(&[Hit], f64)], k: u32) -> Vec<FusedHit> 
     fused
 }
 
-/// Normalize raw RRF scores in-place to the `[0.0, 1.0]` range via min-max scaling.
+/// Normalize raw RRF scores in-place to the `[0.4, 1.0]` range.
 ///
 /// Raw RRF fractions top out at `weight / (k + 1)` ≈ 0.033 for k=60, which
-/// looks artificially low to users. This maps the best hit to 1.0 and the
-/// worst to 0.0. When all scores are identical (or a single hit exists), every
-/// score is set to 1.0.
+/// looks artificially low to users. This maps the best hit to 1.0 and scales
+/// lower hits down proportionally to a floor of 0.40, preventing valid candidates
+/// from being marked as 0.0 (zero relevance). When all scores are identical
+/// (or a single hit exists), every score is set to 1.0.
 #[must_use]
 pub fn normalize_rrf_scores(mut hits: Vec<FusedHit>) -> Vec<FusedHit> {
     if hits.is_empty() {
@@ -96,7 +97,7 @@ pub fn normalize_rrf_scores(mut hits: Vec<FusedHit>) -> Vec<FusedHit> {
         h.score = if range < f64::EPSILON {
             1.0
         } else {
-            (h.score - min) / range
+            0.40 + 0.60 * ((h.score - min) / range)
         };
     }
     hits
@@ -131,22 +132,22 @@ pub fn aggregate_fused(fused: Vec<FusedHit>, query: &str) -> Vec<FusedHit> {
 
     // Merge homepage (host-only) groups into the strongest same-host section
     // group so tokio.rs/ + tokio.rs/tokio/... accumulate as one concept.
-    let homepages: Vec<(String, FusedHit)> = by_key
-        .iter()
-        .filter(|(key, _)| !key.contains('/'))
-        .map(|(key, hit)| (key.clone(), hit.clone()))
+    let homepage_keys: Vec<String> = by_key
+        .keys()
+        .filter(|key| !key.contains('/'))
+        .cloned()
         .collect();
-    for (host, homepage) in homepages {
+    for host in homepage_keys {
         let best_path_key = by_key
             .keys()
             .filter(|key| key.starts_with(&format!("{host}/")))
             .max_by(|a, b| by_key[*a].score.total_cmp(&by_key[*b].score))
             .cloned();
         if let Some(path_key) = best_path_key
+            && let Some(homepage) = by_key.remove(&host)
             && let Some(target) = by_key.get_mut(&path_key)
         {
             absorb(target, &homepage, &keywords);
-            by_key.remove(&host);
         }
     }
 
@@ -308,19 +309,19 @@ mod tests {
     fn aggregation_merges_same_host_path_variants() {
         let fused = vec![
             fused_hit(
-                "https://tokio.rs/tokio/tutorial/async",
-                "Tokio - An asynchronous Rust runtime",
+                "https://service.example/docs/tutorial/core",
+                "Service - High performance core engine",
                 0.0164,
             ),
             fused_hit(
-                "https://tokio.rs/tokio/tutorial/select",
-                "Tokio select",
+                "https://service.example/docs/tutorial/network",
+                "Service network",
                 0.0164,
             ),
         ];
-        let aggregated = aggregate_fused(fused, "rust async runtime tokio");
+        let aggregated = aggregate_fused(fused, "high performance engine core");
         assert_eq!(aggregated.len(), 1);
-        assert_eq!(aggregated[0].url, "https://tokio.rs/tokio/tutorial/async");
+        assert_eq!(aggregated[0].url, "https://service.example/docs/tutorial/core");
         assert!((aggregated[0].score - 0.0328).abs() < 1e-9);
         assert_eq!(aggregated[0].engine_count, 2);
     }
@@ -328,45 +329,45 @@ mod tests {
     #[test]
     fn aggregation_homepage_merges_into_same_host_section() {
         let fused = vec![
-            fused_hit("https://tokio.rs/", "Tokio", 0.0164),
+            fused_hit("https://service.example/", "Service Homepage", 0.0164),
             fused_hit(
-                "https://tokio.rs/tokio/tutorial/async",
-                "Tokio - An asynchronous Rust runtime",
+                "https://service.example/docs/tutorial/core",
+                "Service - High performance core engine",
                 0.0164,
             ),
         ];
-        let aggregated = aggregate_fused(fused, "rust async runtime tokio");
+        let aggregated = aggregate_fused(fused, "high performance engine core");
         assert_eq!(aggregated.len(), 1);
-        // The section page (4 keyword matches) represents the group, not the
-        // bare homepage (1 match).
-        assert_eq!(aggregated[0].url, "https://tokio.rs/tokio/tutorial/async");
+        // The section page (keyword matches) represents the group, not the
+        // bare homepage.
+        assert_eq!(aggregated[0].url, "https://service.example/docs/tutorial/core");
         assert!((aggregated[0].score - 0.0328).abs() < 1e-9);
     }
 
     #[test]
     fn aggregation_keeps_distinct_sections_separate() {
         let fused = vec![
-            fused_hit("https://arxiv.org/abs/2602.07455", "RustCompCert", 0.0164),
-            fused_hit("https://arxiv.org/pdf/2608.20677", "Async/Await", 0.0164),
+            fused_hit("https://portal.example/abs/2602.07455", "Paper Alpha", 0.0164),
+            fused_hit("https://portal.example/pdf/2608.20677", "Paper Beta", 0.0164),
         ];
-        let aggregated = aggregate_fused(fused, "rust async runtime tokio");
+        let aggregated = aggregate_fused(fused, "distributed consensus raft");
         assert_eq!(aggregated.len(), 2);
     }
 
     #[test]
     fn aggregation_keyword_tie_break_ranks_relevant_first() {
         let fused = vec![
-            fused_hit("https://arxiv.org/abs/2602.07455", "RustCompCert", 0.0164),
+            fused_hit("https://portal.example/abs/2602.07455", "Unrelated Subject", 0.0164),
             fused_hit(
-                "https://tokio.rs/tokio/tutorial/async",
-                "Tokio - An asynchronous Rust runtime",
+                "https://service.example/docs/tutorial/core",
+                "High performance core distributed engine",
                 0.0164,
             ),
         ];
-        let aggregated = aggregate_fused(fused, "rust async runtime tokio");
-        // Equal scores; the tokio page matches all 4 keywords and must win.
-        assert_eq!(aggregated[0].url, "https://tokio.rs/tokio/tutorial/async");
-        assert_eq!(aggregated[1].url, "https://arxiv.org/abs/2602.07455");
+        let aggregated = aggregate_fused(fused, "distributed consensus engine");
+        // Equal scores; the service page matches more keywords and must win.
+        assert_eq!(aggregated[0].url, "https://service.example/docs/tutorial/core");
+        assert_eq!(aggregated[1].url, "https://portal.example/abs/2602.07455");
     }
 
     #[test]
@@ -404,9 +405,9 @@ mod tests {
         ];
         let out = normalize_rrf_scores(hits);
         assert!((out[0].score - 1.0).abs() < 1e-9, "top must be 1.0");
-        assert!((out[2].score - 0.0).abs() < 1e-9, "bottom must be 0.0");
+        assert!((out[2].score - 0.40).abs() < 1e-9, "bottom must be 0.40 floor");
         for h in &out {
-            assert!(h.score >= 0.0 && h.score <= 1.0, "score out of [0,1]: {}", h.score);
+            assert!(h.score >= 0.40 && h.score <= 1.0, "score out of [0.4,1]: {}", h.score);
         }
         // Ordering preserved
         assert!(out[0].score > out[1].score && out[1].score > out[2].score);
@@ -421,5 +422,66 @@ mod tests {
         let out = normalize_rrf_scores(hits);
         assert!((out[0].score - 1.0).abs() < 1e-9);
         assert!((out[1].score - 1.0).abs() < 1e-9);
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn proptest_normalize_rrf_scores_bounds(
+            scores in prop::collection::vec(0.0001f64..100.0f64, 0..50)
+        ) {
+            let hits: Vec<FusedHit> = scores
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| fused_hit(&format!("https://example.com/{i}"), "Title", s))
+                .collect();
+
+            let normalized = normalize_rrf_scores(hits);
+
+            if normalized.is_empty() {
+                prop_assert!(normalized.is_empty());
+            } else {
+                for hit in &normalized {
+                    prop_assert!(
+                        hit.score >= 0.40 - 1e-9 && hit.score <= 1.0 + 1e-9,
+                        "Score {} was out of bounds [0.40, 1.0]",
+                        hit.score
+                    );
+                }
+                let max_score = normalized
+                    .iter()
+                    .map(|h| h.score)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                prop_assert!((max_score - 1.0).abs() < 1e-7, "Max score should be 1.0, was {}", max_score);
+            }
+        }
+
+        #[test]
+        fn proptest_aggregate_fused_invariants(
+            paths in prop::collection::vec("[a-z0-9_]{1,10}", 1..20),
+            query in "[a-z0-9 ]{1,30}"
+        ) {
+            let hits: Vec<FusedHit> = paths
+                .iter()
+                .enumerate()
+                .map(|(i, path)| {
+                    fused_hit(
+                        &format!("https://domain.org/{path}"),
+                        &format!("Item {path} {i}"),
+                        0.016,
+                    )
+                })
+                .collect();
+
+            let total_hits = hits.len();
+            let aggregated = aggregate_fused(hits, &query);
+
+            prop_assert!(!aggregated.is_empty());
+            prop_assert!(aggregated.len() <= total_hits);
+
+            let total_engine_count: usize = aggregated.iter().map(|h| h.engine_count).sum();
+            prop_assert_eq!(total_engine_count, total_hits);
+        }
     }
 }

@@ -160,6 +160,18 @@ impl Fetcher {
             return self.fetch_reddit(url).await;
         }
 
+        // Tier-0 Manifest Fast-Path: If URL is a domain root or documentation root, check for machine-readable manifests.
+        if let Ok(parsed_url) = url::Url::parse(url) {
+            let path = parsed_url.path();
+            let is_root_or_docs = path.is_empty() || path == "/" || path == "/docs" || path == "/docs/";
+            if is_root_or_docs
+                && (parsed_url.scheme() == "http" || parsed_url.scheme() == "https")
+                && let Some(manifest_content) = self.try_manifest_fast_path(&parsed_url).await
+            {
+                return Ok(manifest_content);
+            }
+        }
+
         let start = Instant::now();
         let response = if let Some(ref hc) = self.human_client {
             hc.get(url).await?
@@ -634,6 +646,66 @@ impl Fetcher {
             is_valid_content: is_valid,
             entities,
         })
+    }
+
+    /// Fast-path probe for machine-readable manifests (`/llms-full.txt`, `/llms.txt`, `/.well-known/ai-catalog.json`).
+    async fn try_manifest_fast_path(&self, parsed_url: &url::Url) -> Option<StructuredContent> {
+        let origin = match (parsed_url.scheme(), parsed_url.host_str(), parsed_url.port()) {
+            (scheme, Some(host), Some(port)) => format!("{scheme}://{host}:{port}"),
+            (scheme, Some(host), None) => format!("{scheme}://{host}"),
+            _ => return None,
+        };
+
+        // Try /llms-full.txt first for full depth, then /llms.txt
+        let candidates = [
+            format!("{origin}/llms-full.txt"),
+            format!("{origin}/llms.txt"),
+            format!("{origin}/.well-known/ai-catalog.json"),
+        ];
+
+        for candidate_url in candidates {
+            let start = Instant::now();
+            let resp = self
+                .client
+                .get(&candidate_url)
+                .timeout(std::time::Duration::from_millis(1800))
+                .send()
+                .await;
+
+            if let Ok(response) = resp
+                && response.status().is_success()
+                && let Ok(body) = response.text().await
+            {
+                let trimmed = body.trim();
+                    if !trimmed.is_empty()
+                        && !trimmed.to_ascii_lowercase().starts_with("<!doctype html")
+                        && !trimmed.to_ascii_lowercase().starts_with("<html")
+                    {
+                        let elapsed = start.elapsed().as_millis() as u64;
+                        let kind = if candidate_url.ends_with(".json") {
+                            ContentKind::Json
+                        } else {
+                            ContentKind::Text
+                        };
+                        let mut sc = extract_from_text(
+                            &body,
+                            parsed_url.as_str(),
+                            &candidate_url,
+                            200,
+                            candidate_url.starts_with("https://"),
+                            elapsed,
+                            None,
+                            kind,
+                        )
+                        .ok()?;
+                        sc.content_type = "text/markdown; manifest=llms.txt".to_string();
+                        sc.content_type_header = "text/plain".to_string();
+                        sc.is_valid_content = true;
+                        return Some(sc);
+                    }
+            }
+        }
+        None
     }
 }
 

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::Result;
 
 use crate::schema::content::StructuredContent;
@@ -35,7 +33,8 @@ pub async fn build_metadata(
 /// within context-window limits.
 pub fn attach_content(results: &mut [SearchResult], contents: &[StructuredContent]) {
     const MAX_CONTENT_CHARS: usize = 64 * 1024;
-    let mut by_url: HashMap<&str, &StructuredContent> = HashMap::with_capacity(contents.len());
+    let mut by_url: ahash::AHashMap<&str, &StructuredContent> =
+        ahash::AHashMap::with_capacity(contents.len());
     for c in contents {
         by_url.insert(c.url.as_str(), c);
     }

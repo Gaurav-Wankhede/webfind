@@ -28,7 +28,7 @@ use chrono::{DateTime, Utc};
 use libsql::{Builder, Cipher, Connection, EncryptionConfig, TransactionBehavior, params};
 
 use crate::engine::crawl_graph::{
-    CrawlGraphStore, CrawlJob, DiscoverySource, LinkEdge, TraversalDirection, UrlNode,
+    CrawlGraphStore, CrawlJob, DiscoverySource, LinkEdge, TraversalDirection, TraversalNode, UrlNode,
 };
 use crate::engine::fingerprint::{Fingerprint, FingerprintAuditLog};
 use crate::engine::util::{extract_domain, url_id};
@@ -1085,15 +1085,15 @@ impl TursoStore {
         Ok(hits)
     }
 
-    /// Read the stored page excerpt for a URL, if any.
-    async fn get_content_excerpt(&self, url: &str) -> Result<Option<String>> {
+    /// Read the stored page excerpt and crawl timestamp for a URL, if any.
+    async fn get_content_info(&self, url: &str) -> Result<(Option<String>, Option<DateTime<Utc>>)> {
         let mut rows = self
             .conn
             .query(
                 r#"
-                SELECT pc.excerpt
-                FROM page_content pc
-                JOIN url_nodes n ON n.id = pc.url_node_id
+                SELECT pc.excerpt, COALESCE(pc.created_at, n.discovered_at)
+                FROM url_nodes n
+                LEFT JOIN page_content pc ON pc.url_node_id = n.id
                 WHERE n.url = ?1
                 ORDER BY pc.created_at DESC
                 LIMIT 1
@@ -1101,11 +1101,55 @@ impl TursoStore {
                 params![url],
             )
             .await
-            .with_context(|| format!("read excerpt for `{url}`"))?;
+            .with_context(|| format!("read content info for `{url}`"))?;
         match rows.next().await {
-            Ok(Some(row)) => Ok(row.get::<Option<String>>(0)?),
-            Ok(None) => Ok(None),
-            Err(e) => Err(e).context("iterate excerpt lookup"),
+            Ok(Some(row)) => {
+                let excerpt: Option<String> = row.get(0).ok().flatten();
+                let dt_str: Option<String> = row.get(1).ok().flatten();
+                let crawled_at = dt_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc)));
+                Ok((excerpt, crawled_at))
+            }
+            Ok(None) => Ok((None, None)),
+            Err(e) => Err(e).context("iterate content info lookup"),
+        }
+    }
+
+    /// Read the index freshness statistics (oldest page, newest page, avg age in days).
+    pub async fn index_freshness(&self) -> Result<crate::schema::response::IndexFreshness> {
+        let mut rows = self
+            .conn
+            .query(
+                r#"
+                SELECT min(discovered_at), max(discovered_at),
+                       avg((julianday('now') - julianday(discovered_at)))
+                FROM url_nodes
+                "#,
+                (),
+            )
+            .await
+            .context("query index freshness from url_nodes")?;
+
+        match rows.next().await {
+            Ok(Some(row)) => {
+                let min_s: Option<String> = row.get(0).ok().flatten();
+                let max_s: Option<String> = row.get(1).ok().flatten();
+                let avg_days: f64 = row.get(2).unwrap_or(0.0);
+
+                let oldest_page = min_s.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc)));
+                let newest_page = max_s.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc)));
+
+                Ok(crate::schema::response::IndexFreshness {
+                    oldest_page,
+                    newest_page,
+                    avg_age_days: (avg_days * 10.0).round() / 10.0,
+                })
+            }
+            Ok(None) => Ok(crate::schema::response::IndexFreshness {
+                oldest_page: None,
+                newest_page: None,
+                avg_age_days: 0.0,
+            }),
+            Err(e) => Err(e).context("iterate index freshness"),
         }
     }
 
@@ -1124,11 +1168,37 @@ impl TursoStore {
     ) -> Result<Vec<TursoSearchHit>> {
         let hits = self.hybrid_search(query, query_embedding, limit).await?;
         let mut out = Vec::with_capacity(hits.len());
-        for hit in hits {
-            let excerpt = self
-                .get_content_excerpt(&hit.url)
-                .await?
-                .unwrap_or_default();
+        for mut hit in hits {
+            // For fresh pages not yet processed in the global PageRank table,
+            // check the link graph for immediate in-degree authority evidence.
+            if hit.graph_score.is_none()
+                && let Ok(mut rows) = self
+                    .conn
+                    .query(
+                        r#"
+                        SELECT count(*) FROM link_edges e
+                        JOIN url_nodes target ON e.target_node_id = target.id
+                        WHERE target.url = ?1
+                        "#,
+                        params![hit.url.clone()],
+                    )
+                    .await
+                && let Ok(Some(row)) = rows.next().await
+            {
+                let in_degree: i64 = row.get(0).unwrap_or(0);
+                if in_degree > 0 {
+                    let instant_score = 1.0 / (60.0 + (100.0 / in_degree as f64));
+                    hit.graph_score = Some(instant_score);
+                    if !hit.signals.contains(&"graph".to_string()) {
+                        hit.signals.push("graph".to_string());
+                    }
+                }
+            }
+
+            let (excerpt, crawled_at) = self
+                .get_content_info(&hit.url)
+                .await?;
+            let excerpt = excerpt.unwrap_or_default();
             let title = derive_title(&excerpt, &hit.url);
             out.push(TursoSearchHit {
                 url: hit.url,
@@ -1139,6 +1209,7 @@ impl TursoStore {
                 bm25_score: hit.bm25_score,
                 vector_score: hit.vector_score,
                 graph_score: hit.graph_score,
+                crawled_at,
             });
         }
         Ok(out)
@@ -1170,6 +1241,7 @@ pub struct TursoSearchHit {
     pub bm25_score: Option<f64>,
     pub vector_score: Option<f64>,
     pub graph_score: Option<f64>,
+    pub crawled_at: Option<DateTime<Utc>>,
 }
 
 /// Derive a display title from the first line of an excerpt, falling back to
@@ -1824,19 +1896,14 @@ impl CrawlGraphStore for TursoStore {
     /// The recursive step walks `link_edges` in either direction, deduplicating
     /// with `UNION` (cycle-safe) and bounding depth with the `t.depth < ?2`
     /// guard. One SQL query replaces the multi-round-trip BFS.
-    async fn traverse(
+    async fn traverse_with_depth(
         &self,
         start: &str,
         max_depth: u32,
         direction: TraversalDirection,
-    ) -> Vec<String> {
+    ) -> Vec<TraversalNode> {
         let start_id = url_id(start);
 
-        // The recursive step must hit the `link_edges` FK indexes
-        // (`idx_link_edges_source` / `idx_link_edges_target`). A single `OR`
-        // predicate cannot use either index, forcing a full table scan per
-        // recursion — O(edges) per hop, the bottleneck at 100K edges. Building
-        // the step as per-direction UNION branches lets SQLite seek the index.
         let branches = match direction {
             TraversalDirection::Outbound => {
                 "UNION SELECT e.target_id, t.depth + 1 \
@@ -1864,11 +1931,13 @@ impl CrawlGraphStore for TursoStore {
                 SELECT ?1, 0
                 {branches}
             )
-            SELECT DISTINCT n.url
+            SELECT n.url, MIN(t.depth) as min_depth
             FROM traversal t
             JOIN url_nodes n ON n.id = t.id
+            GROUP BY n.url
             UNION
-            SELECT ?3
+            SELECT ?3, 0
+            ORDER BY min_depth ASC, url ASC
             "#
         );
 
@@ -1884,13 +1953,23 @@ impl CrawlGraphStore for TursoStore {
             }
         };
 
-        let mut urls = Vec::new();
+        let mut nodes = Vec::new();
         loop {
             match rows.next().await {
-                Ok(Some(row)) => match row.get::<String>(0) {
-                    Ok(u) => urls.push(u),
-                    Err(e) => tracing::error!("traversal row missing url: {}", e),
-                },
+                Ok(Some(row)) => {
+                    let url = match row.get::<String>(0) {
+                        Ok(u) => u,
+                        Err(e) => {
+                            tracing::error!("traversal row missing url: {}", e);
+                            continue;
+                        }
+                    };
+                    let depth = match row.get::<i64>(1) {
+                        Ok(d) => d.max(0) as u32,
+                        Err(_) => 0,
+                    };
+                    nodes.push(TraversalNode { url, depth });
+                }
                 Ok(None) => break,
                 Err(e) => {
                     tracing::error!("traversal iteration failed: {}", e);
@@ -1898,7 +1977,20 @@ impl CrawlGraphStore for TursoStore {
                 }
             }
         }
-        urls
+        nodes
+    }
+
+    async fn traverse(
+        &self,
+        start: &str,
+        max_depth: u32,
+        direction: TraversalDirection,
+    ) -> Vec<String> {
+        self.traverse_with_depth(start, max_depth, direction)
+            .await
+            .into_iter()
+            .map(|n| n.url)
+            .collect()
     }
 }
 

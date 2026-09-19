@@ -6,17 +6,21 @@
 
 ---
 
-## 1. Search the Index (BM25 + optional hybrid)
+## 1. Search the Web (`--live`) or Local Index
 
 ```bash
-webfind search "rust async patterns" --hybrid --limit 10
+# Fast live web search (DuckDuckGo + Bing multi-engine RRF fusion):
+webfind search "distributed consensus protocols" --live --limit 10 --output json --output-file /tmp/search.json
+
+# Local graph memory / pre-indexed search (BM25 + vector + graph):
+webfind search "distributed consensus protocols" --hybrid --limit 10
 ```
 
 **Output schema (JSON):**
 ```json
 {
   "request_id": "uuid",
-  "query": "rust async patterns",
+  "query": "distributed consensus protocols",
   "depth": "Standard",
   "total_results": 42,
   "returned": 10,
@@ -42,7 +46,7 @@ webfind search "rust async patterns" --hybrid --limit 10
 }
 ```
 
-**Key flags:** `--hybrid` (BM25+vector+graph), `--limit N`, `--output json|report|markdown`, `--domains "example.com,other.com"`, `--language "en"`
+**Key flags:** `--live` (live search engine fusion), `--output json|report|markdown`, `--output-file PATH`, `--hybrid` (BM25+vector+graph), `--limit N`, `--domains "example.com,other.com"`, `--language "en"`
 
 ---
 
@@ -80,10 +84,10 @@ webfind fetch "https://example.com/article" --dynamic --extract-links --extract-
 
 ---
 
-## 3. Research: Crawl + Persist + Search Fresh Content
+## 3. Deep-Search: Autonomous Crawl + Persist + Extract Fresh Content
 
 ```bash
-webfind research "rust performance" --seed "https://example.com/blog" --max-pages 50 --limit 10 --output /tmp/result.json
+webfind deep-search "rust performance" --seed "https://example.com/blog" --max-pages 50 --limit 10 --output /tmp/result.json
 ```
 
 **Output schema (JSON):** Same as `search` but results are from **freshly
@@ -143,11 +147,12 @@ Index: /path/to/webfind.db
 
 | Command | Description |
 |---------|-------------|
-| `webfind research "q" --output /tmp/r.json` | Crawl + persist + search fresh (single call) |
-| `webfind search "q"` | Search pre-indexed graph |
-| `webfind fetch URL` | Extract single URL |
-| `webfind crawl --seed URL` | Bulk crawl + persist |
+| `webfind search "q" --live --output json` | Fast live web search via DuckDuckGo + Bing (snippets/titles/URLs) |
+| `webfind deep-search "q"` (alias: `research`) | Deep crawl + CDP JS rendering + full body extraction + graph persistence |
+| `webfind search "q"` | Search pre-indexed local Turso graph memory |
+| `webfind fetch URL --dynamic` | Extract and render single URL (HTML/markdown body) |
+| `webfind crawl --seed URL` | Bulk crawl domain + persist to graph store |
 | `webfind graph URL` | Traverse persisted link graph |
 
-Agents call these via a harness / system prompt. Use `--output PATH` to write the
+Agents call these via a harness / system prompt. Use `--output PATH` (on deep-search) or `--output-file PATH` (on search) to write the
 JSON result to a file and read it with a file-read tool — no Python/shell parsing.

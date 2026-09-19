@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
             depth,
             limit,
             output,
+            output_file,
             language,
             domains,
             include_content,
@@ -61,13 +62,42 @@ async fn main() -> anyhow::Result<()> {
             turso_path,
             hybrid,
             live,
+            deep,
         } => {
+            if deep {
+                return commands::research::run(
+                    &cfg,
+                    None,
+                    query,
+                    100,
+                    300,
+                    false,
+                    None,
+                    hybrid,
+                    limit,
+                    include_graph,
+                    include_content,
+                    false,
+                    0,
+                    0,
+                    false,
+                    None,
+                    None,
+                    false,
+                    true,
+                    output_file,
+                    graph_store,
+                    turso_path,
+                )
+                .await;
+            }
             return commands::search::run(
                 &cfg,
                 query,
                 depth,
                 limit,
                 output,
+                output_file,
                 language,
                 domains,
                 include_content,
@@ -199,7 +229,7 @@ async fn main() -> anyhow::Result<()> {
             return commands::proxy_pool::run(listen, cidr, source_ips).await;
         }
 
-        Commands::Research {
+        Commands::DeepSearch {
             seed,
             query,
             depth: _,

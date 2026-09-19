@@ -147,6 +147,7 @@ mod tests {
                 graph: None,
                 freshness: None,
                 quality: None,
+                ax_score: None,
                 final_score: 0.0,
             },
             content: None,
@@ -154,6 +155,10 @@ mod tests {
             metrics: None,
             favicon: None,
             thumbnail: None,
+            llms_txt: None,
+            ai_catalog: None,
+            openapi_spec: None,
+            mcp_server: None,
             language: "en".to_string(),
             content_type: "text".to_string(),
         }];

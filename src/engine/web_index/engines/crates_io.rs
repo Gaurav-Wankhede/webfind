@@ -54,6 +54,15 @@ impl Engine for CratesIoEngine {
         "crates-io"
     }
 
+    fn should_query(&self, query: &str) -> bool {
+        let q = query.to_ascii_lowercase();
+        const RUST_HINTS: &[&str] = &[
+            "rust", "cargo", "crate", "serde", "tokio", "async", "struct", "trait",
+            "derive", "macro", "wasm", "axum", "actix", "reqwest", "clippy",
+        ];
+        RUST_HINTS.iter().any(|hint| q.contains(hint))
+    }
+
     async fn search(&self, query: &str, opts: &EngineOptions) -> Result<Vec<Hit>, Error> {
         let url = Self::build_url(query, opts);
         let body = self

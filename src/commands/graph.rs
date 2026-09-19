@@ -26,18 +26,23 @@ pub async fn run(
         webfind::cli::DirectionArg::Outbound => TraversalDirection::Outbound,
         webfind::cli::DirectionArg::Both => TraversalDirection::Both,
     };
-    let visited = webfind::engine::crawl_graph::traverse_graph(store, &url, depth, direction).await;
+    let visited = webfind::engine::crawl_graph::traverse_graph_with_depth(store, &url, depth, direction).await;
 
     println!(
-        "Graph traversal: {} (depth={}, direction={:?}, store={})",
+        "Graph traversal: {} (max_depth={}, direction={:?}, store={})",
         url,
         depth,
         direction,
         graph_store.as_str()
     );
-    println!("Discovered {} URLs", visited.len());
-    for u in &visited {
-        println!("  - {}", u);
+    println!("Discovered {} URLs:", visited.len());
+    for node in &visited {
+        if node.depth == 0 {
+            println!("  [depth 0] {}", node.url);
+        } else {
+            let indent = "    ".repeat((node.depth.saturating_sub(1)) as usize);
+            println!("  [depth {}] {}└── {}", node.depth, indent, node.url);
+        }
     }
     Ok(())
 }

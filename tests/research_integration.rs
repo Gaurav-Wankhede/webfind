@@ -8,6 +8,10 @@ use webfind::engine::search_engine::InMemorySearchEngine;
 
 #[tokio::test]
 async fn test_research_endpoint_crawls_seed_and_returns_results() {
+    // Permit local loopback addresses so the test can crawl the mock server.
+    unsafe {
+        std::env::set_var("WEBFIND_ALLOW_LOCAL_SEEDS", "1");
+    }
     let tmp = tempfile::TempDir::new().unwrap();
     let data_dir = tmp.path().to_path_buf();
     let indexer = InMemorySearchEngine::new();

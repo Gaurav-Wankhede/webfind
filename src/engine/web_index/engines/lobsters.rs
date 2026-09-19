@@ -54,6 +54,16 @@ impl Engine for LobstersEngine {
         "lobsters"
     }
 
+    fn should_query(&self, query: &str) -> bool {
+        let q = query.to_ascii_lowercase();
+        const TECH_HINTS: &[&str] = &[
+            "rust", "linux", "kernel", "c++", "compiler", "database", "distributed",
+            "security", "exploit", "crypto", "git", "unix", "programming", "software",
+            "open source", "networking", "protocol", "algorithm", "hacker", "code",
+        ];
+        TECH_HINTS.iter().any(|hint| q.contains(hint))
+    }
+
     async fn search(&self, query: &str, opts: &EngineOptions) -> Result<Vec<Hit>, Error> {
         let url = Self::build_url(query);
         let html = self.client.fetch_html(&url, USER_AGENT, opts).await?;

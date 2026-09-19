@@ -16,6 +16,7 @@ pub struct SearchResponse {
     pub results: Vec<SearchResult>,
     pub suggestions: Vec<String>,
     pub related: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub graph: Option<GraphSummary>,
     pub metadata: SearchMetadata,
 }
@@ -28,18 +29,35 @@ pub struct SearchResult {
     pub title: String,
     pub snippet: String,
     pub domain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub published_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub modified_at: Option<DateTime<Utc>>,
     pub crawled_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub site_name: Option<String>,
     pub score: f64,
     pub scores: ScoreBreakdown,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentBlock>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub keywords: Option<Vec<Keyword>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<ContentMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub favicon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llms_txt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_catalog: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openapi_spec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_server: Option<String>,
     pub language: String,
     pub content_type: String,
 }
@@ -47,11 +65,18 @@ pub struct SearchResult {
 /// Score breakdown by ranking signal
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoreBreakdown {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bm25: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub vector: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub graph: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub freshness: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub quality: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ax_score: Option<f64>,
     pub final_score: f64,
 }
 
@@ -62,7 +87,9 @@ pub struct ContentBlock {
     pub excerpt: String,
     pub word_count: u32,
     pub reading_time_seconds: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub markdown: Option<String>,
 }
 
@@ -85,6 +112,7 @@ pub struct ContentMetrics {
     pub language: String,
     pub language_confidence: f64,
     pub has_structured_data: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_type: Option<String>,
 }
 
@@ -102,6 +130,7 @@ pub struct GraphSummary {
 pub struct GraphEdge {
     pub source_url: String,
     pub target_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_text: Option<String>,
     pub crawled_at: DateTime<Utc>,
 }
@@ -137,7 +166,9 @@ pub struct SearchMetadata {
 /// Index freshness info
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexFreshness {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub oldest_page: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub newest_page: Option<DateTime<Utc>>,
     pub avg_age_days: f64,
 }

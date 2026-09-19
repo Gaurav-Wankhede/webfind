@@ -43,6 +43,7 @@ fn sample_response() -> SearchResponse {
             graph: Some(1.0),
             freshness: Some(0.5),
             quality: Some(0.0),
+            ax_score: None,
             final_score: 12.5,
         },
         content: Some(ContentBlock {
@@ -72,6 +73,10 @@ fn sample_response() -> SearchResponse {
         }),
         favicon: Some("https://rust-lang.org/favicon.ico".to_string()),
         thumbnail: None,
+        llms_txt: None,
+        ai_catalog: None,
+        openapi_spec: None,
+        mcp_server: None,
         language: "en".to_string(),
         content_type: "text/html".to_string(),
     };

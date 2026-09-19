@@ -59,6 +59,17 @@ impl Engine for StackOverflowEngine {
         "stackoverflow"
     }
 
+    fn should_query(&self, query: &str) -> bool {
+        let q = query.to_ascii_lowercase();
+        const TECH_HINTS: &[&str] = &[
+            "error", "exception", "failed", "bug", "crash", "panic", "how to",
+            "fix", "compile", "build", "rust", "python", "javascript", "typescript",
+            "go", "c++", "java", "sql", "docker", "kubernetes", "git", "regex",
+            "undefined", "null", "type", "pointer", "memory", "async", "thread",
+        ];
+        TECH_HINTS.iter().any(|hint| q.contains(hint))
+    }
+
     async fn search(&self, query: &str, opts: &EngineOptions) -> Result<Vec<Hit>, Error> {
         let url = Self::build_url(query, opts);
         let body = self

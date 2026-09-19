@@ -34,7 +34,7 @@ Run one CLI call, write the JSON result to a file, then **read that file with a
 file-read tool**. Pure Rust end to end — no Python, no shell JSON parsing.
 
 ```sh
-webfind research "your query here" \
+webfind deep-search "your query here" \
   --max-pages 20 --delay 300 --deep --dynamic \
   --output /tmp/webfind_result.json
 ```
@@ -42,7 +42,7 @@ webfind research "your query here" \
 Then read `/tmp/webfind_result.json` and forward its contents. Records from this
 run are already persisted to the graph store (`webfind.db`).
 
-### Key research flags
+### Key deep-search flags
 
 | Flag | Default | Purpose |
 |------|---------|---------|
@@ -58,9 +58,11 @@ run are already persisted to the graph store (`webfind.db`).
 
 ### Other CLI commands (persist to the same DB)
 
+- `webfind search "query" --live --output-file PATH` — fast live search across DuckDuckGo + Bing (snippets/titles/URLs)
+- `webfind search "query"` — search the accumulated local index/graph
+- `webfind deep-search "query"` (alias: `research`) — autonomous deep crawl + CDP extraction + persist
+- `webfind fetch URL --output json` — fetch and extract a single URL
 - `webfind crawl --seed URL ...` — bulk crawl + persist records
-- `webfind fetch URL --output json` — fetch a single URL
-- `webfind search "query"` — search the accumulated index/graph
 - `webfind graph URL` — traverse the persisted link graph
 - `webfind status` — engine / index status
 
@@ -69,21 +71,28 @@ run are already persisted to the graph store (`webfind.db`).
 - **stdout / `--output` file** = a single JSON document. Fields: `query`,
   `total_results`, `results[]` (each with `rank`, `title`, `url`, `domain`,
   `excerpt`, `content`), `searched_at`.
-- **stderr** = progress (`Researching: …`, `Crawl + persist complete …`), logs,
+- **stderr** = progress (`Deep-searching: …`, `Crawl + persist complete …`), logs,
   and warnings.
 
 ## For AI agents
 
-Do **one** CLI invocation per research task, write the result to `--output`,
+Do **one** CLI invocation per deep-search task, write the result to `--output`,
 read that file with your file-read tool, and forward the parsed JSON to the
 caller. Do not call the tool repeatedly or spawn sub-agents for the same query.
 
 Examples:
 
 ```sh
-webfind research "Rust async runtime tokio 2026" --max-pages 8 --delay 300 --output /tmp/rust.json
+webfind search "distributed consensus protocols raft 2026" --live --limit 10 --output json --output-file /tmp/search.json
 ```
 
 ```sh
-webfind research "secure software supply chain practices 2026" --deep --dynamic --output /tmp/security.json
+webfind deep-search "secure software supply chain practices 2026" --deep --dynamic --output /tmp/security.json
 ```
+
+## Production Code & Lint-First Invariant
+
+- **Zero-Suppression Mandate:** NEVER use `#[allow(...)]`, `#[expect(...)]`, or similar suppressions to silence compiler or Clippy warnings.
+- **Root-Cause Resolution:** Warnings must be solved organically: use the symbol in production paths, implement the missing fallback/branch, or delete unused code.
+- **Strict Clippy Verification:** Every change must pass `rtk cargo clippy -- -D warnings` and `rtk cargo check` with 0 warnings and 0 errors before completion.
+
