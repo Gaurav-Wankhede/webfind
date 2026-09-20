@@ -10,10 +10,12 @@
 pub mod adversarial_gen;
 pub mod beir_streamer;
 pub mod crawler_harvester;
+pub mod prominent_registry;
 
 use crate::dataset::ProbeItem;
 use adversarial_gen::AdversarialPerturber;
 use crawler_harvester::{fetch_domains_from_db, probe_domain, to_probe_item};
+use prominent_registry::MASTER_PILLARS;
 use reqwest::Client;
 use std::time::Duration;
 
@@ -26,23 +28,35 @@ pub async fn compile_multi_source_dataset(
 ) -> Vec<ProbeItem> {
     let mut compiled_items = Vec::new();
 
-    // 1. Ingest physical network probes from local webfind.db
-    println!("Ingesting Source 1: Physical Network Boundaries from {db_path}...");
-    if let Ok(domains) = fetch_domains_from_db(db_path, max_physical_domains) {
-        println!("  Discovered {} unique domains to probe physically.", domains.len());
-        let client = Client::builder()
-            .timeout(Duration::from_millis(2500))
-            .build()
-            .unwrap_or_default();
+    let client = Client::builder()
+        .timeout(Duration::from_millis(2500))
+        .build()
+        .unwrap_or_default();
 
-        let mut probed_count = 0;
+    // 1. Ingest physical network probes from Prominent Master Pillars (OWASP, Languages, Cloud, Frameworks, Standards)
+    println!("Ingesting Source 1: Prominent Master Pillars (9 Tech Categories)...");
+    let mut prominent_probed = 0;
+    for pillar in MASTER_PILLARS {
+        for &seed in pillar.seeds {
+            if let Some(result) = probe_domain(&client, seed).await {
+                compiled_items.push(to_probe_item(&result));
+                prominent_probed += 1;
+            }
+        }
+    }
+    println!("  Probed and recorded {} high-entropy prominent pillar targets.", prominent_probed);
+
+    // 2. Ingest additional domains from local webfind.db
+    println!("Ingesting Physical Database Domains from {db_path}...");
+    if let Ok(domains) = fetch_domains_from_db(db_path, max_physical_domains) {
+        let mut db_probed = 0;
         for domain in domains.iter().take(max_physical_domains) {
             if let Some(result) = probe_domain(&client, domain).await {
                 compiled_items.push(to_probe_item(&result));
-                probed_count += 1;
+                db_probed += 1;
             }
         }
-        println!("  Successfully probed and recorded {probed_count} physical web items.");
+        println!("  Probed and recorded {db_probed} physical database web items.");
     } else {
         println!("  Notice: Database {db_path} not found or unreadable; skipping physical probe.");
     }
