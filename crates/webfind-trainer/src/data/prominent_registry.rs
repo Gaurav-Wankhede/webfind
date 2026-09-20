@@ -163,4 +163,15 @@ pub const MASTER_PILLARS: &[ProminentPillar] = &[
             "https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html",
         ],
     },
+    // 14. GPU Compute & Hardware Graphics Specifications
+    ProminentPillar {
+        name: "GPU Compute & Graphics Specifications",
+        seeds: &[
+            "https://www.w3.org/TR/WGSL/",
+            "https://registry.khronos.org/vulkan/specs/1.3/html/vkspec.html",
+            "https://developer.apple.com/metal/",
+            "https://docs.nvidia.com/cuda/cuda-c-programming-guide/",
+            "https://wgpu.rs/",
+        ],
+    },
 ];
