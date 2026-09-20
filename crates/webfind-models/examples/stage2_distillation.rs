@@ -10,6 +10,7 @@
 // 6. Source Provenance (URL, Crawled timestamp, SHA-256 Hash)
 
 use chrono::Utc;
+use smallvec::smallvec;
 use webfind_models::{
     CalloutAsset, CodeAsset, CompressionMetrics, DiagramAsset, DistilledDocument,
     DocumentProvenance, MathAsset, StructuralAssets, TableAsset,
@@ -23,15 +24,15 @@ fn main() {
         provenance: DocumentProvenance {
             canonical_url: "https://raw.githubusercontent.com/burn-rs/burn/main/README.md".into(),
             title: "Burn: A Flexible and Comprehensive Deep Learning Framework in Rust".into(),
-            crawled_at: Utc::now(),
             content_hash: "a4f89d31b34e56997b7b1297e26715fbc9a8e0f6e690f055998a1bd2267b1442".into(),
+            crawled_at: Utc::now(),
         },
         core_takeaways: "Burn is a pure-Rust deep learning engine supporting dynamic computation graphs, \
                          automatic differentiation, and swappable hardware backends (WGPU/Metal, \
                          LibTorch, Candle, NdArray) with zero Python runtime dependencies.".into(),
         structural_assets: StructuralAssets {
             // Pillar 1: Architectural Diagram (Mermaid)
-            diagrams: vec![DiagramAsset {
+            diagrams: smallvec![DiagramAsset {
                 format: "mermaid".into(),
                 raw: "graph TD\n    \
                       A[Burn Tensor API] --> B[Autodiff Graph Engine]\n    \
@@ -43,76 +44,93 @@ fn main() {
                 caption: Some("Burn Tensor & Hardware Backend Topology".into()),
             }],
             // Pillar 2: Data Comparison Table (Markdown)
-            tables: vec![TableAsset {
-                headers: vec![
+            tables: smallvec![TableAsset {
+                headers: smallvec![
                     "Backend".into(),
                     "Target Hardware".into(),
                     "Zero-Python".into(),
-                    "Autodiff".into(),
+                    "Status".into(),
                 ],
                 rows: vec![
-                    vec!["burn-wgpu".into(), "Apple M-Series (Metal) / Vulkan".into(), "Yes".into(), "Full".into()],
-                    vec!["burn-tch".into(), "Nvidia CUDA (LibTorch)".into(), "No (C++)".into(), "Full".into()],
-                    vec!["burn-ndarray".into(), "CPU AVX2 / NEON SIMD".into(), "Yes".into(), "Full".into()],
+                    smallvec![
+                        "burn-wgpu (Metal)".into(),
+                        "Apple Silicon M-Series GPU".into(),
+                        "Yes".into(),
+                        "Production Tier-1".into(),
+                    ],
+                    smallvec![
+                        "burn-cuda (LibTorch)".into(),
+                        "Nvidia RTX / Hopper / Blackwell".into(),
+                        "Yes".into(),
+                        "Production Tier-1".into(),
+                    ],
+                    smallvec![
+                        "burn-ndarray".into(),
+                        "Embedded CPU (AVX-512 / NEON)".into(),
+                        "Yes".into(),
+                        "Pure-Rust Fallback".into(),
+                    ],
                 ],
                 markdown: Some(
-                    "| Backend | Target Hardware | Zero-Python | Autodiff |\n\
+                    "| Backend | Target Hardware | Zero-Python | Status |\n\
                      |---|---|---|---|\n\
-                     | burn-wgpu | Apple M-Series (Metal) / Vulkan | Yes | Full |\n\
-                     | burn-tch | Nvidia CUDA (LibTorch) | No (C++) | Full |\n\
-                     | burn-ndarray | CPU AVX2 / NEON SIMD | Yes | Full |"
+                     | burn-wgpu (Metal) | Apple Silicon M-Series GPU | Yes | Production Tier-1 |\n\
+                     | burn-cuda (LibTorch) | Nvidia RTX / Hopper | Yes | Production Tier-1 |\n\
+                     | burn-ndarray | Embedded CPU (AVX/NEON) | Yes | Pure-Rust Fallback |"
                         .into(),
                 ),
-                caption: Some("Burn Hardware Acceleration & Dependency Matrix".into()),
+                caption: Some("Hardware Backend Acceleration Matrix".into()),
             }],
-            // Pillar 3: Mathematical Formulation (LaTeX)
-            equations: vec![MathAsset {
-                latex: r"\mathcal{L}(\theta) = \frac{1}{N} \sum_{i=1}^N \ell(f(x_i; \theta), y_i) + \lambda \|\theta\|_2^2".into(),
+            // Pillar 3: Mathematical Formula (LaTeX)
+            equations: smallvec![MathAsset {
+                latex: "\\mathcal{L}_{\\text{total}} = \\lambda_{\\text{CE}} \\mathcal{L}_{\\text{CE}}(\\hat{y}, y) + \\frac{1}{2} \\| \\hat{s} - s \\|_2^2".into(),
                 is_block: true,
-                label: Some("eq:regularized_loss".into()),
+                label: Some("Burn Tensor Autodiff Multi-Task Objective".into()),
             }],
-            // Pillar 4: API Code Contract (Rust)
-            code_contracts: vec![CodeAsset {
+            // Pillar 4: Code API Contract (Rust Module Signature)
+            code_contracts: smallvec![CodeAsset {
                 language: "rust".into(),
                 code: "pub fn forward<B: Backend>(&self, input: Tensor<B, 2>) -> Tensor<B, 2> {\n    \
                            let x = self.linear1.forward(input);\n    \
                            let x = burn::tensor::activation::relu(x);\n    \
                            self.linear2.forward(x)\n\
-                       }".into(),
-                signature: Some("burn::nn::Linear::forward".into()),
+                       }"
+                .into(),
+                signature: Some("pub fn forward<B: Backend>(&self, Tensor<B, 2>) -> Tensor<B, 2>".into()),
             }],
-            // Pillar 5: Security / Deprecation / Operational Callouts
-            callouts: vec![CalloutAsset {
+            // Pillar 5: Safety Warning / Callout
+            callouts: smallvec![CalloutAsset {
                 severity: "warning".into(),
-                message: "Ensure WGPU shader compilation flags enable metal compute limits when deploying to M-series hardware.".into(),
+                message: "Metal compute shaders require macOS 13.0+ and Apple Silicon hardware. \
+                          Fall back to burn-ndarray for non-Apple headless server architectures.".into(),
             }],
         },
-        key_insights: vec![
-            "Eliminates Python GIL bottleneck entirely for inference and on-device training.".into(),
-            "Static typing guarantees tensor dimensionality and device placement at compile time.".into(),
-            "Compressed representation preserves all formulas, contracts, and topologies for LLM pair-programming.".into(),
+        key_insights: smallvec![
+            "Dynamic computation graph enables variable batch shapes without graph recompilation.".into(),
+            "Zero Python runtime dependency eliminates GIL and interpreter overhead in production.".into(),
+            "Seamless WGPU compilation supports native Metal shaders directly on Apple Silicon.".into(),
         ],
         metrics: CompressionMetrics {
-            raw_token_count: 29700,
-            distilled_token_count: 320,
+            raw_token_count: 45_000,
+            distilled_token_count: 340,
             reduction_percent: 99,
         },
     };
 
-    println!("Distilled Target Provenance:");
-    println!("  Title:        {}", burn_distilled.provenance.title);
-    println!("  URL:          {}", burn_distilled.provenance.canonical_url);
-    println!("  Crawled At:   {}", burn_distilled.provenance.crawled_at);
-    println!("  Content Hash: {}", burn_distilled.provenance.content_hash);
+    println!("Distilled Title:    {}", burn_distilled.provenance.title);
+    println!("Canonical URL:      {}", burn_distilled.provenance.canonical_url);
+    println!("SHA-256 Hash:       {}", burn_distilled.provenance.content_hash);
+    println!("Executive Summary:  {}", burn_distilled.core_takeaways);
+    println!("Raw Token Count:    {}", burn_distilled.metrics.raw_token_count);
+    println!("Distilled Tokens:   {}", burn_distilled.metrics.distilled_token_count);
+    println!("Compression Ratio:  {}%", burn_distilled.metrics.reduction_percent);
+    println!("Structural Assets:  {} items preserved", burn_distilled.structural_assets.total_count());
+    println!("  - Diagrams:       {}", burn_distilled.structural_assets.diagrams.len());
+    println!("  - Tables:         {}", burn_distilled.structural_assets.tables.len());
+    println!("  - Equations:      {}", burn_distilled.structural_assets.equations.len());
+    println!("  - Code Contracts: {}", burn_distilled.structural_assets.code_contracts.len());
+    println!("  - Callouts:       {}", burn_distilled.structural_assets.callouts.len());
 
-    println!("\nToken Compression Scorecard:");
-    println!("  Raw Token Ingestion:       {:>6} tokens", burn_distilled.metrics.raw_token_count);
-    println!("  Distilled Context Payload: {:>6} tokens", burn_distilled.metrics.distilled_token_count);
-    println!("  Effective Context Saving:  {:>6}% reduction", burn_distilled.metrics.reduction_percent);
-    println!("  Structural Assets Retained: {:>5} items", burn_distilled.structural_assets.total_count());
-
-    println!("\nGenerated Distilled Payload JSON Preview (First 500 chars):");
-    let json = serde_json::to_string_pretty(&burn_distilled).expect("JSON serialization");
-    let preview: String = json.chars().take(500).collect();
-    println!("{}...\n[Full payload validated and ready for agent context injection]", preview);
+    let json = serde_json::to_string_pretty(&burn_distilled).expect("Failed to serialize distilled doc");
+    println!("\n=== Sample Distilled Document JSON ===\n{}", json);
 }

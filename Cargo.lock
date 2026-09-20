@@ -11942,8 +11942,10 @@ name = "webfind-models"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "compact_str 0.8.2",
  "serde",
  "serde_json",
+ "smallvec",
 ]
 
 [[package]]
@@ -11961,6 +11963,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "smallvec",
  "tokio",
  "tracing",
  "webfind-models",
