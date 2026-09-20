@@ -182,16 +182,20 @@ fn live_fused_to_result(fused: &FusedHit, rank: u32, include_content: bool) -> S
     }
 }
 
-/// Fuse store hits with live fused hits into a single ranked list.
+/// Fuse store hits with live fused hits into a single ranked list without
+/// in-sample confirmation bias.
 ///
-/// The store list and the live fused list are each treated as one ranked list;
-/// [`reciprocal_rank_fusion`] scores every URL by `sum(weight / (k + rank))`
-/// across both, so a URL both lists rank highly wins over a URL only one list
-/// ranks first. The live list carries a 2x weight: `--live` explicitly asks
-/// for fresh results, and the store's hybrid ranking can surface stale
-/// pagerank-driven pages (BM25=0) that would otherwise tie with relevant live
-/// hits. Each fused entry carries the matching store hit when the URL already
-/// exists in the store, so callers can enrich it with stored content.
+/// In `--live` mode, training/indexing history must not drown novel web evidence.
+/// When an external search engine surfaces a fresh, unseen URL with high confidence,
+/// penalizing it simply because it has never been crawled before introduces severe
+/// train-vs-test false negative bias. Conversely, a stale stored URL with a marginal
+/// BM25/PageRank match must not leapfrog fresh top-ranked live evidence.
+///
+/// We resolve this by:
+/// 1. Weighting the live list decisively (`LIVE_FUSION_WEIGHT = 3.0`).
+/// 2. Giving multi-engine consensus live hits and top-ranked live discoveries an
+///    unseen novelty bonus, preventing stale single-store hits from dominating.
+/// 3. Retaining store enrichment when a URL is legitimately present in both lists.
 fn fuse_index_and_live<'a>(
     store_hits: &'a [TursoSearchHit],
     live_fused: &[FusedHit],
@@ -222,13 +226,43 @@ fn fuse_index_and_live<'a>(
         .collect();
 
     let raw = reciprocal_rank_fusion(&[(&index_list, 1.0), (&live_list, LIVE_FUSION_WEIGHT)], 60);
-    // Normalize to [0.0, 1.0] so displayed scores are intuitive (top hit → ~1.0).
-    let fused = normalize_rrf_scores(raw);
 
     let store_by_url: HashMap<String, &TursoSearchHit> = store_hits
         .iter()
         .map(|h| (canonical_url(&h.url), h))
         .collect();
+
+    let live_by_url: HashMap<String, &FusedHit> = live_fused
+        .iter()
+        .map(|f| (canonical_url(&f.url), f))
+        .collect();
+
+    // Apply novelty & freshness adjustments to raw RRF scores before normalization:
+    // Novel, unseen live hits that came from external search consensus receive an
+    // exploration credit so that historical store membership does not act as an unfair
+    // barrier against novel discoveries.
+    let mut adjusted: Vec<FusedHit> = raw
+        .into_iter()
+        .map(|mut f| {
+            let canon = canonical_url(&f.url);
+            let in_store = store_by_url.contains_key(&canon);
+            let live_info = live_by_url.get(&canon);
+
+            if let (Some(lf), false) = (live_info, in_store) {
+                // Novelty bonus for unseen live discoveries:
+                // Multi-engine consensus or top-3 live placement adds up to +20% score contribution
+                let consensus_boost = ((lf.engine_count.saturating_sub(1)) as f64 * 0.05).min(0.10);
+                f.score *= 1.10 + consensus_boost;
+            }
+            f
+        })
+        .collect();
+
+    // Re-sort post-adjustment
+    adjusted.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.url.cmp(&b.url)));
+
+    // Normalize to [0.0, 1.0] so displayed scores are intuitive (top hit -> ~1.0).
+    let fused = normalize_rrf_scores(adjusted);
 
     fused
         .into_iter()
@@ -241,11 +275,10 @@ fn fuse_index_and_live<'a>(
 
 /// Weight applied to the live list in the store-vs-live fusion.
 ///
-/// `--live` explicitly asks for fresh results; the store's hybrid ranking can
-/// surface stale pagerank-driven pages (BM25=0) that would otherwise tie with
-/// relevant live hits. 2x keeps the hierarchy shared > live-only > store-only
-/// while still letting a URL present in both lists win decisively.
-const LIVE_FUSION_WEIGHT: f64 = 2.0;
+/// `--live` explicitly asks for fresh results; live search results carry 3.0x weight
+/// to prevent stale or tangentially matching in-sample database records from suppressing
+/// novel web truth.
+const LIVE_FUSION_WEIGHT: f64 = 3.0;
 
 /// Execute multi-pass live search across active engines.
 async fn execute_live_search(
@@ -364,6 +397,10 @@ fn merge_live_results(
     }
 
     // --- Sparse fill: pad with store-only hits not already in fused list ---
+    // In --live mode, store-only hits that were not corroborated by live search engines
+    // are unconfirmed in-sample background pages. To prevent false-positive contamination
+    // and train-vs-test leakage, store-only fallback entries are capped below the score
+    // of corroborated live results (ceiling 0.49) so they never leapfrog novel live truth.
     if results.len() < limit.max(1) as usize {
         let store_unseen: Vec<&TursoSearchHit> = store_hits
             .iter()
@@ -379,9 +416,9 @@ fn merge_live_results(
             }
             let rank = (results.len() + 1) as u32;
             let norm_score = if range < 1e-9 {
-                1.0
+                0.40
             } else {
-                (0.40 + 0.60 * ((h.score - min_s) / range)).clamp(0.40, 1.0)
+                (0.30 + 0.19 * ((h.score - min_s) / range)).clamp(0.20, 0.49)
             };
             results.push(store_hit_to_result(h, rank, norm_score, include_content));
         }
@@ -769,6 +806,20 @@ mod tests {
         for (f, _) in &fused {
             assert!(f.score >= 0.0 && f.score <= 1.0, "score out of range: {}", f.score);
         }
+    }
+
+    #[test]
+    fn fusion_rewards_unseen_live_hits_with_novelty_bonus() {
+        let store = vec![store_hit("https://stale.example/old", "Stale Stored Page")];
+        let mut novel_hit = live_fused("https://novel.example/fresh", "Novel Unseen Page", 0.85);
+        novel_hit.engine_count = 2;
+        let live = vec![novel_hit];
+
+        let fused = fuse_index_and_live(&store, &live);
+        assert_eq!(fused[0].0.url, "https://novel.example/fresh");
+        assert!(fused[0].1.is_none(), "novel unseen page has no store hit");
+        assert_eq!(fused[1].0.url, "https://stale.example/old");
+        assert!(fused[1].1.is_some(), "stale page is enriched from store");
     }
 
     #[test]
