@@ -185,4 +185,43 @@ pub const MASTER_PILLARS: &[ProminentPillar] = &[
             "https://signal.org/docs/specifications/doubleratchet/",
         ],
     },
+    // 16. Telemetry, Observability & Distributed Tracing
+    ProminentPillar {
+        name: "Telemetry & Distributed Tracing",
+        seeds: &[
+            "https://opentelemetry.io/docs/specs/otlp/",
+            "https://prometheus.io/docs/instrumenting/exposition_formats/",
+            "https://www.w3.org/TR/trace-context/",
+            "https://grafana.com/docs/loki/latest/reference/loki-http-api/",
+        ],
+    },
+    // 17. Streaming, Real-Time Networking & Modern Media Protocols
+    ProminentPillar {
+        name: "Streaming & Real-Time Networking",
+        seeds: &[
+            "https://www.rfc-editor.org/rfc/rfc9000.html",
+            "https://www.rfc-editor.org/rfc/rfc9114.html",
+            "https://www.w3.org/TR/webrtc/",
+            "https://www.w3.org/TR/webtransport/",
+            "https://kafka.apache.org/protocol.html",
+        ],
+    },
+    // 18. Silicon Hardware ISAs & Microarchitecture Specifications
+    ProminentPillar {
+        name: "Silicon Hardware ISAs & Architecture",
+        seeds: &[
+            "https://riscv.org/technical/specifications/",
+            "https://developer.arm.com/documentation/",
+            "https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html",
+        ],
+    },
+    // 19. Financial, Payments & Machine Transaction Protocols
+    ProminentPillar {
+        name: "Financial & Machine Transactions",
+        seeds: &[
+            "https://docs.stripe.com/api",
+            "https://www.iso20022.org/",
+            "https://www.fixtrading.org/standards/",
+        ],
+    },
 ];
