@@ -140,4 +140,16 @@ pub const MASTER_PILLARS: &[ProminentPillar] = &[
             "https://rocksdb.org/docs/getting-started.html",
         ],
     },
+    // 12. Systems Kernel, Virtualization & Container Runtimes
+    ProminentPillar {
+        name: "Kernel, Virtualization & Container Runtimes",
+        seeds: &[
+            "https://www.w3.org/TR/wasm-core-2/",
+            "https://ebpf.io/what-is-ebpf/",
+            "https://kubernetes.io/docs/concepts/containers/cri/",
+            "https://github.com/opencontainers/runtime-spec",
+            "https://docs.kernel.org/",
+            "https://firecracker-microvm.github.io/",
+        ],
+    },
 ];
