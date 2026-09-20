@@ -351,20 +351,17 @@ const STOP_WORDS: &[&str] = &[
     "comparison",
     "difference",
     "between",
-    "2020",
-    "2021",
-    "2022",
-    "2023",
-    "2024",
-    "2025",
-    "2026",
-    "2027",
 ];
+
+/// Helper to check if a token is a 4-digit year dynamically (1900..=2100).
+fn is_year_token(s: &str) -> bool {
+    s.len() == 4 && s.chars().all(|c| c.is_ascii_digit()) && s.parse::<u16>().is_ok_and(|y| (1900..=2100).contains(&y))
+}
 
 /// Extract informative keywords from a query.
 ///
-/// Lowercases, strips punctuation, removes stop words, deduplicates while
-/// preserving order, and caps at 6 keywords so relevance signals stay focused.
+/// Lowercases, strips punctuation, removes stop words and dynamic year tokens,
+/// deduplicates while preserving order, and caps at 6 keywords so relevance signals stay focused.
 #[must_use]
 pub fn extract_keywords(query: &str) -> Vec<String> {
     let stop_set: HashSet<&str> = STOP_WORDS.iter().copied().collect();
@@ -372,7 +369,7 @@ pub fn extract_keywords(query: &str) -> Vec<String> {
         .to_lowercase()
         .split_whitespace()
         .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
-        .filter(|s| !s.is_empty() && !stop_set.contains(s) && s.len() > 1)
+        .filter(|s| !s.is_empty() && !stop_set.contains(s) && !is_year_token(s) && s.len() > 1)
         .map(|s| s.to_string())
         .collect();
 
