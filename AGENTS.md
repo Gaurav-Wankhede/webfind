@@ -96,3 +96,9 @@ webfind deep-search "secure software supply chain practices 2026" --deep --dynam
 - **Root-Cause Resolution:** Warnings must be solved organically: use the symbol in production paths, implement the missing fallback/branch, or delete unused code.
 - **Strict Clippy Verification:** Every change must pass `rtk cargo clippy -- -D warnings` and `rtk cargo check` with 0 warnings and 0 errors before completion.
 
+## Context Slicing Protocol (Strict RG/SG First Before BAT)
+
+- **AST Structural & Regex Mapping First:** NEVER issue `bat` or `view_file` blindly. Always execute structural matching via `ast-grep` (`sg run -p '<pattern>' --json=compact`) or fast Rust regex via `rg` (`rtk rg -n '<pattern>'`) to identify exact symbol coordinates and line numbers.
+- **Strict BAT Only After Verified Coordinates:** Ingest source code strictly with `bat -p -r <start>:<end> <file>` or `rtk read -m <lines>` ONLY AFTER `rg` or `sg` has executed and returned matching line coordinates.
+- **Zero Chunk-Read Spam:** Arbitrary sequential paging (`1-80`, `81-160`) without coordinates is strictly banned.
+
