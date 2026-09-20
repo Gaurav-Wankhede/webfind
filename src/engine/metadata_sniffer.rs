@@ -71,11 +71,20 @@ impl MetadataSniffer {
             affordances.llms_txt = Some(url.to_string());
         }
 
-        // 2. Probe /.well-known/ai-catalog.json
-        if let Ok(url) = Url::parse(&format!("{origin}/.well-known/ai-catalog.json"))
-            && self.probe_endpoint(&url).await
-        {
-            affordances.ai_catalog = Some(url.to_string());
+        // 2. Probe AI catalog variants: /.well-known/ai-catalog.json, /.well-known/ai-catelog.json, /ai-catalog.json, /ai-catelog.json
+        let catalog_candidates = [
+            format!("{origin}/.well-known/ai-catalog.json"),
+            format!("{origin}/.well-known/ai-catelog.json"),
+            format!("{origin}/ai-catalog.json"),
+            format!("{origin}/ai-catelog.json"),
+        ];
+        for cand in &catalog_candidates {
+            if let Ok(url) = Url::parse(cand)
+                && self.probe_endpoint(&url).await
+            {
+                affordances.ai_catalog = Some(url.to_string());
+                break;
+            }
         }
 
         // 3. Probe /openapi.json
