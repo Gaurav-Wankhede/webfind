@@ -257,7 +257,11 @@ When running in HTTP / server mode, WebFind exposes high-performance REST and st
 
 ---
 
-## Roadmap: Jev System-1 & Two-Stage Distillation Architecture
+## Roadmap: Jev System-1 &amp; Two-Stage Distillation Architecture
+
+> [!NOTE]
+> **Status: Future Research &amp; Active Prototyping (Target: v0.4.0)**  
+> *The sections below outline our upcoming pure-Rust neural wire architecture currently under active training and evaluation. For the production search and ingestion pipeline live today, see the [CLI Guide](#cli-command-guide).*
 
 WebFind's next evolutionary leap integrates **Pure-Rust System 1 Machine Learning Models** (`webfind-models`), decoupling decision routing and LLM token compression from expensive frontier models.
 
