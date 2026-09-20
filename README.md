@@ -202,27 +202,86 @@ For immediate latency-critical grounding without long-running crawls, use **`web
 
 ## CLI Command Guide
 
+WebFind is organized into purpose-built subcommands designed for both human terminal use and autonomous agent integration:
+
+### 1. Fast Live Search & Grounding (`webfind search`)
+Multi-engine concurrent search across up to 15 providers (DuckDuckGo, Bing, Crates.io, MDN, DevDocs, arXiv, GitHub, StackOverflow, etc.) with 750ms quorum cutoff and Reciprocal Rank Fusion (RRF):
+
 ```bash
-# Fast live web search: multi-engine RRF fusion across up to 15 search providers with direct JSON file output
-webfind search "distributed consensus protocols raft 2026" --live --limit 10 --output json --output-file /tmp/search.json
+# Fast live multi-engine search with direct JSON output file for agent consumption
+webfind search "distributed consensus raft protocol" --live --limit 10 --output json --output-file /tmp/search.json
 
-# Deep search: autonomous crawl + dynamic Chromium JS rendering + persist to graph + full markdown extraction
-webfind deep-search "secure software supply chain slsa level 4" --max-pages 20 --deep --dynamic --output /tmp/research.json
+# Domain-scoped live search with language filtering
+webfind search "async runtime architecture" --live --domains "docs.rs,github.com" --language en
 
-# Query the accumulated local knowledge graph and full-text index
+# Search the local embedded Turso knowledge graph (BM25 + fastembed-rs vectors + PageRank)
 webfind search "distributed systems consensus" --limit 10 --hybrid
+```
 
-# Crawl and persist a domain graph into the embedded Turso store
-webfind crawl --seed https://news.ycombinator.com --depth 3 --max-pages 100
+### 2. Autonomous Deep Research (`webfind deep-search`)
+Full autonomous crawling, link traversal, headless Chromium (CDP) JavaScript rendering, and direct persistence to embedded Turso graph memory:
 
-# Fetch and extract clean content from a JavaScript-heavy SPA
+```bash
+# Autonomous deep crawl and research on a topic (auto-discovers authoritative seeds)
+webfind deep-search "post-quantum cryptography lattice signatures" \
+  --max-pages 20 \
+  --delay 300 \
+  --dynamic \
+  --output /tmp/research.json
+
+# Targeted deep research on a specific documentation domain
+webfind deep-search "SIMD vectorization patterns" \
+  --seed https://doc.rust-lang.org \
+  --depth 3 \
+  --max-pages 50 \
+  --dynamic
+```
+
+### 3. Precision Fetching & Single-Page Extraction (`webfind fetch`)
+Pulls clean, high-signal Markdown from arbitrary URLs, automatically stripping cookie consent banners, navbars, ads, and tracking scripts:
+
+```bash
+# Fast static fetch with link and keyword extraction
+webfind fetch https://news.ycombinator.com --extract-links --output report
+
+# Headless Chromium dynamic fetch for JavaScript-heavy Single Page Applications (SPAs)
 webfind fetch https://react.dev --dynamic --dynamic-wait-ms 3000
 
-# Inspect the link graph in Turso for a given domain or URL
-webfind graph https://docs.rs/tokio --depth 2
+# Batch fetch multiple URLs in parallel
+webfind fetch https://docs.rs/tokio --urls https://docs.rs/axum,https://docs.rs/tower --output json
+```
 
-# Check database health, total indexed documents, and engine status
+### 4. Bulk Crawling & Background Curation (`webfind crawl`)
+Persistent web spidering with full robots.txt compliance, adaptive rate limiting, and domain-sticky session affinity:
+
+```bash
+# Deep crawl a site and persist all pages/edges directly into webfind.db
+webfind crawl --seed https://docs.rs/serde --depth 2 --max-pages 100 --hybrid
+
+# Run as a continuous background curation daemon across the curated seed catalog
+webfind crawl --daemon --domains tech,databases --daemon-pages 50 --daemon-interval 1800
+```
+
+### 5. Graph Memory & Index Diagnostics (`webfind graph` & `webfind status`)
+Inspect knowledge topology, link relationships, and database health:
+
+```bash
+# Explore inbound and outbound link relationships for a URL in the Turso store
+webfind graph https://docs.rs/tokio --depth 2 --direction both
+
+# List all domains and authoritative sources in the curated catalog
+webfind index domains
+
+# Inspect total indexed documents, FTS index health, and engine status
 webfind status
+```
+
+### 6. Local Server & GUI Deployment (`webfind serve`)
+Spin up the embedded Axum HTTP API and Google-style HTML/Tailwind web interface:
+
+```bash
+# Start the HTTP API and SSE live stream web interface on port 4749
+webfind serve --port 4747 --gui-port 4749 --hybrid
 ```
 
 ---
