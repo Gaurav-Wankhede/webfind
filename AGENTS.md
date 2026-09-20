@@ -102,3 +102,9 @@ webfind deep-search "secure software supply chain practices 2026" --deep --dynam
 - **Strict BAT Only After Verified Coordinates:** Ingest source code strictly with `bat -p -r <start>:<end> <file>` or `rtk read -m <lines>` ONLY AFTER `rg` or `sg` has executed and returned matching line coordinates.
 - **Zero Chunk-Read Spam:** Arbitrary sequential paging (`1-80`, `81-160`) without coordinates is strictly banned.
 
+## Real-Time Temporal Grounding & Zero Training Weight Leakage
+
+- **Strict Current System Year (2026):** The current local runtime year is **2026**.
+- **Banned Stale Year Tokens:** NEVER append or inject obsolete training-cutoff years (e.g., `2024`, `2025`) into search queries, research prompts, crawler seeds, benchmarks, or documentation.
+- **Natural Temporal Ranking:** Allow live search engines and site manifests (`/llms-full.txt`, `/llms.txt`) to surface the latest data organically, or anchor queries strictly to `2026`. Never pollute queries with outdated years from frozen model weights.
+
