@@ -36,18 +36,18 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // 4. Run an inference verification check
-    let test_manifest_features = [0.0f32, 1.0, 0.0, 1.0, 0.0, 0.0, 0.12, 0.94]; // e.g. Astral uv
+    let test_manifest_features = [0.0f32, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0]; // e.g. Astral uv
     let test_tensor = burn::tensor::Tensor::<MyBackend, 1>::from_floats(
         test_manifest_features.as_slice(),
         &device,
     )
-    .reshape([1, 8]);
+    .reshape([1, 12]);
 
     let preds = trained_model.forward(test_tensor);
-    println!("\nVerification Inference for Astral uv probe ([has_llms_txt=1.0]):");
+    println!("\nVerification Inference for Astral uv probe ([has_llms_txt=1.0, sitemap=1.0]):");
     println!("  Protocol Logits: {:?}", preds.protocol_logits.to_data());
-    println!("  Predicted Saliency: {:?}", preds.saliency.to_data());
     println!("  Predicted Quality:  {:?}", preds.quality.to_data());
+    println!("  Predicted Density:  {:?}", preds.density.to_data());
     println!("  Predicted Terminate: {:?}", preds.terminate.to_data());
 
     println!("\nInference executed on Metal in <2ms with zero Python overhead.");

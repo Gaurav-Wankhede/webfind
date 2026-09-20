@@ -1,5 +1,8 @@
-// webfind-trainer: Source 1 - Physical Network Boundary Ground Truth Harvester.
-// Reads unique domains from webfind.db and runs async HTTP manifest & bot-challenge probes.
+// webfind-trainer: Physical socket probe harvester querying webfind.db and live domains.
+// Probes across the full metadata extraction pyramid:
+// Tier 1: /llms.txt, /llms-full.txt, .well-known/ai-catalog.json
+// Tier 2: /sitemap.xml, /robots.txt, /openapi.json
+// Tier 3: JSON-LD and OpenGraph embedded metadata
 
 use crate::dataset::ProbeItem;
 use anyhow::{Context, Result};
@@ -7,13 +10,23 @@ use reqwest::Client;
 use rusqlite::Connection;
 use std::time::Instant;
 
-/// Physical probe result for a single domain.
+/// Physical multi-tier probe result for a single domain.
 #[derive(Debug, Clone)]
 pub struct HarvesterProbeResult {
     pub domain: String,
+    // Tier 1: Machine Manifests
     pub has_full: bool,
     pub has_txt: bool,
     pub has_catalog: bool,
+    // Tier 2: Site Topology & API Contracts
+    pub has_sitemap: bool,
+    pub has_robots: bool,
+    pub has_openapi: bool,
+    pub has_rss: bool,
+    // Tier 3: Embedded Head Semantic Metadata
+    pub has_json_ld: bool,
+    pub has_open_graph: bool,
+    // Operational Network Metrics
     pub is_doc_subdomain: bool,
     pub requires_js: bool,
     pub bot_challenge: bool,
@@ -41,7 +54,7 @@ pub fn fetch_domains_from_db(db_path: &str, limit: usize) -> Result<Vec<String>>
     Ok(domains)
 }
 
-/// Execute a live physical socket probe on a domain to determine manifest presence and bot boundaries.
+/// Execute a live physical socket probe on a domain across all 5 extraction tiers.
 pub async fn probe_domain(client: &Client, domain: &str) -> Option<HarvesterProbeResult> {
     let base_url = if domain.starts_with("http://") || domain.starts_with("https://") {
         domain.to_string()
@@ -67,7 +80,15 @@ pub async fn probe_domain(client: &Client, domain: &str) -> Option<HarvesterProb
         || domain.contains("documentation")
         || domain.contains("api.");
 
-    // Probe manifests
+    // Inspect first chunk / body for Tier 3 embedded metadata (JSON-LD, OpenGraph)
+    let body_sample = root_resp.text().await.unwrap_or_default();
+    let has_json_ld = body_sample.contains("application/ld+json");
+    let has_open_graph = body_sample.contains("og:title") || body_sample.contains("og:description");
+    let requires_js = body_sample.contains("You need to enable JavaScript")
+        || body_sample.contains("__NEXT_DATA__")
+        || body_sample.contains("window.__INITIAL_STATE__");
+
+    // Tier 1 Probes: Machine Manifests
     let llms_txt_url = format!("{base_url}/llms.txt");
     let llms_full_url = format!("{base_url}/llms-full.txt");
     let ai_catalog_url = format!("{base_url}/.well-known/ai-catalog.json");
@@ -97,23 +118,60 @@ pub async fn probe_domain(client: &Client, domain: &str) -> Option<HarvesterProb
         .map(|r| r.status().is_success())
         .unwrap_or(false);
 
-    // Protocol class resolution based on physical evidence
-    let (protocol_class, requires_js) = if bot_challenge {
-        (3, false) // DropOrBypass
+    // Tier 2 Probes: Site Topology & API Specs
+    let sitemap_url = format!("{base_url}/sitemap.xml");
+    let robots_url = format!("{base_url}/robots.txt");
+    let openapi_url = format!("{base_url}/openapi.json");
+
+    let has_sitemap = client
+        .head(&sitemap_url)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+
+    let has_robots = client
+        .head(&robots_url)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+
+    let has_openapi = client
+        .head(&openapi_url)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+
+    let has_rss = body_sample.contains("application/rss+xml") || body_sample.contains("application/atom+xml");
+
+    // Protocol class resolution across the 5 tiers:
+    // 0: ManifestDirect
+    // 1: StructuredMetadata (sitemap, openapi, or json-ld)
+    // 2: StaticFast
+    // 3: CdpDynamic
+    // 4: DropOrBypass
+    let protocol_class = if bot_challenge {
+        4 // DropOrBypass
     } else if has_full || has_txt || has_catalog {
-        (0, false) // ManifestDirect
-    } else if is_doc_subdomain {
-        (1, false) // StaticFast
+        0 // ManifestDirect
+    } else if has_sitemap || has_openapi || has_json_ld {
+        1 // StructuredMetadata
+    } else if is_doc_subdomain || !requires_js {
+        2 // StaticFast
     } else {
-        (2, true)  // CdpDynamic
+        3 // CdpDynamic
     };
 
     let quality_prior = if has_full || has_txt {
-        0.95
-    } else if is_doc_subdomain {
+        0.98
+    } else if has_openapi || has_json_ld {
+        0.90
+    } else if has_sitemap || is_doc_subdomain {
         0.85
     } else if bot_challenge {
-        0.15
+        0.05
     } else {
         0.65
     };
@@ -123,6 +181,12 @@ pub async fn probe_domain(client: &Client, domain: &str) -> Option<HarvesterProb
         has_full,
         has_txt,
         has_catalog,
+        has_sitemap,
+        has_robots,
+        has_openapi,
+        has_rss,
+        has_json_ld,
+        has_open_graph,
         is_doc_subdomain,
         requires_js,
         bot_challenge,
@@ -132,29 +196,31 @@ pub async fn probe_domain(client: &Client, domain: &str) -> Option<HarvesterProb
     })
 }
 
-/// Convert physical probe result into a typed ProbeItem for Burn tensor training.
-pub fn to_probe_item(r: &HarvesterProbeResult) -> ProbeItem {
-    let features = [
-        if r.has_full { 1.0 } else { 0.0 },
-        if r.has_txt { 1.0 } else { 0.0 },
-        if r.has_catalog { 1.0 } else { 0.0 },
-        if r.is_doc_subdomain { 1.0 } else { 0.0 },
-        if r.requires_js { 1.0 } else { 0.0 },
-        if r.bot_challenge { 1.0 } else { 0.0 },
-        (r.latency_ms / 1000.0).clamp(0.0, 5.0),
-        r.quality_prior,
-    ];
-
-    let target_scores = match r.protocol_class {
-        0 => [0.95, 0.92, 0.0],
-        1 => [0.80, 0.85, 0.0],
-        2 => [0.65, 0.60, 0.0],
-        _ => [0.10, 0.10, 1.0], // DropOrBypass: terminate = 1.0
+/// Convert a live physical probe result into a 12-dimensional training sample.
+pub fn to_probe_item(result: &HarvesterProbeResult) -> ProbeItem {
+    let early_term = if result.protocol_class <= 1 { 0.95 } else { 0.10 };
+    let structural_density = if result.is_doc_subdomain || result.has_full || result.has_openapi {
+        0.90
+    } else {
+        0.50
     };
 
     ProbeItem {
-        features,
-        target_protocol: r.protocol_class,
-        target_scores,
+        features: [
+            if result.has_full { 1.0 } else { 0.0 },
+            if result.has_txt { 1.0 } else { 0.0 },
+            if result.has_catalog { 1.0 } else { 0.0 },
+            if result.has_sitemap { 1.0 } else { 0.0 },
+            if result.has_robots { 1.0 } else { 0.0 },
+            if result.has_openapi { 1.0 } else { 0.0 },
+            if result.has_rss { 1.0 } else { 0.0 },
+            if result.has_json_ld { 1.0 } else { 0.0 },
+            if result.has_open_graph { 1.0 } else { 0.0 },
+            if result.is_doc_subdomain { 1.0 } else { 0.0 },
+            if result.requires_js { 1.0 } else { 0.0 },
+            if result.bot_challenge { 1.0 } else { 0.0 },
+        ],
+        target_protocol: result.protocol_class,
+        target_scores: [result.quality_prior, structural_density, early_term],
     }
 }

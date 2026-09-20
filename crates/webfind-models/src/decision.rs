@@ -1,56 +1,56 @@
-// webfind-models: JevDecision representing Stage 1 System-1 classification output.
+// webfind-models: RouteProtocol decision enum for Stage 1 Jev routing.
+// Classifies the optimal retrieval protocol across the 5 tiers of the metadata extraction pyramid.
 
 use serde::{Deserialize, Serialize};
 
-/// Recommended fetch protocol determined by the Jev routing classifier.
+/// Optimal extraction protocol selected by the Stage 1 routing model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub enum RouteProtocol {
-    /// Ingest authoritative markdown directly from `/llms-full.txt` or `/llms.txt`.
-    ManifestDirect,
-    /// Fast static HTTP fetch (reqwest + readability / html5ever parser).
-    StaticFast,
-    /// Full CDP Chromium browser execution for JS-heavy or bot-protected sites.
-    CdpDynamic,
-    /// Abort fetch or drop URL due to bot challenge, paywall, or spam degradation.
-    DropOrBypass,
+    /// Tier 1: Machine AI Manifest Direct (/llms.txt, /llms-full.txt, /ai-catalog.json).
+    /// Zero DOM parsing required (<20ms).
+    ManifestDirect = 0,
+
+    /// Tier 2 & 3: Structured Topology or Embedded Head Metadata.
+    /// Fast sitemap URL tree or JSON-LD / Open Graph extracted from first 4KB stream (<100ms).
+    StructuredMetadata = 1,
+
+    /// Tier 4: Fast Static HTML AST Scraping (curl / reqwest + CSS selector distillation) (<250ms).
+    StaticFast = 2,
+
+    /// Tier 5: Dynamic Headless Chromium Execution (CDP / JS hydration for complex SPAs).
+    CdpDynamic = 3,
+
+    /// Drop or Bypass: CAPTCHA challenge, paywalled, rate-limited, or low-quality dead link.
+    DropOrBypass = 4,
 }
 
-/// Jev System-1 classification decision produced in <2ms.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct JevDecision {
-    /// Selected protocol for page acquisition.
-    pub protocol: RouteProtocol,
-    /// Projected query-context relevance / semantic utility in [0.0, 1.0].
-    pub saliency_score: f32,
-    /// Predicted content cleanliness and structural density in [0.0, 1.0].
-    pub quality_score: f32,
-    /// Whether the crawler should terminate further branch discovery from this URL.
-    pub terminate_gate: bool,
-}
-
-impl JevDecision {
-    /// Creates a new JevDecision.
+impl RouteProtocol {
+    /// Returns a human-readable identifier for terminal logging and telemetry.
     #[inline]
     #[must_use]
-    pub const fn new(
-        protocol: RouteProtocol,
-        saliency_score: f32,
-        quality_score: f32,
-        terminate_gate: bool,
-    ) -> Self {
-        Self {
-            protocol,
-            saliency_score,
-            quality_score,
-            terminate_gate,
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::ManifestDirect => "manifest_direct",
+            Self::StructuredMetadata => "structured_metadata",
+            Self::StaticFast => "static_fast",
+            Self::CdpDynamic => "cdp_dynamic",
+            Self::DropOrBypass => "drop_or_bypass",
         }
     }
+}
 
-    /// Helper indicating whether the candidate page should be crawled at all.
-    #[inline]
-    #[must_use]
-    pub const fn should_fetch(&self) -> bool {
-        !matches!(self.protocol, RouteProtocol::DropOrBypass) && !self.terminate_gate
-    }
+/// Complete routing decision emitted by Stage 1 Jev System-1 classifier.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JevDecision {
+    /// Recommended transport and extraction protocol.
+    pub protocol: RouteProtocol,
+    /// Information quality prior [0.0, 1.0].
+    pub quality_score: f32,
+    /// Estimated structural asset density prior [0.0, 1.0].
+    pub structural_density: f32,
+    /// Early-termination threshold confidence [0.0, 1.0].
+    pub terminate_early: bool,
+    /// Inference latency in microseconds.
+    pub inference_us: u64,
 }

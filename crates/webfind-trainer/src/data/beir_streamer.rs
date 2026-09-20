@@ -1,109 +1,84 @@
-// webfind-trainer: Source 2 - Open-Access Grounding Corpora Downloader & Streamer.
-// Direct verified download and parsing of BEIR academic benchmarks (e.g. SciFact, FiQA):
-// Canonical Primary Source: https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/
+// webfind-trainer: Open-access BEIR grounding streamer.
+// Converts passage benchmarks into 12-dimensional training items.
 
 use crate::dataset::ProbeItem;
 use anyhow::{Context, Result};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Cursor};
+use serde::Deserialize;
+use std::io::Read;
 use std::time::Duration;
-use zip::ZipArchive;
 
-/// BEIR standard corpus record representation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BeirCorpusRecord {
-    pub _id: String,
+#[derive(Debug, Deserialize)]
+pub struct BeirRecord {
+    #[serde(rename = "_id")]
+    pub id: String,
     pub title: String,
     pub text: String,
 }
 
-/// Download and extract a real BEIR dataset directly into memory in pure Rust.
-pub async fn download_beir_dataset(
-    dataset_name: &str,
-    limit: usize,
-) -> Result<Vec<BeirCorpusRecord>> {
-    let url = format!(
-        "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/{dataset_name}.zip"
-    );
-
-    println!("Downloading open-access benchmark: {url}...");
+/// Download and stream a designated BEIR benchmark dataset.
+pub async fn download_beir_dataset(name: &str, limit: usize) -> Result<Vec<BeirRecord>> {
+    let url = format!("https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/{name}.zip");
     let client = Client::builder()
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(45))
         .build()?;
 
-    let resp = client.get(&url).send().await
-        .with_context(|| format!("Failed to download BEIR dataset from {url}"))?;
-
+    let resp = client.get(&url).send().await.context("Failed to download BEIR dataset zip")?;
     if !resp.status().is_success() {
-        anyhow::bail!("Server returned HTTP error {}", resp.status());
+        anyhow::bail!("BEIR mirror returned status {}", resp.status());
     }
 
     let bytes = resp.bytes().await?;
-    println!("  Downloaded {:.2} MB. Extracting corpus.jsonl...", bytes.len() as f64 / 1_048_576.0);
+    let reader = std::io::Cursor::new(bytes);
+    let mut zip = zip::ZipArchive::new(reader)?;
 
-    let reader = Cursor::new(bytes);
-    let mut archive = ZipArchive::new(reader)
-        .context("Failed to read zip archive")?;
+    let corpus_entry_name = format!("{name}/corpus.jsonl");
+    let mut corpus_file = zip
+        .by_name(&corpus_entry_name)
+        .with_context(|| format!("Missing {corpus_entry_name} in BEIR archive"))?;
 
-    let mut corpus_records = Vec::with_capacity(limit);
+    let mut content = String::new();
+    corpus_file.read_to_string(&mut content)?;
 
-    // Look for corpus.jsonl inside the archive
-    let corpus_filename = format!("{dataset_name}/corpus.jsonl");
-    let mut found = false;
-
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        let name = file.name().to_string();
-
-        if name == corpus_filename || name.ends_with("/corpus.jsonl") || name == "corpus.jsonl" {
-            found = true;
-            let buf = BufReader::new(&mut file);
-
-            for line in buf.lines().take(limit) {
-                let line_str = line?;
-                if let Ok(rec) = serde_json::from_str::<BeirCorpusRecord>(&line_str) {
-                    corpus_records.push(rec);
-                }
-            }
-            break;
+    let mut records = Vec::new();
+    for line in content.lines().take(limit) {
+        if let Ok(rec) = serde_json::from_str::<BeirRecord>(line) {
+            records.push(rec);
         }
     }
 
-    if !found {
-        anyhow::bail!("corpus.jsonl not found inside {dataset_name}.zip archive");
-    }
-
-    println!("  Extracted {} authoritative benchmark passages from {dataset_name}.", corpus_records.len());
-    Ok(corpus_records)
+    Ok(records)
 }
 
-/// Convert real BEIR corpus records into high-quality ProbeItems for model training.
-pub fn beir_to_probe_items(records: &[BeirCorpusRecord]) -> Vec<ProbeItem> {
+/// Map BEIR text records to 12-dimensional probe items.
+pub fn beir_to_probe_items(records: &[BeirRecord]) -> Vec<ProbeItem> {
     records
         .iter()
         .map(|r| {
-            let word_count = r.text.split_whitespace().count();
-            let is_substantial = word_count > 40;
-
-            let features = [
-                0.0, // open academic corpus has no /llms-full.txt
-                0.0, // no /llms.txt
-                0.0, // no /ai-catalog.json
-                1.0, // academic passage treated as reference documentation
-                0.0, // clean raw text requires zero JS
-                0.0, // no bot challenge
-                0.05, // zero latency
-                if is_substantial { 0.95 } else { 0.80 },
-            ];
+            let has_code = r.text.contains("fn ") || r.text.contains("def ") || r.text.contains("class ");
+            let has_table = r.text.contains('|');
+            let is_dense = r.text.len() > 800;
 
             ProbeItem {
-                features,
-                target_protocol: 1, // StaticFast
+                features: [
+                    0.0, // has_llms_full
+                    0.0, // has_llms_txt
+                    0.0, // has_ai_catalog
+                    1.0, // has_sitemap
+                    1.0, // has_robots
+                    0.0, // has_openapi
+                    0.0, // has_rss
+                    1.0, // has_json_ld (academic papers often have scholarly JSON-LD)
+                    0.0, // has_open_graph
+                    1.0, // is_doc
+                    0.0, // requires_js
+                    0.0, // bot_challenge
+                ],
+                target_protocol: 1, // StructuredMetadata
                 target_scores: [
-                    if is_substantial { 0.92 } else { 0.75 },
-                    if is_substantial { 0.95 } else { 0.80 },
-                    0.0,
+                    if is_dense { 0.90 } else { 0.75 },
+                    if has_code || has_table { 0.85 } else { 0.40 },
+                    0.80,
                 ],
             }
         })

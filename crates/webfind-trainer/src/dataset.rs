@@ -1,15 +1,28 @@
-// webfind-trainer: Synthetic training dataset generator for Stage 1 Jev routing.
-// Generates realistic web telemetry batches grounded in authentic internet probe behaviors.
+// webfind-trainer: Multi-tier metadata probe item and batching utilities.
+// Grounded in authentic internet network boundaries and metadata hierarchy.
 
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-/// Input item representing raw web probe metrics for a single domain/URL.
+/// Input item representing multi-tier metadata probe metrics for a single domain/URL.
+/// Features: 12-dimensional vector:
+/// [0] has_llms_full_txt
+/// [1] has_llms_txt
+/// [2] has_ai_catalog_json
+/// [3] has_sitemap_xml
+/// [4] has_robots_txt
+/// [5] has_openapi_spec
+/// [6] has_rss_feed
+/// [7] has_json_ld
+/// [8] has_open_graph
+/// [9] is_doc_subdomain
+/// [10] requires_js
+/// [11] bot_challenge
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProbeItem {
-    pub features: [f32; 8],
+    pub features: [f32; 12],
     pub target_protocol: usize,
     pub target_scores: [f32; 3],
 }
@@ -24,7 +37,7 @@ pub struct ProbeBatch<B: Backend> {
 /// Batching helper converting a slice of ProbeItem into Burn Tensors.
 pub fn batch_items<B: Backend>(items: &[ProbeItem], device: &B::Device) -> ProbeBatch<B> {
     let batch_size = items.len();
-    let mut flat_inputs = Vec::with_capacity(batch_size * 8);
+    let mut flat_inputs = Vec::with_capacity(batch_size * 12);
     let mut flat_targets = Vec::with_capacity(batch_size);
     let mut flat_scores = Vec::with_capacity(batch_size * 3);
 
@@ -35,8 +48,9 @@ pub fn batch_items<B: Backend>(items: &[ProbeItem], device: &B::Device) -> Probe
     }
 
     let inputs = Tensor::<B, 1>::from_floats(flat_inputs.as_slice(), device)
-        .reshape([batch_size, 8]);
-    let target_protocols = Tensor::<B, 1, Int>::from_ints(flat_targets.as_slice(), device);
+        .reshape([batch_size, 12]);
+    let target_protocols =
+        Tensor::<B, 1, Int>::from_ints(flat_targets.as_slice(), device).reshape([batch_size]);
     let target_scores = Tensor::<B, 1>::from_floats(flat_scores.as_slice(), device)
         .reshape([batch_size, 3]);
 
@@ -47,82 +61,67 @@ pub fn batch_items<B: Backend>(items: &[ProbeItem], device: &B::Device) -> Probe
     }
 }
 
-/// Generate a synthetic dataset of `n` items grounded in live web probe patterns.
-pub fn generate_synthetic_dataset(n: usize) -> Vec<ProbeItem> {
+/// Synthesize realistic training batches for initial cold-start bootstrapping.
+pub fn generate_synthetic_probe_batch(batch_size: usize) -> Vec<ProbeItem> {
     let mut rng = rand::thread_rng();
-    let mut dataset = Vec::with_capacity(n);
+    let mut items = Vec::with_capacity(batch_size);
 
-    for _ in 0..n {
-        let category: f32 = rng.r#gen();
-        if category < 0.25 {
-            // Case 1: ManifestDirect (e.g. Astral uv, Cloudflare docs)
-            let has_full = rng.gen_bool(0.4);
-            let has_txt = true;
-            let has_catalog = rng.gen_bool(0.3);
-            let features = [
-                if has_full { 1.0 } else { 0.0 },
-                if has_txt { 1.0 } else { 0.0 },
-                if has_catalog { 1.0 } else { 0.0 },
-                1.0, // doc subdomain
-                0.0, // no JS hydration needed
-                0.0, // no bot challenge
-                rng.gen_range(0.05..0.2), // fast latency
-                rng.gen_range(0.85..0.98), // high quality prior
-            ];
-            dataset.push(ProbeItem {
-                features,
-                target_protocol: 0, // ManifestDirect
-                target_scores: [rng.gen_range(0.90..0.99), rng.gen_range(0.88..0.98), 0.0],
-            });
-        } else if category < 0.60 {
-            // Case 2: StaticFast (e.g. docs.rs, plain HTML blogs)
-            let features = [
-                0.0, // no full
-                0.0, // no txt
-                0.0, // no catalog
-                if rng.gen_bool(0.7) { 1.0 } else { 0.0 },
-                0.0, // no JS hydration needed
-                0.0, // no bot challenge
-                rng.gen_range(0.1..0.4),
-                rng.gen_range(0.70..0.90),
-            ];
-            dataset.push(ProbeItem {
-                features,
-                target_protocol: 1, // StaticFast
-                target_scores: [rng.gen_range(0.75..0.90), rng.gen_range(0.70..0.88), 0.0],
-            });
-        } else if category < 0.85 {
-            // Case 3: CdpDynamic (e.g. dynamic SPAs, JS-heavy app dashboards)
-            let features = [
-                0.0, 0.0, 0.0,
-                0.0, // not pure doc
-                1.0, // requires JS hydration
-                if rng.gen_bool(0.5) { 1.0 } else { 0.0 }, // bot challenge
-                rng.gen_range(0.3..0.9),
-                rng.gen_range(0.50..0.75),
-            ];
-            dataset.push(ProbeItem {
-                features,
-                target_protocol: 2, // CdpDynamic
-                target_scores: [rng.gen_range(0.60..0.80), rng.gen_range(0.55..0.75), 0.0],
-            });
+    for _ in 0..batch_size {
+        let has_llms_full = rng.gen_bool(0.12);
+        let has_llms_txt = rng.gen_bool(0.20);
+        let has_ai_catalog = rng.gen_bool(0.08);
+        let has_sitemap = rng.gen_bool(0.65);
+        let has_robots = rng.gen_bool(0.80);
+        let has_openapi = rng.gen_bool(0.15);
+        let has_rss = rng.gen_bool(0.25);
+        let has_json_ld = rng.gen_bool(0.40);
+        let has_open_graph = rng.gen_bool(0.60);
+        let is_doc = rng.gen_bool(0.35);
+        let requires_js = rng.gen_bool(0.30);
+        let bot_challenge = rng.gen_bool(0.10);
+
+        let target_protocol = if bot_challenge {
+            4 // DropOrBypass
+        } else if has_llms_full || has_llms_txt || has_ai_catalog {
+            0 // ManifestDirect
+        } else if has_sitemap || has_openapi || has_json_ld {
+            1 // StructuredMetadata
+        } else if !requires_js || is_doc {
+            2 // StaticFast
         } else {
-            // Case 4: DropOrBypass (e.g. dead links, hard paywalls, bot 403 blocks)
-            let features = [
-                0.0, 0.0, 0.0,
-                0.0,
-                0.0,
-                1.0, // severe bot block
-                rng.gen_range(0.8..1.5),
-                rng.gen_range(0.1..0.3),
-            ];
-            dataset.push(ProbeItem {
-                features,
-                target_protocol: 3, // DropOrBypass
-                target_scores: [rng.gen_range(0.05..0.25), rng.gen_range(0.05..0.20), 1.0], // terminate=1.0
-            });
-        }
+            3 // CdpDynamic
+        };
+
+        let quality_score: f32 = match target_protocol {
+            0 => 0.98,
+            1 => 0.88,
+            2 => 0.75,
+            3 => 0.60,
+            _ => 0.10,
+        };
+
+        let density: f32 = if is_doc || has_llms_full { 0.90 } else { 0.50 };
+        let early_term: f32 = if target_protocol <= 1 { 0.95 } else { 0.10 };
+
+        items.push(ProbeItem {
+            features: [
+                if has_llms_full { 1.0 } else { 0.0 },
+                if has_llms_txt { 1.0 } else { 0.0 },
+                if has_ai_catalog { 1.0 } else { 0.0 },
+                if has_sitemap { 1.0 } else { 0.0 },
+                if has_robots { 1.0 } else { 0.0 },
+                if has_openapi { 1.0 } else { 0.0 },
+                if has_rss { 1.0 } else { 0.0 },
+                if has_json_ld { 1.0 } else { 0.0 },
+                if has_open_graph { 1.0 } else { 0.0 },
+                if is_doc { 1.0 } else { 0.0 },
+                if requires_js { 1.0 } else { 0.0 },
+                if bot_challenge { 1.0 } else { 0.0 },
+            ],
+            target_protocol,
+            target_scores: [quality_score, density, early_term],
+        });
     }
 
-    dataset
+    items
 }
