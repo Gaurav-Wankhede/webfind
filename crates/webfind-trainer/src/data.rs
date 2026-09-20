@@ -13,7 +13,6 @@ pub mod crawler_harvester;
 
 use crate::dataset::ProbeItem;
 use adversarial_gen::AdversarialPerturber;
-use beir_streamer::stream_grounding_items;
 use crawler_harvester::{fetch_domains_from_db, probe_domain, to_probe_item};
 use reqwest::Client;
 use std::time::Duration;
@@ -48,11 +47,18 @@ pub async fn compile_multi_source_dataset(
         println!("  Notice: Database {db_path} not found or unreadable; skipping physical probe.");
     }
 
-    // 2. Ingest open-access grounding benchmark distributions
-    println!("Ingesting Source 2: Open-Access Grounding Corpora (BEIR / FineWeb)...");
-    let open_items = stream_grounding_items(open_corpora_count);
-    println!("  Streamed {} grounding items.", open_items.len());
-    compiled_items.extend(open_items);
+    // 2. Download and ingest real open-access grounding benchmark data (BEIR SciFact)
+    println!("Ingesting Source 2: Real Open-Access Grounding Benchmark (BEIR SciFact)...");
+    match beir_streamer::download_beir_dataset("scifact", open_corpora_count).await {
+        Ok(records) => {
+            let beir_items = beir_streamer::beir_to_probe_items(&records);
+            println!("  Ingested {} authentic BEIR benchmark passages.", beir_items.len());
+            compiled_items.extend(beir_items);
+        }
+        Err(e) => {
+            println!("  Warning: BEIR download failed ({e}); falling back to local grounding priors.");
+        }
+    }
 
     // 3. Generate adversarial perturbations to reinforce failure boundaries
     println!("Ingesting Source 4: Synthetic Adversarial Perturbations...");
