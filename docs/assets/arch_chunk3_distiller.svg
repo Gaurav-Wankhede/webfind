@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 480" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#000000" />
+      <stop offset="100%" stop-color="#070714" />
+    </linearGradient>
+    <filter id="glow3" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="5" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="480" fill="url(#bgGrad3)" />
+
+  <!-- GRID MATRIX -->
+  <g opacity="0.08">
+    <path d="M0 60 H1200 M0 120 H1200 M0 180 H1200 M0 240 H1200 M0 300 H1200 M0 360 H1200 M0 420 H1200" stroke="#7000FF" stroke-width="0.5" />
+    <path d="M120 0 V480 M240 0 V480 M360 0 V480 M480 0 V480 M600 0 V480 M720 0 V480 M840 0 V480 M960 0 V480 M1080 0 V480" stroke="#7000FF" stroke-width="0.5" />
+  </g>
+
+  <!-- TITLE BADGE -->
+  <text x="60" y="55" fill="#A855F7" font-family="-apple-system, sans-serif" font-size="14" font-weight="700" letter-spacing="3">CHUNK 03 // STAGE 2 METADATA DISTILLATION</text>
+  <text x="60" y="82" fill="#FFFFFF" font-family="-apple-system, sans-serif" font-size="24" font-weight="900" letter-spacing="0.5">ZERO-LLM TOKEN COMPRESSOR &amp; SLOT FILLING</text>
+
+  <!-- INPUT CANDIDATE PASSAGE -->
+  <g transform="translate(140, 240)">
+    <rect x="-80" y="-70" width="160" height="140" rx="8" fill="#060914" stroke="#7000FF" stroke-width="1.5" />
+    <text x="0" y="-45" text-anchor="middle" fill="#A855F7" font-family="-apple-system, sans-serif" font-size="10" font-weight="800">STAGE 1 SURVIVOR</text>
+    <text x="-65" y="-15" fill="#FFFFFF" font-family="-apple-system, sans-serif" font-size="10" font-weight="600">Raw Candidate Text</text>
+    <text x="-65" y="5" fill="#8E9AA8" font-family="-apple-system, sans-serif" font-size="9">• 10k-50k tokens</text>
+    <text x="-65" y="20" fill="#8E9AA8" font-family="-apple-system, sans-serif" font-size="9">• HTML Noise &amp; Boilerplate</text>
+    <text x="-65" y="35" fill="#8E9AA8" font-family="-apple-system, sans-serif" font-size="9">• Navigation Menus</text>
+    <text x="0" y="55" text-anchor="middle" fill="#FF007A" font-family="-apple-system, sans-serif" font-size="9" font-weight="700">PRUNED &amp; EXTRACTED</text>
+  </g>
+
+  <!-- CONDUIT -->
+  <path d="M220 240 H380" stroke="#7000FF" stroke-width="2.5" filter="url(#glow3)" />
+
+  <!-- MODEL 2 ENCODER (22M TRANSFORMER SPAN TAGGER) -->
+  <g transform="translate(480, 240)">
+    <polygon points="0,-75 100,0 0,75 -100,0" fill="#090518" stroke="#7000FF" stroke-width="2.5" filter="url(#glow3)" />
+    <text x="0" y="-15" text-anchor="middle" fill="#A855F7" font-family="-apple-system, sans-serif" font-size="11" font-weight="800">MODEL 02</text>
+    <text x="0" y="5" text-anchor="middle" fill="#FFFFFF" font-family="-apple-system, sans-serif" font-size="14" font-weight="900">SPAN TAGGER</text>
+    <text x="0" y="22" text-anchor="middle" fill="#A855F7" font-family="-apple-system, sans-serif" font-size="9" font-weight="700">22M PURE RUST</text>
+    <text x="0" y="38" text-anchor="middle" fill="#8E9AA8" font-family="-apple-system, sans-serif" font-size="8">Zero Token Generation</text>
+  </g>
+
+  <!-- CONDUIT -->
+  <path d="M580 240 H740" stroke="#7000FF" stroke-width="2.5" filter="url(#glow3)" />
+
+  <!-- DISTILLED SCHEMATIC PAYLOAD (THE 350 TOKEN PACKET) -->
+  <g transform="translate(940, 240)">
+    <rect x="-160" y="-110" width="320" height="220" rx="10" fill="#04020C" stroke="#00F0FF" stroke-width="2" filter="url(#glow3)" />
+    <text x="-140" y="-85" fill="#00F0FF" font-family="Courier, monospace" font-size="11" font-weight="800">DISTILLED LLM PAYLOAD (JSON)</text>
+    
+    <text x="-140" y="-55" fill="#8E9AA8" font-family="Courier, monospace" font-size="10">{</text>
+    <text x="-120" y="-35" fill="#FFFFFF" font-family="Courier, monospace" font-size="10">"entity": <tspan fill="#00F0FF">"Exa Search"</tspan>,</text>
+    <text x="-120" y="-15" fill="#FFFFFF" font-family="Courier, monospace" font-size="10">"assertions": [</text>
+    <text x="-100" y="5" fill="#A855F7" font-family="Courier, monospace" font-size="9">"• Vectorized crawl index"</text>
+    <text x="-100" y="20" fill="#A855F7" font-family="Courier, monospace" font-size="9">"• Sub-200ms API retrieval"</text>
+    <text x="-120" y="38" fill="#FFFFFF" font-family="Courier, monospace" font-size="10">],</text>
+    <text x="-120" y="58" fill="#FFFFFF" font-family="Courier, monospace" font-size="10">"metrics": { <tspan fill="#00F0FF">"latency_p95": "200ms"</tspan> },</text>
+    <text x="-120" y="78" fill="#FFFFFF" font-family="Courier, monospace" font-size="10">"token_count": <tspan fill="#FF007A">320</tspan></text>
+    <text x="-140" y="98" fill="#8E9AA8" font-family="Courier, monospace" font-size="10">}</text>
+  </g>
+
+  <!-- BOTTOM COMPARISON PILL -->
+  <g transform="translate(600, 430)">
+    <rect x="-240" y="-16" width="480" height="32" rx="16" fill="#050B18" stroke="#7000FF" stroke-width="1" />
+    <text x="0" y="5" text-anchor="middle" fill="#FFFFFF" font-family="-apple-system, sans-serif" font-size="11" font-weight="700">
+      <tspan fill="#FF007A">BEFORE: 40,000 Tokens ($0.12)</tspan>  ➔  <tspan fill="#00F0FF">AFTER: 320 Tokens ($0.0008)</tspan>
+    </text>
+  </g>
+</svg>

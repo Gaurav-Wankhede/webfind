@@ -257,6 +257,40 @@ When running in HTTP / server mode, WebFind exposes high-performance REST and st
 
 ---
 
+## Roadmap: Jev System-1 & Two-Stage Distillation Architecture
+
+WebFind's next evolutionary leap integrates **Pure-Rust System 1 Machine Learning Models** (`webfind-models`), decoupling decision routing and LLM token compression from expensive frontier models.
+
+### Chunk 1: Two-Stage Dual Model Pipeline
+Replaces slow, token-heavy LLM reasoning loops with sub-millisecond deterministic classification gates:
+
+<p align="center">
+  <img src="docs/assets/arch_chunk1_pipeline.svg" alt="Two-Stage Dual Model Pipeline" width="100%" />
+</p>
+
+### Chunk 2: Stage 1 Routing & Boolean Manifest Tensors
+Dynamically evaluates domain affordances (`llms-full.txt`, `llms.txt`, `ai-catalog.json`) alongside dense embeddings in a single forward pass:
+
+<p align="center">
+  <img src="docs/assets/arch_chunk2_routing.svg" alt="Stage 1 Routing and Manifest Boolean Tensor" width="100%" />
+</p>
+
+### Chunk 3: Stage 2 Metadata Distiller (Zero-LLM Token Compressor)
+Extracts key assertions, metrics, and caveat boundaries directly into schema-safe JSON, cutting LLM payload size by 96% and eliminating *Loss-in-the-Middle*:
+
+<p align="center">
+  <img src="docs/assets/arch_chunk3_distiller.svg" alt="Stage 2 Metadata Distillation" width="100%" />
+</p>
+
+### Chunk 4: Pure-Rust Zero-Python Training Flywheel
+Trained natively via `burn-rs` using WGPU/Metal on Apple Silicon M4 with zero Python dependencies, fed by physical crawl telemetry:
+
+<p align="center">
+  <img src="docs/assets/arch_chunk4_flywheel.svg" alt="Pure Rust Data and Training Flywheel" width="100%" />
+</p>
+
+---
+
 ## License
 
 WebFind is open-source software licensed under the [MIT License](LICENSE).
