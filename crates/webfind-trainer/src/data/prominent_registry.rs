@@ -128,4 +128,16 @@ pub const MASTER_PILLARS: &[ProminentPillar] = &[
             "https://json-schema.org/draft/2020-12/schema",
         ],
     },
+    // 11. Distributed & Embedded Databases
+    ProminentPillar {
+        name: "Distributed & Embedded Databases",
+        seeds: &[
+            "https://sqlite.org/arch.html",
+            "https://sqlite.org/wal.html",
+            "https://www.postgresql.org/docs/current/wal-intro.html",
+            "https://docs.turso.tech/introduction",
+            "https://tikv.org/docs/deep-dive/architecture/overview/",
+            "https://rocksdb.org/docs/getting-started.html",
+        ],
+    },
 ];
