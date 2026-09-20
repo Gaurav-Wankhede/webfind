@@ -116,4 +116,16 @@ pub const MASTER_PILLARS: &[ProminentPillar] = &[
             "https://slsa.dev/spec/v1.0/",
         ],
     },
+    // 10. AI Agent Protocols & Machine API Contracts
+    ProminentPillar {
+        name: "AI Protocols & API Contracts",
+        seeds: &[
+            "https://modelcontextprotocol.io/",
+            "https://spec.openapis.org/oas/v3.1.0",
+            "https://spec.graphql.org/draft/",
+            "https://www.asyncapi.com/",
+            "https://grpc.io/docs/what-is-grpc/introduction/",
+            "https://json-schema.org/draft/2020-12/schema",
+        ],
+    },
 ];
