@@ -1,3 +1,11 @@
+[workspace]
+members = [
+    ".",
+    "crates/webfind-models",
+    "crates/webfind-trainer",
+]
+resolver = "2"
+
 [package]
 name = "webfind"
 version = "0.3.2"
