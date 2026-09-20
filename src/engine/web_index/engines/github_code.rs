@@ -9,7 +9,7 @@ use crate::engine::web_index::client::Client;
 use crate::engine::web_index::util::positional_relevance;
 use crate::engine::web_index::{Engine, EngineOptions, Error, Hit};
 
-const USER_AGENT: &str = "webfind/0.3 (+https://github.com/Gaurav-Wankhede/webfind)";
+const USER_AGENT: &str = "webfind/0.3.2 (+https://github.com/Gaurav-Wankhede/webfind)";
 
 #[derive(Debug, Deserialize)]
 struct GhRepo {

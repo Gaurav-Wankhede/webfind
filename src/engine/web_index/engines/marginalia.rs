@@ -13,7 +13,7 @@ use crate::engine::web_index::{Engine, EngineOptions, Error, Hit};
 
 /// Descriptive user agent; Marginalia's API is bot-friendly but expects a
 /// real identifier.
-const USER_AGENT: &str = "webfind/0.1 (+https://github.com/Gaurav-Wankhede/webfind)";
+const USER_AGENT: &str = "webfind/0.3.2 (+https://github.com/Gaurav-Wankhede/webfind)";
 
 #[derive(Debug, Deserialize)]
 struct MarginaliaResult {

@@ -81,10 +81,6 @@
         <rect width="84" height="20" rx="4" fill="#0f172a" stroke="#0284c7" stroke-width="1"/>
         <text x="42" y="14" text-anchor="middle" class="pill-badge">SYSTEM</text>
       </g>
-      <g transform="translate(328, 26)">
-        <rect width="66" height="20" rx="4" fill="#0f172a" stroke="#334155" stroke-width="1"/>
-        <text x="33" y="14" text-anchor="middle" class="pill-badge" fill="#94a3b8">v0.3.0</text>
-      </g>
 
       <!-- Subtitle -->
       <text x="2" y="74" class="system-desc">

@@ -16,7 +16,7 @@ use crate::engine::web_index::util::positional_relevance;
 use crate::engine::web_index::{Engine, EngineOptions, Error, Hit};
 
 /// Descriptive user agent; Lobsters' Rack middleware rejects UA-less traffic.
-const USER_AGENT: &str = "webfind/0.1 (+https://github.com/Gaurav-Wankhede/webfind)";
+const USER_AGENT: &str = "webfind/0.3.2 (+https://github.com/Gaurav-Wankhede/webfind)";
 
 static STORY: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(".story_liner").expect("static selector is valid"));

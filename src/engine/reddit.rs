@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 /// operator.  We use a descriptive, non-deceptive string that identifies
 /// WebFind as a research tool.
 pub const REDDIT_USER_AGENT: &str =
-    "WebFind/0.1 (research crawler; +https://github.com/Gaurav-Wankhede/webfind)";
+    "WebFind/0.3.2 (research crawler; +https://github.com/Gaurav-Wankhede/webfind)";
 
 /// Minimum delay between Reddit requests (respect rate limits).
 ///

@@ -18,7 +18,7 @@ use crate::engine::proxy_pool::ProxyPool;
 use crate::schema::content::{Entities, ImageInfo, OpenGraph, StructuredContent, TwitterCard};
 use crate::schema::response::Keyword;
 
-const USER_AGENT: &str = "webfind/0.1 (+https://github.com/Gaurav-Wankhede/webfind)";
+const USER_AGENT: &str = "webfind/0.3.2 (+https://github.com/Gaurav-Wankhede/webfind)";
 const FETCH_TIMEOUT_SECS: u64 = 30;
 
 /// Minimum word count for a page to be considered valid content.
