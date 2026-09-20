@@ -102,9 +102,9 @@ webfind deep-search "secure software supply chain practices 2026" --deep --dynam
 - **Strict BAT Only After Verified Coordinates:** Ingest source code strictly with `bat -p -r <start>:<end> <file>` or `rtk read -m <lines>` ONLY AFTER `rg` or `sg` has executed and returned matching line coordinates.
 - **Zero Chunk-Read Spam:** Arbitrary sequential paging (`1-80`, `81-160`) without coordinates is strictly banned.
 
-## Real-Time Temporal Grounding & Zero Training Weight Leakage
+## Real-Time Temporal Grounding & Dynamic System Clocks (ZERO HARDCODED YEARS)
 
-- **Strict Current System Year (2026):** The current local runtime year is **2026**.
-- **Banned Stale Year Tokens:** NEVER append or inject obsolete training-cutoff years (e.g., `2024`, `2025`) into search queries, research prompts, crawler seeds, benchmarks, or documentation.
-- **Natural Temporal Ranking:** Allow live search engines and site manifests (`/llms-full.txt`, `/llms.txt`) to surface the latest data organically, or anchor queries strictly to `2026`. Never pollute queries with outdated years from frozen model weights.
+- **NEVER HARDCODE ANY YEAR:** Statically hardcoding or guessing years into queries, prompts, benchmarks, or comments is strictly forbidden.
+- **Dynamic Clock Resolution:** The system MUST always inspect and resolve the current time dynamically from the host environment (`chrono::Utc::now()`, `date`, or live runtime metadata).
+- **Anti-Training Weight Leakage:** Never inject obsolete training-cutoff years (e.g., `2024`, `2025`) or speculative future years from model weights. Either use purely semantic query terms to allow search engines to rank by fresh organic signals, or dynamically pass the verified system clock.
 
