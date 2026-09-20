@@ -4,9 +4,10 @@
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 
 /// Input item representing raw web probe metrics for a single domain/URL.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProbeItem {
     pub features: [f32; 8],
     pub target_protocol: usize,

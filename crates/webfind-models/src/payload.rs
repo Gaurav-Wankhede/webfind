@@ -2,6 +2,7 @@
 // Preserves critical non-prose context (diagrams, tables, equations, code contracts, callouts).
 
 use chrono::{DateTime, Utc};
+pub use chrono::Utc as PayloadUtc;
 use serde::{Deserialize, Serialize};
 
 /// Visual or architectural diagram asset.
