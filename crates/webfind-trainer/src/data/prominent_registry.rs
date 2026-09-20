@@ -174,4 +174,15 @@ pub const MASTER_PILLARS: &[ProminentPillar] = &[
             "https://wgpu.rs/",
         ],
     },
+    // 15. Post-Quantum Cryptography & Network Security Protocols
+    ProminentPillar {
+        name: "Post-Quantum Cryptography & Network Security",
+        seeds: &[
+            "https://csrc.nist.gov/pubs/fips/203/final",
+            "https://csrc.nist.gov/pubs/fips/204/final",
+            "https://csrc.nist.gov/pubs/fips/205/final",
+            "https://www.wireguard.com/protocol/",
+            "https://signal.org/docs/specifications/doubleratchet/",
+        ],
+    },
 ];

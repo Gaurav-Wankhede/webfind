@@ -33,8 +33,8 @@ pub async fn compile_multi_source_dataset(
         .build()
         .unwrap_or_default();
 
-    // 1. Ingest physical network probes from Prominent Master Pillars (OWASP, Languages, Cloud, Frameworks, Standards, DBs, Kernels, Compilers, GPUs)
-    println!("Ingesting Source 1: Prominent Master Pillars (14 Tech Categories)...");
+    // 1. Ingest physical network probes from Prominent Master Pillars (OWASP, Languages, Cloud, Frameworks, Standards, DBs, Kernels, Compilers, GPUs, PQC)
+    println!("Ingesting Source 1: Prominent Master Pillars (15 Tech Categories)...");
     let mut prominent_probed = 0;
     for pillar in MASTER_PILLARS {
         for &seed in pillar.seeds {
