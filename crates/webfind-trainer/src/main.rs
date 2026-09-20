@@ -1,13 +1,14 @@
 // webfind-trainer: Pure-Rust Burn training harness entry point.
 // Trains Stage 1 Jev routing model directly on native Apple Silicon M4 GPU via WGPU/Metal.
 
+pub mod data;
 pub mod dataset;
 pub mod model;
 pub mod train;
 
 use burn_autodiff::Autodiff;
 use burn_wgpu::{Wgpu, WgpuDevice};
-use dataset::generate_synthetic_dataset;
+use data::compile_multi_source_dataset;
 use train::train_jev_model;
 
 #[tokio::main]
@@ -22,8 +23,8 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Hardware Acceleration: Metal / Apple Silicon M4");
 
-    // 2. Generate grounded dataset based on real-world probe telemetry
-    let dataset = generate_synthetic_dataset(1_200);
+    // 2. Compile grounded multi-source dataset (Physical webfind.db + Open Corpora + Adversarial)
+    let dataset = compile_multi_source_dataset("webfind.db", 25, 800, 300).await;
 
     // 3. Train the Jev System-1 Routing MLP
     let trained_model = train_jev_model::<MyBackend>(
