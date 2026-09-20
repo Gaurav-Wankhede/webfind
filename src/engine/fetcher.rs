@@ -160,11 +160,17 @@ impl Fetcher {
             return self.fetch_reddit(url).await;
         }
 
-        // Tier-0 Manifest Fast-Path: If URL is a domain root or documentation root, check for machine-readable manifests.
+        // Tier-0 Manifest Fast-Path: If URL is a domain root, docs, or shallow section path, check for machine-readable manifests.
         if let Ok(parsed_url) = url::Url::parse(url) {
             let path = parsed_url.path();
-            let is_root_or_docs = path.is_empty() || path == "/" || path == "/docs" || path == "/docs/";
-            if is_root_or_docs
+            let is_manifest_eligible = path.is_empty()
+                || path == "/"
+                || path.starts_with("/docs")
+                || path.starts_with("/api")
+                || path.starts_with("/developer")
+                || path.split('/').filter(|s| !s.is_empty()).count() <= 2;
+            if is_manifest_eligible
+                && parsed_url.query().is_none()
                 && (parsed_url.scheme() == "http" || parsed_url.scheme() == "https")
                 && let Some(manifest_content) = self.try_manifest_fast_path(&parsed_url).await
             {
@@ -656,11 +662,15 @@ impl Fetcher {
             _ => return None,
         };
 
-        // Try /llms-full.txt first for full depth, then /llms.txt
+        // Ordered priority: /llms-full.txt (complete corpus), /llms.txt (curated), /llm.txt, /.well-known/ai-catalog.json, /ai-catelog.json
         let candidates = [
             format!("{origin}/llms-full.txt"),
             format!("{origin}/llms.txt"),
+            format!("{origin}/llm.txt"),
             format!("{origin}/.well-known/ai-catalog.json"),
+            format!("{origin}/.well-known/ai-catelog.json"),
+            format!("{origin}/ai-catalog.json"),
+            format!("{origin}/ai-catelog.json"),
         ];
 
         for candidate_url in candidates {

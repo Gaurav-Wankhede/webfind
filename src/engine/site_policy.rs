@@ -250,15 +250,18 @@ impl SiteExplorer {
         let base = format!("{}://{}", scheme, host_with_port);
         let robots_url = format!("{}/robots.txt", base);
         let sitemap_url = format!("{}/sitemap.xml", base);
-        let llms_url = format!("{}/llms.txt", base);
-        let llm_url = format!("{}/llm.txt", base);
+        let manifest_urls = [
+            format!("{}/llms-full.txt", base),
+            format!("{}/llms.txt", base),
+            format!("{}/llm.txt", base),
+        ];
 
         // TRUE PARALLEL fetch of robots.txt, the root sitemap, and the
-        // site's curated LLM index (llms.txt preferred, llm.txt fallback).
+        // site's curated LLM index (llms-full.txt preferred, then llms.txt, llm.txt).
         let (robots_res, sitemap_res, llms_res) = join!(
             Self::fetch_robots(&self.client, &robots_url),
             self.fetch_sitemap(sitemap_url, 0),
-            Self::fetch_llms_index(&self.client, &llms_url, &llm_url),
+            Self::fetch_llms_index(&self.client, &manifest_urls),
         );
 
         let robots = robots_res.unwrap_or_else(|e| {
@@ -394,25 +397,22 @@ impl SiteExplorer {
         Ok(RobotsPolicy::parse(&text))
     }
 
-    /// Fetch the site's curated LLM index: `/llms.txt` first (the canonical
-    /// filename from the llmstxt.org proposal), falling back to `/llm.txt`
-    /// (a compatibility variant some sites publish). Returns `None` when
-    /// neither file exists.
+    /// Fetch the site's curated LLM index by probing candidate manifest URLs in priority order:
+    /// `/llms-full.txt` -> `/llms.txt` -> `/llm.txt`. Returns `None` when no valid index exists.
     async fn fetch_llms_index(
         client: &reqwest::Client,
-        llms_url: &str,
-        llm_url: &str,
+        manifest_urls: &[String],
     ) -> Result<Option<LlmsIndex>> {
-        for url in [llms_url, llm_url] {
+        for url in manifest_urls {
             let response = client.get(url).send().await;
             let text = match response {
-                Ok(r) if r.status().is_success() => r.text().await.context("read llms.txt body")?,
+                Ok(r) if r.status().is_success() => r.text().await.context("read manifest body")?,
                 Ok(r) => {
-                    debug!("llms.txt returned status {} at {}", r.status(), url);
+                    debug!("manifest returned status {} at {}", r.status(), url);
                     continue;
                 }
                 Err(e) => {
-                    debug!("llms.txt fetch failed at {}: {}", url, e);
+                    debug!("manifest fetch failed at {}: {}", url, e);
                     continue;
                 }
             };
