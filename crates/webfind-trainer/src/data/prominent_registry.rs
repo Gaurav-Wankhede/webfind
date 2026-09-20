@@ -152,4 +152,15 @@ pub const MASTER_PILLARS: &[ProminentPillar] = &[
             "https://firecracker-microvm.github.io/",
         ],
     },
+    // 13. Compilers, IRs & Intermediate Dialects
+    ProminentPillar {
+        name: "Compilers, IRs & Intermediate Dialects",
+        seeds: &[
+            "https://llvm.org/docs/LangRef.html",
+            "https://mlir.llvm.org/",
+            "https://cranelift.readthedocs.io/",
+            "https://gcc.gnu.org/onlinedocs/",
+            "https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html",
+        ],
+    },
 ];
