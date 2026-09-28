@@ -48,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
     match command {
         Commands::Search {
             query,
+            queries,
             depth,
             limit,
             output,
@@ -94,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
             return commands::search::run(
                 &cfg,
                 query,
+                queries,
                 depth,
                 limit,
                 output,
@@ -116,6 +118,9 @@ async fn main() -> anyhow::Result<()> {
             url,
             urls,
             output,
+            compact,
+            mode,
+            query,
             extract_links,
             extract_keywords,
             dynamic,
@@ -126,6 +131,9 @@ async fn main() -> anyhow::Result<()> {
                 url,
                 urls,
                 output,
+                compact,
+                mode,
+                query,
                 extract_links,
                 extract_keywords,
                 dynamic,

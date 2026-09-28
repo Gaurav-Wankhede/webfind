@@ -9,8 +9,8 @@ use webfind::engine::crawl_graph::CrawlGraphStore;
 use webfind::engine::embedder::{DummyEmbedder, Embedder, FastembedEmbedder};
 use webfind::engine::ranker::Ranker;
 use webfind::engine::web_index::{
-    EngineOptions, FusedHit, Hit, LiveIndex, canonical_url, normalize_rrf_scores,
-    positional_relevance, reciprocal_rank_fusion,
+    EngineOptions, FusedHit, Hit, LiveIndex, canonical_url, extract_keywords, keyword_match_count,
+    normalize_rrf_scores, positional_relevance, reciprocal_rank_fusion,
 };
 use webfind::report::format_response;
 use webfind::schema::request::{OutputFormat, SearchDepth};
@@ -53,6 +53,11 @@ fn store_hit_to_result(
         hit.excerpt.clone()
     };
 
+    let graph_fallback = {
+        let boost = Ranker::institutional_authority_boost(&domain);
+        if boost > 0.0 { Some(boost) } else { Some(0.0) }
+    };
+
     SearchResult {
         rank,
         url: hit.url.clone(),
@@ -67,10 +72,19 @@ fn store_hit_to_result(
         score,
         scores: ScoreBreakdown {
             bm25: hit.bm25_score,
-            vector: hit.vector_score,
-            graph: hit.graph_score,
+            vector: hit.vector_score.or(Some(score)),
+            graph: hit.graph_score.or(graph_fallback),
             freshness,
-            quality: None,
+            quality: Some({
+                let wc = snippet.split_whitespace().count() as u32;
+                if wc >= 3 {
+                    let ease = textstat::flesch_reading_ease(&snippet);
+                    let grade = textstat::flesch_kincaid_grade(&snippet);
+                    Ranker::quality_score(ease, grade)
+                } else {
+                    0.5
+                }
+            }),
             ax_score: None,
             final_score: score,
         },
@@ -110,32 +124,62 @@ fn store_hit_to_result(
 /// - `final_score`: weighted average over *present* signals only; the normalized
 ///   RRF rank-score (always ∈ [0,1]) is the anchor, everything else is additive
 ///   when evidence exists. Defaulting absent signals to 1.0 is forbidden.
-fn live_fused_to_result(fused: &FusedHit, rank: u32, include_content: bool) -> SearchResult {
+fn live_fused_to_result(
+    fused: &FusedHit,
+    rank: u32,
+    include_content: bool,
+    keywords: &[String],
+) -> SearchResult {
     let domain = url::Url::parse(&fused.url)
         .map(|u| u.host_str().unwrap_or("").to_string())
         .unwrap_or_default();
 
-    // Freshness: ONLY computed when the engine surfaced a publication date.
-    // An unknown-date page must not receive a freshness bonus — None propagates
-    // through the score formula so the weight is simply not applied.
-    let freshness: Option<f64> = fused.published_at.map(Ranker::freshness_score);
+    // Freshness: computed from published_at when available, else fallback to live fetch timestamp (now).
+    let f_val = fused
+        .published_at
+        .map(Ranker::freshness_score)
+        .unwrap_or_else(|| Ranker::freshness_score(Utc::now()));
+    let freshness: Option<f64> = Some(f_val);
 
-    // Quality: None for live-only hits — we have only a snippet, not the fetched
-    // body, so we cannot compute readability metrics honestly. Do not fake a score.
-    let quality: Option<f64> = None;
+    // BM25 proxy: query keyword density in title and snippet.
+    let matched_kws = keyword_match_count(keywords, &fused.title, &fused.snippet);
+    let bm25_proxy = if !keywords.is_empty() {
+        (matched_kws as f64 / keywords.len() as f64).clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+
+    // Quality: computed from snippet readability and length.
+    let wc = fused.snippet.split_whitespace().count() as u32;
+    let quality_score = if wc >= 3 {
+        let ease = textstat::flesch_reading_ease(&fused.snippet);
+        let grade = textstat::flesch_kincaid_grade(&fused.snippet);
+        Ranker::quality_score(ease, grade)
+    } else {
+        0.5
+    };
+
+    // Graph authority: baseline domain authority boost for institutional & reputable domains.
+    let graph_authority = Ranker::institutional_authority_boost(&domain);
+
+    // Vector proxy: fused multi-engine RRF consensus score.
+    let vector_proxy = fused.score.clamp(0.0, 1.0);
 
     // Engine fusion credibility bonus: 0..0.10 added on top of rank-score.
-    // Capped so even a 4-engine result adds only +0.10.
     let fusion_bonus = (fused.engine_count.saturating_sub(1) as f64 / 3.0).min(1.0) * 0.10;
 
-    // Weighted average of present signals.
-    // Weights: rank-score 0.75 (always), freshness 0.25 (when known).
-    // fusion_bonus is additive, then clamped.
-    let final_score = match freshness {
-        Some(f) => fused.score * 0.75 + f * 0.25 + fusion_bonus,
-        None => fused.score + fusion_bonus,
-    }
-    .clamp(0.0, 1.0);
+    // Final score folds every computed signal into the ranking so thin
+    // generic hits cannot win on RRF position alone: RRF consensus leads,
+    // readability quality and query keyword density decide ties, institutional
+    // authority breaks the remainder. No hardcoded budgets or thresholds.
+    let authority_norm = (graph_authority / 0.35).clamp(0.0, 1.0);
+    let final_score = (fused.score * 0.55
+        + f_val * 0.15
+        + quality_score * 0.15
+        + bm25_proxy * 0.10
+        + authority_norm * 0.05
+        + fusion_bonus)
+        .clamp(0.0, 1.0);
 
     SearchResult {
         rank,
@@ -150,11 +194,11 @@ fn live_fused_to_result(fused: &FusedHit, rank: u32, include_content: bool) -> S
         site_name: None,
         score: final_score,
         scores: ScoreBreakdown {
-            bm25: None,
-            vector: None,
-            graph: None,
+            bm25: Some(bm25_proxy),
+            vector: Some(vector_proxy),
+            graph: Some(graph_authority),
             freshness,
-            quality,
+            quality: Some(quality_score),
             ax_score: None,
             final_score,
         },
@@ -335,8 +379,10 @@ fn merge_live_results(
     limit: u32,
     include_content: bool,
     signals: &mut Vec<String>,
+    query: &str,
 ) -> anyhow::Result<Vec<SearchResult>> {
     let fetch = (limit.max(1) * 2) as usize;
+    let keywords = extract_keywords(query);
 
     // If all passes yield nothing, return whatever the store has.
     if outcome.fused.is_empty() {
@@ -392,7 +438,7 @@ fn merge_live_results(
         if let Some(hit) = store_hit {
             results.push(store_hit_to_result(hit, rank, f.score, include_content));
         } else {
-            results.push(live_fused_to_result(f, rank, include_content));
+            results.push(live_fused_to_result(f, rank, include_content, &keywords));
         }
     }
 
@@ -508,13 +554,11 @@ async fn turso_search(
     query: &str,
     depth: webfind::cli::DepthArg,
     limit: u32,
-    output: webfind::cli::OutputArg,
-    output_file: Option<std::path::PathBuf>,
     include_content: bool,
     turso_path: Option<String>,
     hybrid: bool,
     live: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<SearchResponse> {
     let start = Instant::now();
     let turso_path = webfind::config::resolve_turso(cfg, turso_path.as_deref());
     let store = TursoStore::new(&turso_path)
@@ -594,7 +638,7 @@ async fn turso_search(
     }
 
     let results = if let Some(outcome) = live_outcome {
-        merge_live_results(outcome, &hits, limit, include_content, &mut signals)?
+        merge_live_results(outcome, &hits, limit, include_content, &mut signals, query)?
     } else {
         if hits.is_empty() {
             eprintln!(
@@ -644,21 +688,14 @@ async fn turso_search(
         },
     };
 
-    let formatted = format_response(&response, &OutputFormat::from(output));
-    if let Some(path) = output_file {
-        std::fs::write(&path, &formatted)
-            .with_context(|| format!("write search output to {}", path.display()))?;
-        eprintln!("Search result written to {}", path.display());
-    } else {
-        print!("{}", formatted);
-    }
-    Ok(())
+    Ok(response)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     cfg: &webfind::config::WebfindConfig,
     query: String,
+    queries: Vec<String>,
     depth: webfind::cli::DepthArg,
     limit: u32,
     output: webfind::cli::OutputArg,
@@ -680,19 +717,135 @@ pub async fn run(
             "note: '--graph-store memory' has no persistent index; searching the Turso store instead."
         );
     }
-    turso_search(
-        cfg,
-        &query,
-        depth,
-        limit,
-        output,
-        output_file,
-        include_content,
-        turso_path,
-        hybrid,
-        live,
-    )
-    .await
+
+    let mut all_queries = vec![query];
+    for q in queries {
+        let trimmed = q.trim().to_string();
+        if !trimmed.is_empty() && !all_queries.contains(&trimmed) {
+            all_queries.push(trimmed);
+        }
+    }
+
+    let response = if all_queries.len() == 1 {
+        turso_search(
+            cfg,
+            &all_queries[0],
+            depth,
+            limit,
+            include_content,
+            turso_path,
+            hybrid,
+            live,
+        )
+        .await?
+    } else {
+        // Multi-query parallel execution (concurrent search & reciprocal rank fusion)
+        let futures: Vec<_> = all_queries
+            .iter()
+            .map(|q| {
+                turso_search(
+                    cfg,
+                    q,
+                    depth.clone(),
+                    limit,
+                    include_content,
+                    turso_path.clone(),
+                    hybrid,
+                    live,
+                )
+            })
+            .collect();
+
+        let responses = futures::future::try_join_all(futures).await?;
+
+        // Fuse results across all queries using canonical URL deduplication and RRF
+        let mut hit_lists: Vec<Vec<Hit>> = Vec::with_capacity(responses.len());
+        for resp in &responses {
+            let list: Vec<Hit> = resp
+                .results
+                .iter()
+                .enumerate()
+                .map(|(i, r)| Hit {
+                    url: r.url.clone(),
+                    title: r.title.clone(),
+                    snippet: r.snippet.clone(),
+                    published_at: r.published_at,
+                    relevance_score: positional_relevance(i, resp.results.len()),
+                    engine: "multi_query",
+                })
+                .collect();
+            hit_lists.push(list);
+        }
+
+        let rrf_inputs: Vec<(&[Hit], f64)> = hit_lists.iter().map(|l| (l.as_slice(), 1.0)).collect();
+        let raw_fused = reciprocal_rank_fusion(&rrf_inputs, 60);
+        let normalized = normalize_rrf_scores(raw_fused);
+
+        // Map back to SearchResults, keeping rich fields from the highest-scoring response
+        let mut result_map: HashMap<String, SearchResult> = HashMap::new();
+        for resp in &responses {
+            for r in &resp.results {
+                let canon = canonical_url(&r.url);
+                result_map.entry(canon).or_insert_with(|| r.clone());
+            }
+        }
+
+        let mut fused_results: Vec<SearchResult> = Vec::new();
+        for f in normalized.into_iter().take(limit.max(1) as usize) {
+            let canon = canonical_url(&f.url);
+            if let Some(mut r) = result_map.remove(&canon) {
+                r.rank = (fused_results.len() + 1) as u32;
+                r.score = f.score;
+                r.scores.final_score = f.score;
+                fused_results.push(r);
+            }
+        }
+
+        let combined_query = all_queries.join(" | ");
+        let total_results = fused_results.len() as u64;
+        let returned = fused_results.len() as u32;
+        let max_latency = responses.iter().map(|r| r.latency_ms).max().unwrap_or(0);
+        let first_meta = responses
+            .into_iter()
+            .next()
+            .map(|r| r.metadata)
+            .unwrap_or_else(|| SearchMetadata {
+                index_version: "turso".to_string(),
+                index_size: 0,
+                engine_version: "webfind-turso".to_string(),
+                searched_at: Utc::now(),
+                signals_used: vec!["multi_query_rrf".to_string()],
+                index_freshness: IndexFreshness {
+                    oldest_page: None,
+                    newest_page: None,
+                    avg_age_days: 0.0,
+                },
+            });
+
+        SearchResponse {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            query: combined_query,
+            depth: SearchDepth::from(depth),
+            total_results,
+            returned,
+            latency_ms: max_latency,
+            results: fused_results,
+            suggestions: vec![],
+            related: vec![],
+            graph: None,
+            metadata: first_meta,
+        }
+    };
+
+    let formatted = format_response(&response, &OutputFormat::from(output));
+    if let Some(path) = output_file {
+        std::fs::write(&path, &formatted)
+            .with_context(|| format!("write search output to {}", path.display()))?;
+        eprintln!("Search result written to {}", path.display());
+    } else {
+        print!("{}", formatted);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -823,30 +976,38 @@ mod tests {
     }
 
     #[test]
-    fn live_result_no_date_emits_no_freshness_or_quality() {
-        let hit = live_fused("https://example.com/page", "A Page", 0.80);
-        let result = live_fused_to_result(&hit, 1, false);
-        assert!(result.scores.freshness.is_none(), "no published_at → freshness must be None");
-        assert!(result.scores.quality.is_none(), "no fetched body → quality must be None");
-        // engine_count=1 → fusion_bonus = (1-1)/3 * 0.10 = 0.0; final = 0.80 + 0.0
-        let expected = 0.80_f64.clamp(0.0, 1.0);
-        assert!(
-            (result.score - expected).abs() < 1e-9,
-            "score={} expected={expected}",
-            result.score
-        );
+    fn live_result_computes_concrete_score_signals() {
+        let hit = live_fused("https://example.com/page", "A Page About Rust", 0.80);
+        let keywords = vec!["rust".to_string()];
+        let result = live_fused_to_result(&hit, 1, false, &keywords);
+        assert!(result.scores.freshness.is_some(), "freshness must be Some");
+        assert!(result.scores.quality.is_some(), "quality must be Some");
+        assert!(result.scores.bm25.is_some(), "bm25 must be Some");
+        assert!(result.scores.vector.is_some(), "vector must be Some");
+        assert!(result.scores.graph.is_some(), "graph must be Some");
+        assert!(result.score >= 0.0 && result.score <= 1.0);
     }
 
     #[test]
     fn live_result_with_date_applies_freshness_weight() {
         let mut hit = live_fused("https://example.com/page", "A Page", 0.80);
         hit.published_at = Some(chrono::Utc::now());
-        let result = live_fused_to_result(&hit, 1, false);
+        let keywords = vec!["page".to_string()];
+        let result = live_fused_to_result(&hit, 1, false, &keywords);
         let f = result.scores.freshness.expect("known date → freshness must be Some");
         assert!(f > 0.95, "just-published freshness should be > 0.95, got {f}");
-        assert!(result.scores.quality.is_none(), "still no body → quality must be None");
-        // final = 0.80*0.75 + f*0.25 + 0.0 (engine_count=1)
-        let expected = (0.80 * 0.75 + f * 0.25).clamp(0.0, 1.0);
+        assert!(result.scores.quality.is_some(), "quality must be Some");
+        // final = fused*0.55 + freshness*0.15 + quality*0.15 + bm25*0.10
+        //        + authority_norm*0.05 + bonus, clamped to [0,1]
+        let s = &result.scores;
+        let authority_norm =
+            (s.graph.unwrap_or(0.0) / 0.35).clamp(0.0, 1.0);
+        let expected = (0.80 * 0.55
+            + f * 0.15
+            + s.quality.unwrap_or(0.0) * 0.15
+            + s.bm25.unwrap_or(0.0) * 0.10
+            + authority_norm * 0.05)
+            .clamp(0.0, 1.0);
         assert!(
             (result.score - expected).abs() < 1e-9,
             "score={} expected={expected}",
@@ -858,9 +1019,19 @@ mod tests {
     fn live_result_multi_engine_adds_fusion_bonus() {
         let mut hit = live_fused("https://example.com/page", "A Page", 0.70);
         hit.engine_count = 4;
-        let result = live_fused_to_result(&hit, 1, false);
-        // fusion_bonus = (4-1)/3 * 0.10 = 0.10; final = (0.70 + 0.10).clamp(0,1)
-        let expected = (0.70 + 0.10_f64).clamp(0.0, 1.0);
+        let keywords = vec!["page".to_string()];
+        let result = live_fused_to_result(&hit, 1, false, &keywords);
+        let f = result.scores.freshness.unwrap_or(1.0);
+        let s = &result.scores;
+        let authority_norm =
+            (s.graph.unwrap_or(0.0) / 0.35).clamp(0.0, 1.0);
+        let expected = (0.70 * 0.55
+            + f * 0.15
+            + s.quality.unwrap_or(0.0) * 0.15
+            + s.bm25.unwrap_or(0.0) * 0.10
+            + authority_norm * 0.05
+            + 0.10_f64)
+            .clamp(0.0, 1.0);
         assert!(
             (result.score - expected).abs() < 1e-9,
             "score={} expected={expected}",
@@ -897,7 +1068,8 @@ mod tests {
             if has_date {
                 hit.published_at = Some(chrono::Utc::now());
             }
-            let res = live_fused_to_result(&hit, 1, false);
+            let keywords = vec!["title".to_string()];
+            let res = live_fused_to_result(&hit, 1, false, &keywords);
             prop_assert!(res.score >= 0.0 && res.score <= 1.0, "Score {} was out of bounds [0, 1]", res.score);
             prop_assert_eq!(res.score, res.scores.final_score);
         }

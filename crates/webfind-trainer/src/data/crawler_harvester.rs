@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use rusqlite::Connection;
 use std::time::Instant;
+use url::Url;
 
 /// Physical multi-tier probe result for a single domain.
 #[derive(Debug, Clone)]
@@ -223,4 +224,97 @@ pub fn to_probe_item(result: &HarvesterProbeResult) -> ProbeItem {
         target_protocol: result.protocol_class,
         target_scores: [result.quality_prior, structural_density, early_term],
     }
+}
+
+/// Extract up to `limit` child URLs from a site's `/sitemap.xml`.
+pub async fn extract_sitemap_urls(client: &Client, base_url: &str, limit: usize) -> Vec<String> {
+    let sitemap_url = if let Ok(parsed) = Url::parse(base_url) {
+        let scheme = parsed.scheme();
+        let host = parsed.host_str().unwrap_or_default();
+        format!("{scheme}://{host}/sitemap.xml")
+    } else {
+        format!("{base_url}/sitemap.xml")
+    };
+
+    let resp = match client.get(&sitemap_url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Vec::new(),
+    };
+
+    let xml = resp.text().await.unwrap_or_default();
+    let mut urls = Vec::new();
+
+    // Fast zero-dependency XML <loc> tag extraction
+    let mut rest = &xml[..];
+    while let Some(start_loc) = rest.find("<loc>") {
+        let after_start = &rest[start_loc + 5..];
+        if let Some(end_loc) = after_start.find("</loc>") {
+            let extracted = after_start[..end_loc].trim();
+            if extracted.starts_with("http://") || extracted.starts_with("https://") {
+                urls.push(extracted.to_string());
+                if urls.len() >= limit {
+                    break;
+                }
+            }
+            rest = &after_start[end_loc + 6..];
+        } else {
+            break;
+        }
+    }
+
+    urls
+}
+
+/// Extract up to `limit` internal documentation hyperlinks from an HTML body string.
+pub fn extract_internal_doc_links(base_url: &str, html: &str, limit: usize) -> Vec<String> {
+    let parsed_base = match Url::parse(base_url) {
+        Ok(u) => u,
+        Err(_) => return Vec::new(),
+    };
+
+    let host = match parsed_base.host_str() {
+        Some(h) => h,
+        None => return Vec::new(),
+    };
+
+    let mut links = Vec::new();
+    let mut rest = html;
+
+    while let Some(href_pos) = rest.find("href=\"") {
+        let after_href = &rest[href_pos + 6..];
+        if let Some(quote_pos) = after_href.find('"') {
+            let href = &after_href[..quote_pos].trim();
+            if !href.is_empty()
+                && !href.starts_with('#')
+                && !href.starts_with("javascript:")
+                && let Ok(resolved) = parsed_base.join(href)
+                && resolved.host_str() == Some(host)
+            {
+                let path = resolved.path();
+                // Filter for high-signal documentation sub-paths
+                if path.contains("doc")
+                    || path.contains("api")
+                    || path.contains("guide")
+                    || path.contains("spec")
+                    || path.contains("manual")
+                    || path.contains("reference")
+                    || path.contains("rfc")
+                    || path.contains("book")
+                {
+                    let resolved_str = resolved.to_string();
+                    if !links.contains(&resolved_str) && resolved_str != base_url {
+                        links.push(resolved_str);
+                        if links.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+            }
+            rest = &after_href[quote_pos + 1..];
+        } else {
+            break;
+        }
+    }
+
+    links
 }

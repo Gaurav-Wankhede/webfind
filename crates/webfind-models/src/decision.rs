@@ -54,3 +54,30 @@ pub struct JevDecision {
     /// Inference latency in microseconds.
     pub inference_us: u64,
 }
+
+impl JevDecision {
+    /// Creates a new Jev routing decision with default simulated latency.
+    #[inline]
+    #[must_use]
+    pub const fn new(
+        protocol: RouteProtocol,
+        quality_score: f32,
+        structural_density: f32,
+        terminate_early: bool,
+    ) -> Self {
+        Self {
+            protocol,
+            quality_score,
+            structural_density,
+            terminate_early,
+            inference_us: 150,
+        }
+    }
+
+    /// Returns true if the protocol indicates the page should be fetched.
+    #[inline]
+    #[must_use]
+    pub const fn should_fetch(&self) -> bool {
+        !matches!(self.protocol, RouteProtocol::DropOrBypass)
+    }
+}

@@ -125,10 +125,19 @@ pub struct DocumentProvenance {
     pub canonical_url: String,
     /// Document or page title.
     pub title: String,
-    /// Content hash (SHA-256) for deduplication and provenance integrity (64 chars).
+    /// Content hash (BLAKE3 256-bit cryptographic digest formatted as 64 hex chars).
     pub content_hash: CompactStr,
     /// Ingestion timestamp (UTC).
     pub crawled_at: DateTime<Utc>,
+}
+
+impl DocumentProvenance {
+    /// Compute a BLAKE3 content hash from raw bytes with zero heap allocation.
+    #[inline]
+    pub fn compute_blake3(data: &[u8]) -> CompactStr {
+        let hash = blake3::hash(data);
+        CompactStr::new(hash.to_hex().as_str())
+    }
 }
 
 /// Compression statistics for token accounting.

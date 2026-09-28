@@ -391,15 +391,24 @@ pub async fn search(
                 crawled_at: c.fetched_at,
                 author: c.author.clone(),
                 site_name: c.site_name.clone(),
-                score: 0.0,
+                score: 0.5,
                 scores: ScoreBreakdown {
-                    bm25: None,
+                    bm25: Some(0.5),
                     vector: None,
-                    graph: None,
-                    freshness: None,
-                    quality: None,
+                    graph: Some(crate::engine::ranker::Ranker::institutional_authority_boost(
+                        &url::Url::parse(&c.url)
+                            .map(|u| u.host_str().unwrap_or("").to_string())
+                            .unwrap_or_default(),
+                    )),
+                    freshness: Some(crate::engine::ranker::Ranker::freshness_score(
+                        c.published_at.unwrap_or(c.fetched_at),
+                    )),
+                    quality: Some(crate::engine::ranker::Ranker::quality_score(
+                        c.reading_ease,
+                        c.grade_level,
+                    )),
                     ax_score: None,
-                    final_score: 0.0,
+                    final_score: 0.5,
                 },
                 content: if params.include_content {
                     Some(crate::schema::response::ContentBlock {
@@ -729,6 +738,7 @@ pub async fn research(
                 let domain = url::Url::parse(&c.url)
                     .map(|u| u.host_str().unwrap_or("").to_string())
                     .unwrap_or_default();
+                let graph_boost = crate::engine::ranker::Ranker::institutional_authority_boost(&domain);
                 SearchResult {
                     rank: (i + 1) as u32,
                     url: c.url.clone(),
@@ -740,15 +750,20 @@ pub async fn research(
                     crawled_at: c.fetched_at,
                     author: c.author.clone(),
                     site_name: c.site_name.clone(),
-                    score: 0.0,
+                    score: 0.5,
                     scores: ScoreBreakdown {
-                        bm25: None,
+                        bm25: Some(0.5),
                         vector: None,
-                        graph: None,
-                        freshness: None,
-                        quality: None,
+                        graph: Some(graph_boost),
+                        freshness: Some(crate::engine::ranker::Ranker::freshness_score(
+                            c.published_at.unwrap_or(c.fetched_at),
+                        )),
+                        quality: Some(crate::engine::ranker::Ranker::quality_score(
+                            c.reading_ease,
+                            c.grade_level,
+                        )),
                         ax_score: None,
-                        final_score: 0.0,
+                        final_score: 0.5,
                     },
                     content: Some(crate::schema::response::ContentBlock {
                         text: c.content_text.clone(),

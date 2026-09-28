@@ -105,13 +105,31 @@ impl Ranker {
                 .map(|m| if m.has_structured_data { 0.05 } else { 0.0 })
                 .unwrap_or(0.0);
 
-            let quality = r.metrics.as_ref().map(|m| {
-                (Self::quality_score(m.reading_ease, m.grade_level) + structured_boost)
-                    .clamp(0.0, 1.0)
-            });
+            let quality = r
+                .metrics
+                .as_ref()
+                .map(|m| {
+                    (Self::quality_score(m.reading_ease, m.grade_level) + structured_boost)
+                        .clamp(0.0, 1.0)
+                })
+                .or_else(|| {
+                    let text = r.content.as_ref().map(|c| c.text.as_str()).unwrap_or(&r.snippet);
+                    let wc = text.split_whitespace().count();
+                    if wc >= 3 {
+                        let ease = textstat::flesch_reading_ease(text);
+                        let grade = textstat::flesch_kincaid_grade(text);
+                        Some(Self::quality_score(ease, grade).clamp(0.0, 1.0))
+                    } else {
+                        Some(0.5)
+                    }
+                });
             r.scores.quality = quality;
 
-            let graph = graph_scores.and_then(|scores| scores.get(&r.url)).copied();
+            let authority = *domain_authority.get(&r.domain).unwrap_or(&0.0);
+            let graph = graph_scores
+                .and_then(|scores| scores.get(&r.url))
+                .copied()
+                .or(Some(authority));
             r.scores.graph = graph;
 
             let vector = vector_scores
@@ -119,8 +137,6 @@ impl Ranker {
                 .copied()
                 .unwrap_or(0.0);
             r.scores.vector = if use_vector { Some(vector) } else { None };
-
-            let authority = *domain_authority.get(&r.domain).unwrap_or(&0.0);
 
             let ax = Self::calculate_ax_score(r);
             r.scores.ax_score = ax;
@@ -147,9 +163,9 @@ impl Ranker {
                 + w_authority * authority
                 + ax_term;
             let final_score = if weight_sum > 0.0 {
-                (raw_final / weight_sum).clamp(0.0, 1.0)
+                (raw_final / weight_sum).clamp(0.001, 1.0)
             } else {
-                raw_final
+                raw_final.max(0.001)
             };
 
             r.scores.final_score = final_score;
@@ -199,7 +215,7 @@ impl Ranker {
     }
 
     /// Baseline authority boost based on top-level domain and verified institutional domains.
-    fn institutional_authority_boost(domain: &str) -> f64 {
+    pub fn institutional_authority_boost(domain: &str) -> f64 {
         let d = domain.to_ascii_lowercase();
 
         // 1. Sovereign Government, Military & Intergovernmental (.gov, .mil, .int, sovereign ccTLDs)

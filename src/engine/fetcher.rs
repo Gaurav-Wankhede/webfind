@@ -15,10 +15,14 @@ use crate::engine::device_profile::{DeviceProfile, SessionManager};
 use crate::engine::fingerprint::{FingerprintAuditLog, FingerprintGenerator};
 use crate::engine::human_client::HumanClient;
 use crate::engine::proxy_pool::ProxyPool;
-use crate::schema::content::{Entities, ImageInfo, OpenGraph, StructuredContent, TwitterCard};
+use crate::schema::content::{
+    CalloutEntity, CodeBlockEntity, DiagramEntity, Entities, ExampleEntity, FaqEntity,
+    HeadingEntity, ImageInfo, MathEntity, OpenGraph, StepEntity, StructuredContent, TableEntity,
+    TwitterCard,
+};
 use crate::schema::response::Keyword;
 
-const USER_AGENT: &str = "webfind/0.3.2 (+https://github.com/Gaurav-Wankhede/webfind)";
+const USER_AGENT: &str = "webfind/0.3.4 (+https://github.com/Gaurav-Wankhede/webfind)";
 const FETCH_TIMEOUT_SECS: u64 = 30;
 
 /// Minimum word count for a page to be considered valid content.
@@ -160,15 +164,10 @@ impl Fetcher {
             return self.fetch_reddit(url).await;
         }
 
-        // Tier-0 Manifest Fast-Path: If URL is a domain root, docs, or shallow section path, check for machine-readable manifests.
+        // Tier-0 Manifest Fast-Path: Only for domain roots or root /docs, never for specific subpages or blog articles.
         if let Ok(parsed_url) = url::Url::parse(url) {
             let path = parsed_url.path();
-            let is_manifest_eligible = path.is_empty()
-                || path == "/"
-                || path.starts_with("/docs")
-                || path.starts_with("/api")
-                || path.starts_with("/developer")
-                || path.split('/').filter(|s| !s.is_empty()).count() <= 2;
+            let is_manifest_eligible = path.is_empty() || path == "/" || path == "/docs" || path == "/docs/";
             if is_manifest_eligible
                 && parsed_url.query().is_none()
                 && (parsed_url.scheme() == "http" || parsed_url.scheme() == "https")
@@ -208,7 +207,7 @@ impl Fetcher {
             .map(String::from);
 
         let content_type_header = content_type.clone().unwrap_or_default();
-        let (kind, _charset) = parse_content_type_header(content_type.as_deref());
+        let (kind, charset) = parse_content_type_header(content_type.as_deref());
 
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -260,6 +259,7 @@ impl Fetcher {
             ContentKind::Binary => unreachable!(),
         };
 
+        content.encoding = charset;
         content.content_type_header = content_type_header.clone();
         content.content_type =
             super::content_classifier::classify_content_type(&content).to_string();
@@ -304,6 +304,7 @@ impl Fetcher {
 
         // Attempt 1: try the .json endpoint
         if let Some(json_url) = super::reddit::to_reddit_json_url(url) {
+            tokio::time::sleep(super::reddit::REDDIT_RATE_LIMIT).await;
             let json_request = self.build_reddit_request(&json_url);
             match json_request.send().await {
                 Ok(resp) if resp.status().is_success() => {
@@ -333,6 +334,7 @@ impl Fetcher {
         }
 
         // Attempt 2: fetch old.reddit.com HTML (cleaner than new Reddit)
+        tokio::time::sleep(super::reddit::REDDIT_RATE_LIMIT).await;
         let old_url = super::reddit::to_old_reddit_url(url);
         let html_request = self.build_reddit_request(&old_url);
         let resp = html_request
@@ -356,11 +358,8 @@ impl Fetcher {
         self.extract_from_html(&body, url, &final_url, status, ssl_valid, elapsed, None)
     }
 
-    /// Build a Reddit request with descriptive User-Agent and rate-limit delay.
+    /// Build a Reddit request with descriptive User-Agent without blocking thread sleep.
     fn build_reddit_request(&self, url: &str) -> reqwest::RequestBuilder {
-        // Respect rate limits — sleep before each Reddit request
-        std::thread::sleep(super::reddit::REDDIT_RATE_LIMIT);
-
         self.client
             .get(url)
             .header("User-Agent", super::reddit::REDDIT_USER_AGENT)
@@ -504,19 +503,30 @@ impl Fetcher {
             .trim()
             .to_string();
 
-        // 9. Content text
-        let content_text = article
-            .as_ref()
-            .and_then(|a| a.text_content.clone())
-            .filter(|t| !t.trim().is_empty())
-            .unwrap_or(fallback_text);
+        // 9. Content text: Prefer doc container if it has substantial content, else readability article, else fallback
+        let content_text = if let Some((_, ref dt)) = doc_container
+            && dt.len() >= 100
+        {
+            dt.clone()
+        } else {
+            article
+                .as_ref()
+                .and_then(|a| a.text_content.clone())
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or(fallback_text)
+        };
 
         // 10. Content HTML — cleaned for AI agent consumption
-        let raw_html = article
-            .as_ref()
-            .and_then(|a| a.content.clone())
-            .or_else(|| doc_container.map(|(html, _)| html))
-            .unwrap_or_else(|| format!("<div>{}</div>", html_escape(&content_text)));
+        let raw_html = if let Some((ref dh, _)) = doc_container
+            && !dh.trim().is_empty()
+        {
+            dh.clone()
+        } else {
+            article
+                .as_ref()
+                .and_then(|a| a.content.clone())
+                .unwrap_or_else(|| format!("<div>{}</div>", html_escape(&content_text)))
+        };
         let content_html = clean_content_html(&raw_html);
 
         // 11. Excerpt
@@ -582,8 +592,21 @@ impl Fetcher {
         // 19. Normalize text
         let normalized_text = normalize_text(&content_text);
 
-        // 19b. Regex entity extraction — deterministic facts for the LLM.
-        let entities = extract_entities(&content_text);
+        // 19b. Entity extraction — regex + DOM AST (code blocks, tables, headings).
+        let mut entities = extract_entities(&content_text);
+        let (code_blocks, tables, headings) = extract_dom_entities(&doc);
+        entities.code_blocks = code_blocks;
+        entities.tables = tables;
+        entities.headings = headings;
+
+        // 19c. Quality entities — heading-contextual examples/FAQs/steps/callouts
+        // plus diagram reclassification. Relevance-sized, never char-capped.
+        let (examples, faqs, steps, callouts) = extract_quality_entities(&doc);
+        entities.examples = examples;
+        entities.faqs = faqs;
+        entities.steps = steps;
+        entities.callouts = callouts;
+        entities.diagrams = classify_diagrams(&entities.code_blocks, &images);
 
         // Pre-compute values before moves
         let content_markdown = html_to_markdown(&content_html);
@@ -881,7 +904,7 @@ fn extract_from_text(
         content_type_header: String::new(),
         is_paywalled: false,
         is_valid_content: word_count >= MIN_VALID_WORDS,
-        entities: Entities::default(),
+        entities: extract_entities(body),
     })
 }
 
@@ -1319,7 +1342,8 @@ pub(crate) fn normalize_text(text: &str) -> String {
 }
 
 fn html_to_markdown(html: &str) -> String {
-    let raw_md = html2text::from_read(html.as_bytes(), 120).unwrap_or_default();
+    // Large width prevents artificial line breaks across code blocks and long links
+    let raw_md = html2text::from_read(html.as_bytes(), 10_000).unwrap_or_default();
     purge_doc_boilerplate(&raw_md)
 }
 
@@ -1394,6 +1418,28 @@ static RE_SOCIAL: LazyLock<regex::Regex> = LazyLock::new(|| {
 });
 
 /// Extract structured entities from cleaned page text.
+/// Version strings like v1.2.3, 0.3.4, 2.0.0-beta.
+static RE_VERSION: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"\b(?:v\d+\.\d+(?:\.\d+)?|\b\d+\.\d+\.\d+(?:-[a-zA-Z0-9.]+)?)\b")
+        .expect("valid version regex")
+});
+
+/// Software licenses like MIT, Apache-2.0, BSD-3-Clause, GPLv3, MPL-2.0.
+static RE_LICENSE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?i)\b(?:MIT|Apache[\s\-]2(?:\.0)?|BSD[\s\-]?(?:2|3)[\s\-]Clause|GPLv[23]|AGPLv[23]|LGPLv[23]|MPL[\s\-]2(?:\.0)?|ISC|Unlicense|CC0)\b",
+    )
+    .expect("valid license regex")
+});
+
+/// Math formulas in TeX delimiters: `$$...$$`, `\(...\)`, `\[...\]`.
+/// Single `$...$` is deliberately excluded: it collides with prices ($19.99).
+static RE_MATH: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"\$\$.+?\$\$|\\\([^\)]+?\\\)|\\\[[^\]]+?\\\]")
+        .expect("valid math regex")
+});
+
+/// Extract structured entities from cleaned page text.
 pub(crate) fn extract_entities(text: &str) -> Entities {
     fn unique(v: Vec<String>) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
@@ -1426,11 +1472,35 @@ pub(crate) fn extract_entities(text: &str) -> Entities {
             .find_iter(text)
             .map(|m| {
                 m.as_str()
-                    .trim_end_matches(['.', ')', ';', ','].as_slice())
+                    .trim_end_matches(['.', ')', ';', ',', '"', '\'', '>', ']'].as_slice())
                     .to_string()
             })
             .collect(),
     );
+    let repository_urls = urls
+        .iter()
+        .filter(|u| {
+            u.contains("github.com/")
+                || u.contains("gitlab.com/")
+                || u.contains("crates.io/crates/")
+                || u.contains("npmjs.com/package/")
+        })
+        .cloned()
+        .collect();
+
+    let package_versions = unique(
+        RE_VERSION
+            .find_iter(text)
+            .map(|m| m.as_str().trim().to_string())
+            .collect(),
+    );
+    let licenses = unique(
+        RE_LICENSE
+            .find_iter(text)
+            .map(|m| m.as_str().trim().to_string())
+            .collect(),
+    );
+
     let prices = unique(
         RE_PRICE
             .find_iter(text)
@@ -1455,8 +1525,43 @@ pub(crate) fn extract_entities(text: &str) -> Entities {
             .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
             .collect(),
     );
+    let maths = {
+        let mut seen = std::collections::HashSet::new();
+        RE_MATH
+            .find_iter(text)
+            .filter_map(|m| {
+                let raw = m.as_str().trim().to_string();
+                if raw.len() < 6 || !seen.insert(raw.to_lowercase()) {
+                    return None;
+                }
+                let display = raw.starts_with("$$") || raw.starts_with("\\[");
+                // Parenthesized `\(...\)` needs an operator, otherwise it is
+                // prose in brackets (false-positive guard). Display forms are
+                // unambiguous by delimiter alone.
+                if !display
+                    && !raw.contains(['=', '^', '_', '+', '*', '/', '\\'])
+                {
+                    return None;
+                }
+                Some(MathEntity { tex: raw, display })
+            })
+            .take(200)
+            .collect()
+    };
 
     Entities {
+        code_blocks: Vec::new(),
+        tables: Vec::new(),
+        headings: Vec::new(),
+        diagrams: Vec::new(),
+        examples: Vec::new(),
+        faqs: Vec::new(),
+        steps: Vec::new(),
+        maths,
+        callouts: Vec::new(),
+        package_versions,
+        licenses,
+        repository_urls,
         emails,
         phones,
         addresses,
@@ -1466,6 +1571,340 @@ pub(crate) fn extract_entities(text: &str) -> Entities {
         ip_addresses,
         social_handles,
     }
+}
+
+/// Syntax language from `language-*` / `lang-*` classes on a code element.
+fn block_language(elem: scraper::ElementRef<'_>, fallback: scraper::ElementRef<'_>) -> Option<String> {
+    elem.value()
+        .attr("class")
+        .or_else(|| fallback.value().attr("class"))
+        .and_then(|classes| {
+            classes.split_whitespace().find_map(|c| {
+                c.strip_prefix("language-")
+                    .or_else(|| c.strip_prefix("lang-"))
+                    .map(String::from)
+            })
+        })
+}
+
+/// Extract structured technical entities from the DOM AST (code blocks, tables, headings).
+pub(crate) fn extract_dom_entities(doc: &scraper::Html) -> (Vec<CodeBlockEntity>, Vec<TableEntity>, Vec<HeadingEntity>) {
+    let mut code_blocks = Vec::new();
+    let mut tables = Vec::new();
+    let mut headings = Vec::new();
+
+    // 1. Extract code blocks with syntax languages
+    if let Ok(pre_sel) = Selector::parse("pre") {
+        let code_child_sel = Selector::parse("code").ok();
+        for elem in doc.select(&pre_sel) {
+            let code_child = code_child_sel.as_ref().and_then(|sel| elem.select(sel).next());
+            let target_elem = code_child.unwrap_or(elem);
+            let code_text = target_elem.text().collect::<Vec<_>>().join("");
+            let trimmed = code_text.trim();
+            if trimmed.is_empty() || trimmed.len() < 10 {
+                continue;
+            }
+            let language = block_language(target_elem, elem);
+            let line_count = trimmed.lines().count();
+            code_blocks.push(CodeBlockEntity {
+                language,
+                code: trimmed.to_string(),
+                line_count,
+            });
+            if code_blocks.len() >= 50 {
+                break;
+            }
+        }
+    }
+
+    // 2. Extract tables
+    if let (Ok(table_sel), Ok(th_sel), Ok(tr_sel), Ok(td_sel), Ok(caption_sel)) = (
+        Selector::parse("table"),
+        Selector::parse("th"),
+        Selector::parse("tr"),
+        Selector::parse("td"),
+        Selector::parse("caption"),
+    ) {
+        for table in doc.select(&table_sel) {
+            let caption = table
+                .select(&caption_sel)
+                .next()
+                .map(|c| c.text().collect::<Vec<_>>().join(" ").trim().to_string());
+            let headers: Vec<String> = table
+                .select(&th_sel)
+                .map(|th| th.text().collect::<Vec<_>>().join(" ").trim().to_string())
+                .filter(|h| !h.is_empty())
+                .collect();
+            let mut rows = Vec::new();
+            for row in table.select(&tr_sel) {
+                let cells: Vec<String> = row
+                    .select(&td_sel)
+                    .map(|td| td.text().collect::<Vec<_>>().join(" ").trim().to_string())
+                    .collect();
+                if !cells.is_empty() {
+                    rows.push(cells);
+                }
+                if rows.len() >= 100 {
+                    break;
+                }
+            }
+            if !headers.is_empty() || !rows.is_empty() {
+                tables.push(TableEntity {
+                    caption,
+                    headers,
+                    rows,
+                });
+            }
+            if tables.len() >= 20 {
+                break;
+            }
+        }
+    }
+
+    // 3. Extract document outline hierarchy
+    if let Ok(heading_sel) = Selector::parse("h1, h2, h3, h4, h5, h6") {
+        for h in doc.select(&heading_sel) {
+            let tag_name = h.value().name();
+            let level = match tag_name {
+                "h1" => 1,
+                "h2" => 2,
+                "h3" => 3,
+                "h4" => 4,
+                "h5" => 5,
+                "h6" => 6,
+                _ => 2,
+            };
+            let text = h.text().collect::<Vec<_>>().join(" ").trim().to_string();
+            if !text.is_empty() {
+                let anchor = h.value().attr("id").or_else(|| h.value().attr("name")).map(String::from);
+                headings.push(HeadingEntity {
+                    level,
+                    text,
+                    anchor,
+                });
+            }
+            if headings.len() >= 100 {
+                break;
+            }
+        }
+    }
+
+    (code_blocks, tables, headings)
+}
+
+/// Diagram languages that reclassify a code block as a diagram source.
+const DIAGRAM_LANGS: &[&str] = &["mermaid", "dot", "graphviz", "plantuml", "d2", "nomnoml"];
+
+/// Alt-text / URL hints that mark an image as a diagram.
+const DIAGRAM_HINTS: &[&str] = &[
+    "diagram", "chart", "graph", "figure", "schema", "architect", "flowchart", "plot", "erd",
+    "uml",
+];
+
+/// Substrings that match a hint by accident (`photograph` contains `graph`).
+/// Denylisted so photos never inflate diagram counts (false-positive guard).
+const DIAGRAM_FP_DENY: &[&str] = &[
+    "photograph",
+    "photography",
+    "photographic",
+    "telegraph",
+    "choreograph",
+];
+
+/// True when alt text or URL signals a diagram, minus known false positives.
+fn is_diagram_image(alt: &str, url: &str) -> bool {
+    let hay = format!("{alt} {url}").to_lowercase();
+    if DIAGRAM_FP_DENY.iter().any(|d| hay.contains(d)) {
+        return false;
+    }
+    DIAGRAM_HINTS.iter().any(|h| hay.contains(h))
+}
+
+/// Reclassify diagram code blocks and diagram images into diagrams.
+/// Pure post-process over already-extracted vectors: no DOM walk, no char budget.
+/// Per-vector caps are DoS guards, not content budgets.
+pub(crate) fn classify_diagrams(
+    code_blocks: &[CodeBlockEntity],
+    images: &[ImageInfo],
+) -> Vec<DiagramEntity> {
+    let mut out = Vec::new();
+    for cb in code_blocks {
+        let is_diagram = cb
+            .language
+            .as_deref()
+            .map(|l| l.to_lowercase())
+            .is_some_and(|l| DIAGRAM_LANGS.contains(&l.as_str()));
+        if is_diagram {
+            out.push(DiagramEntity {
+                kind: cb.language.clone().unwrap_or_default(),
+                caption: None,
+                source: cb.code.clone(),
+            });
+        }
+        if out.len() >= 50 {
+            break;
+        }
+    }
+    for img in images {
+        if is_diagram_image(img.alt.as_deref().unwrap_or(""), &img.url) {
+            out.push(DiagramEntity {
+                kind: "image".to_string(),
+                caption: img.alt.clone(),
+                source: img.url.clone(),
+            });
+        }
+        if out.len() >= 50 {
+            break;
+        }
+    }
+    out
+}
+
+/// Headings that mark procedural content for step extraction.
+fn is_howto_heading(text: &str) -> bool {
+    const HINTS: &[&str] = &["how", "step", "guide", "tutorial", "instruction"];
+    let lowered = text.to_lowercase();
+    HINTS.iter().any(|h| lowered.contains(h))
+}
+
+/// Callout kind from a blockquote's leading word; defaults to `quote`.
+/// Handles GitHub-style admonitions (`[!WARNING] ...`) as well as plain
+/// leading words (`Warning: ...`). Unknown shapes stay `quote` so pull-quotes
+/// never inflate alert counts (false-positive guard).
+fn callout_kind(text: &str) -> &str {
+    const KINDS: &[&str] = &["note", "warning", "tip", "important", "caution", "danger"];
+    let trimmed = text.trim_start();
+    let first = if let Some(bracketed) = trimmed
+        .strip_prefix("[!")
+        .and_then(|rest| rest.split(']').next())
+    {
+        bracketed.to_lowercase()
+    } else {
+        trimmed
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches([':', '!', '[', ']', '*'])
+            .to_lowercase()
+    };
+    KINDS
+        .iter()
+        .find(|k| first == **k)
+        .copied()
+        .unwrap_or("quote")
+}
+
+/// Extract heading-contextual quality entities in a single document-order pass:
+/// examples (code + nearest preceding heading), FAQs (question heading + first
+/// following paragraph), procedural steps (ordered lists under how-to headings),
+/// callouts (blockquotes). Caps are DoS guards, not content budgets.
+pub(crate) fn extract_quality_entities(
+    doc: &scraper::Html,
+) -> (
+    Vec<ExampleEntity>,
+    Vec<FaqEntity>,
+    Vec<StepEntity>,
+    Vec<CalloutEntity>,
+) {
+    let mut examples = Vec::new();
+    let mut faqs = Vec::new();
+    let mut steps = Vec::new();
+    let mut callouts = Vec::new();
+
+    let Ok(sel) = Selector::parse("h1, h2, h3, h4, h5, h6, pre, blockquote, ol, p") else {
+        return (examples, faqs, steps, callouts);
+    };
+    let code_sel = Selector::parse("code").ok();
+
+    let mut last_heading: Option<String> = None;
+    let mut pending_faq: Option<String> = None;
+
+    for elem in doc.select(&sel) {
+        match elem.value().name() {
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                let text = elem.text().collect::<Vec<_>>().join(" ").trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                if text.ends_with('?') {
+                    pending_faq = Some(text.clone());
+                } else {
+                    pending_faq = None;
+                }
+                last_heading = Some(text);
+            }
+            "pre" => {
+                let code_child = code_sel
+                    .as_ref()
+                    .and_then(|sel| elem.select(sel).next());
+                let target = code_child.unwrap_or(elem);
+                let code = target.text().collect::<Vec<_>>().join("");
+                let trimmed = code.trim();
+                if trimmed.is_empty() || trimmed.len() < 10 {
+                    continue;
+                }
+                if examples.len() >= 50 {
+                    continue;
+                }
+                examples.push(ExampleEntity {
+                    context_heading: last_heading.clone(),
+                    language: block_language(target, elem),
+                    code: trimmed.to_string(),
+                });
+            }
+            "blockquote" => {
+                let text = elem.text().collect::<Vec<_>>().join(" ").trim().to_string();
+                if text.is_empty() || callouts.len() >= 50 {
+                    continue;
+                }
+                callouts.push(CalloutEntity {
+                    kind: callout_kind(&text).to_string(),
+                    text,
+                });
+            }
+            "ol" => {
+                if steps.len() >= 100 {
+                    continue;
+                }
+                let howto = last_heading.as_deref().is_some_and(is_howto_heading);
+                if !howto {
+                    continue;
+                }
+                if let Ok(li_sel) = Selector::parse("li") {
+                    for li in elem.select(&li_sel) {
+                        let title =
+                            li.text().collect::<Vec<_>>().join(" ").trim().to_string();
+                        if title.is_empty() || steps.len() >= 100 {
+                            continue;
+                        }
+                        steps.push(StepEntity {
+                            position: (steps.len() + 1) as u32,
+                            context_heading: last_heading.clone(),
+                            title,
+                        });
+                    }
+                }
+            }
+            "p" => {
+                if let Some(question) = pending_faq.take() {
+                    // Length floors filter rhetorical fragments and empty
+                    // answers (false-positive guard); multi-paragraph answers
+                    // keep their first paragraph by design (recall trade-off).
+                    if question.len() < 8 {
+                        continue;
+                    }
+                    let answer =
+                        elem.text().collect::<Vec<_>>().join(" ").trim().to_string();
+                    if answer.len() >= 10 && faqs.len() < 50 {
+                        faqs.push(FaqEntity { question, answer });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (examples, faqs, steps, callouts)
 }
 
 /// Strip web noise from HTML content using proper DOM traversal, retaining only
@@ -1485,12 +1924,21 @@ fn clean_content_html(html: &str) -> String {
     // Step 2: parse fragment via HTML5 spec parser
     let doc = Html::parse_fragment(&no_comments);
 
-    // Step 3: traverse the body and rebuild clean HTML
+    // Step 3: traverse the body and rebuild clean HTML.
+    // If <body ...> is not present (e.g. standalone container fragments like <main> or <article>),
+    // traverse from the root elements of the fragment directly.
     let mut out = String::with_capacity(no_comments.len());
     if let Ok(body_sel) = Selector::parse("body")
-        && let Some(body) = doc.select(&body_sel).next() {
-            traverse_clean(body, &mut out);
+        && let Some(body) = doc.select(&body_sel).next()
+    {
+        traverse_clean(body, &mut out);
+    } else {
+        for child in doc.root_element().children() {
+            if let Some(child_el) = scraper::ElementRef::wrap(child) {
+                traverse_clean(child_el, &mut out);
+            }
         }
+    }
 
     // Step 4: normalize whitespace
     normalize_html_whitespace(&out)
@@ -1698,6 +2146,17 @@ fn traverse_clean(el: scraper::ElementRef, out: &mut String) {
     if tag_lower == "a"
         && let Some(href) = el.value().attr("href") {
             out.push_str(&format!(" href=\"{}\"", html_escape(href)));
+        }
+
+    // Preserve code language classes (e.g. class="language-rust" or class="highlight-python")
+    if (tag_lower == "code" || tag_lower == "pre")
+        && let Some(cls) = el.value().attr("class") {
+            let lang_tokens: Vec<&str> = cls.split_whitespace()
+                .filter(|c| c.starts_with("language-") || c.starts_with("lang-") || c.starts_with("highlight-"))
+                .collect();
+            if !lang_tokens.is_empty() {
+                out.push_str(&format!(" class=\"{}\"", html_escape(&lang_tokens.join(" "))));
+            }
         }
 
     out.push('>');
@@ -2156,6 +2615,44 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_technical_entities() {
+        let text = "WebFind v0.3.4 is licensed under MIT. Visit https://github.com/Gaurav-Wankhede/webfind for details.";
+        let e = extract_entities(text);
+        assert!(e.package_versions.iter().any(|v| v == "v0.3.4"));
+        assert!(e.licenses.iter().any(|l| l == "MIT"));
+        assert!(e.repository_urls.iter().any(|u| u.contains("github.com/Gaurav-Wankhede/webfind")));
+        assert!(!e.is_empty());
+    }
+
+    #[test]
+    fn test_extract_dom_entities() {
+        let html = r#"<!DOCTYPE html><html><body>
+            <h1 id="intro">Introduction</h1>
+            <pre><code class="language-rust">fn main() { println!("hello world"); }</code></pre>
+            <table>
+                <caption>Features</caption>
+                <thead><tr><th>Feature</th><th>Latency</th></tr></thead>
+                <tbody><tr><td>Search</td><td>12ms</td></tr></tbody>
+            </table>
+        </body></html>"#;
+        let doc = Html::parse_document(html);
+        let (code_blocks, tables, headings) = extract_dom_entities(&doc);
+        assert_eq!(headings.len(), 1);
+        assert_eq!(headings[0].level, 1);
+        assert_eq!(headings[0].text, "Introduction");
+        assert_eq!(headings[0].anchor.as_deref(), Some("intro"));
+
+        assert_eq!(code_blocks.len(), 1);
+        assert_eq!(code_blocks[0].language.as_deref(), Some("rust"));
+        assert!(code_blocks[0].code.contains("fn main()"));
+
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].caption.as_deref(), Some("Features"));
+        assert_eq!(tables[0].headers, vec!["Feature", "Latency"]);
+        assert_eq!(tables[0].rows, vec![vec!["Search", "12ms"]]);
+    }
+
+    #[test]
     fn test_doc_container_and_boilerplate_purging() {
         let html = r#"<!DOCTYPE html><html><head><title>API Docs</title></head>
 <body>
@@ -2302,5 +2799,127 @@ mod tests {
         assert!(!text.contains("Get pre-approved for a mortgage"));
         assert!(!text.contains("Calculate your monthly rate"));
         assert!(!text.contains("legal advice"));
+    }
+
+    #[test]
+    fn test_quality_entities_from_doc() {
+        let html = r##"<!DOCTYPE html><html><head><title>Guide</title></head>
+<body><article>
+<h2>Quickstart Example</h2>
+<pre><code class="language-rust">fn main() { println!("hi"); }</code></pre>
+<h2>What is Raft?</h2>
+<p>Raft is a consensus algorithm.</p>
+<h2>How to install</h2>
+<ol><li>Download the binary</li><li>Run it</li></ol>
+<blockquote>Warning: do not run as root.</blockquote>
+<pre><code class="language-mermaid">graph TD; A-->B;</code></pre>
+</article></body></html>"##;
+        let doc = Html::parse_document(html);
+        let (examples, faqs, steps, callouts) = extract_quality_entities(&doc);
+        assert_eq!(examples.len(), 2);
+        assert_eq!(
+            examples[0].context_heading.as_deref(),
+            Some("Quickstart Example")
+        );
+        assert_eq!(examples[0].language.as_deref(), Some("rust"));
+        assert_eq!(faqs.len(), 1);
+        assert_eq!(faqs[0].question, "What is Raft?");
+        assert_eq!(faqs[0].answer, "Raft is a consensus algorithm.");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].position, 1);
+        assert_eq!(steps[0].title, "Download the binary");
+        assert_eq!(callouts.len(), 1);
+        assert_eq!(callouts[0].kind, "warning");
+    }
+
+    #[test]
+    fn test_classify_diagrams() {
+        let blocks = vec![
+            CodeBlockEntity {
+                language: Some("mermaid".into()),
+                code: "graph TD; A-->B;".into(),
+                line_count: 1,
+            },
+            CodeBlockEntity {
+                language: Some("rust".into()),
+                code: "fn main() {}".into(),
+                line_count: 1,
+            },
+        ];
+        let images = vec![ImageInfo {
+            url: "https://x.com/architecture-diagram.png".into(),
+            alt: Some("System architecture".into()),
+            width: None,
+            height: None,
+        }];
+        let diagrams = classify_diagrams(&blocks, &images);
+        assert_eq!(diagrams.len(), 2);
+        assert_eq!(diagrams[0].kind, "mermaid");
+        assert_eq!(diagrams[1].kind, "image");
+    }
+
+    #[test]
+    fn test_math_entities_skip_prices() {
+        let entities = extract_entities("Einstein wrote $$E=mc^2$$ in 1905. It costs $19.99 today.");
+        assert_eq!(entities.maths.len(), 1);
+        assert!(entities.maths[0].display);
+        assert!(entities.maths[0].tex.contains("E=mc^2"));
+    }
+
+    #[test]
+    fn test_quality_entities_avoid_false_positives() {
+        // photograph (contains "graph"), rhetorical fragment, nav list,
+        // pull-quote, and prose brackets must not inflate entity counts.
+        let html = r##"<!DOCTYPE html><html><head><title>FP</title></head>
+<body><article>
+<img src="team-photograph.jpg" alt="Team photograph retreat" />
+<h2>What now?</h2>
+<p>Ok.</p>
+<h2>Latest News</h2>
+<ol><li>Launch</li><li>Update</li></ol>
+<blockquote>Great product, five stars.</blockquote>
+<pre><code>plain snippet</code></pre>
+</article></body></html>"##;
+        let doc = Html::parse_document(html);
+        let diagrams = classify_diagrams(
+            &extract_dom_entities(&doc).0,
+            &extract_images(&doc),
+        );
+        assert!(diagrams.is_empty(), "photo misclassified: {diagrams:?}");
+        let (examples, faqs, steps, callouts) = extract_quality_entities(&doc);
+        assert!(faqs.is_empty(), "rhetorical fragment misclassified: {faqs:?}");
+        assert!(steps.is_empty(), "nav list misclassified: {steps:?}");
+        assert_eq!(callouts.len(), 1);
+        assert_eq!(callouts[0].kind, "quote");
+        assert_eq!(examples.len(), 1, "code without heading context lost");
+        let maths = extract_entities("see (figure 3) for details");
+        assert!(maths.maths.is_empty());
+    }
+
+    #[test]
+    fn test_quality_entities_golden_counts() {
+        // WCXB-style miniature: exact TP counts per entity on one fixture.
+        let html = r##"<!DOCTYPE html><html><head><title>Golden</title></head>
+<body><article>
+<h2>Install Example</h2>
+<pre><code class="language-bash">cargo install webfind</code></pre>
+<h2>How do I configure it?</h2>
+<p>Pass flags on the command line.</p>
+<h2>How to deploy</h2>
+<ol><li>Build the binary</li><li>Ship it</li></ol>
+<blockquote>[!WARNING] Back up first.</blockquote>
+<pre><code class="language-mermaid">graph TD; A-->B;</code></pre>
+</article></body></html>"##;
+        let doc = Html::parse_document(html);
+        let (code_blocks, _, _) = extract_dom_entities(&doc);
+        let diagrams = classify_diagrams(&code_blocks, &[]);
+        let (examples, faqs, steps, callouts) = extract_quality_entities(&doc);
+        assert_eq!(examples.len(), 2);
+        assert_eq!(diagrams.len(), 1);
+        assert_eq!(diagrams[0].kind, "mermaid");
+        assert_eq!(faqs.len(), 1);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(callouts.len(), 1);
+        assert_eq!(callouts[0].kind, "warning");
     }
 }

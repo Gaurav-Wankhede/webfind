@@ -48,6 +48,8 @@ When you use hosted frontier AI models (Claude, Codex, ChatGPT Pro), web search 
 - **High-Concurrency Web Crawler**: Full `robots.txt` compliance, domain session stickiness, adaptive rate limiting, User-Agent rotation, proxy CIDR pool routing, and headless Chromium (CDP) for dynamic SPAs.
 - **Uncapped Deep Mode (`--deep`)**: Removes crawl deadlines and backoff caps (with 90s request timeouts) to let comprehensive multi-page investigations finish reliably.
 - **High-Density Noise Stripping**: Filters scripts, styles, advertisements, tracking, navigation bars, and footers to pass token-efficient, high-signal Markdown extracts to your LLM.
+- **Intent-Based Token Modes**: `webfind fetch --mode auto|compact|relevant|full` sizes output by relevance (excerpt-first, TF-IDF extractive, semantic entity projection) with zero hardcoded char budgets.
+- **21-Slot Entity Taxonomy**: Deterministic DOM + regex classifiers for code, tables, headings, diagrams, examples, FAQs, steps, math, callouts, versions, licenses, and contacts with false-positive guards.
 - **Zero Cloud & Zero Cost**: Self-hosted on your machine. No monthly subscriptions, no rate-limited search APIs, and optional AES-256-CBC encryption at rest.
 
 ---
@@ -73,8 +75,14 @@ WebFind implements a calibrated multi-engine Reciprocal Rank Fusion (RRF) and co
 2. **Confidence-Preserving Score Normalization:** Rescales raw RRF fraction sums ($\sim 0.033$) into an intuitive $[0.40, 1.0]$ range without collapsing lowest candidates to $0.000$:
    $$S_{\text{norm}} = 0.40 + 0.60 \times \left(\frac{S - S_{\min}}{S_{\max} - S_{\min}}\right)$$
 3. **Monotonic Composite Scoring & Freshness Decay:**
-   $$S_{\text{final}} = S_{\text{norm}} \times 0.75 + \text{Freshness} \times 0.25 + B_{\text{fusion}}$$
-   Where freshness decays via half-life $\lambda = \frac{\ln(2)}{180\text{ days}}$, and $B_{\text{fusion}} \le 0.10$ rewards cross-engine corroboration. Results are strictly sorted descending ($S_1 \ge S_2 \ge \dots \ge S_n$).
+   $$S_{\text{final}} = S_{\text{RRF}} \times 0.55 + \text{Freshness} \times 0.15 + \text{Quality} \times 0.15 + \text{BM25} \times 0.10 + \text{Authority} \times 0.05 + B_{\text{fusion}}$$
+   Where freshness decays via half-life $\lambda = \frac{\ln(2)}{180\text{ days}}$, quality folds Flesch readability in, BM25 measures query keyword density, authority normalizes the institutional domain boost, and $B_{\text{fusion}} \le 0.10$ rewards cross-engine corroboration. Results are strictly sorted descending ($S_1 \ge S_2 \ge \dots \ge S_n$).
+4. **Transparent 5-Component Scoring Telemetry:** Every returned search candidate carries verified, non-null breakdown signals (`BM25`, `Vector`, `Graph`, `Fresh`, `Quality`, `Final`):
+   - `BM25`: Query keyword match density across title and snippet text.
+   - `Vector`: Dense embedding similarity or multi-engine RRF consensus score.
+   - `Graph`: PageRank centrality or domain institutional authority baseline.
+   - `Fresh`: Exponential decay score based on document publication or crawl timestamp.
+   - `Quality`: Readability metrics computed via Flesch Reading Ease and Flesch-Kincaid Grade level.
 
 ---
 
@@ -172,7 +180,7 @@ These flags apply to **`webfind deep-search`** (the autonomous multi-page crawle
 | Flag | Default | Description |
 |---|---|---|
 | `--max-pages N` | `100` | Maximum pages to crawl in this run |
-| `--limit N` | `10` | Maximum ranked search results to return |
+| `--limit N` | `5` | Maximum ranked search results to return (Top-5 high-quality; pass `3` for Top 3) |
 | `--include-content` | `true` | Include sanitized full markdown/text content per result |
 | `--dynamic` | `false` | Enable headless Chromium (CDP) for JavaScript-rendered SPAs |
 | `--deep` | `false` | Uncapped crawl mode: disables timeouts/backoff caps for exhaustive multi-page crawls |
@@ -188,13 +196,14 @@ For immediate latency-critical grounding without long-running crawls, use **`web
 | Flag | Default | Description |
 |---|---|---|
 | `--live` | `false` | Multi-engine live search (DuckDuckGo, Bing, Crates.io, arXiv, StackOverflow) |
+| `--queries <Q1,Q2>` | none | Concurrent multi-query parallel search with unified RRF fusion |
 | `--hybrid` | `false` | Hybrid search across local Turso index (BM25 + Dense Vectors + PageRank) |
-| `--limit N` | `10` | Maximum number of ranked results |
+| `--limit N` | `5` | Maximum number of ranked results (Top-5 high-quality; pass `3` for Top 3) |
 | `--output FORMAT` | `text` | Output format: `json`, `report`, `markdown`, or `text` |
 | `--output-file PATH` | `stdout` | Direct output file path for agent consumption (avoids shell redirection) |
 
 > **Crucial Distinction for AI Agents:**
-> - To fetch **instant live web hits** (1–3s): `webfind search "<query>" --live --limit 10 --output json`
+> - To fetch **instant live web hits** (1–3s): `webfind search "<query>" --live --limit 5 --output json`
 > - To execute an **exhaustive deep crawl** (15–60s+): `webfind deep-search "<query>" --max-pages 20 --dynamic`
 > - `webfind search` does **not** take `--deep`. The `--deep` flag belongs strictly to `webfind deep-search`.
 
@@ -209,13 +218,16 @@ Multi-engine concurrent search across up to 15 providers (DuckDuckGo, Bing, Crat
 
 ```bash
 # Fast live multi-engine search with direct JSON output file for agent consumption
-webfind search "distributed consensus raft protocol" --live --limit 10 --output json --output-file /tmp/search.json
+webfind search "distributed consensus raft protocol" --live --limit 5 --output json --output-file /tmp/search.json
+
+# Concurrent multi-query parallel search with unified RRF deduplication and ranking
+webfind search "Rust async runtime" --queries "Tokio vs Smol benchmarks,epoll event loop" --live --limit 5
 
 # Domain-scoped live search with language filtering
 webfind search "async runtime architecture" --live --domains "docs.rs,github.com" --language en
 
 # Search the local embedded Turso knowledge graph (BM25 + fastembed-rs vectors + PageRank)
-webfind search "distributed systems consensus" --limit 10 --hybrid
+webfind search "distributed systems consensus" --limit 5 --hybrid
 ```
 
 ### 2. Autonomous Deep Research (`webfind deep-search`)
@@ -241,6 +253,20 @@ webfind deep-search "SIMD vectorization patterns" \
 Pulls clean, high-signal Markdown from arbitrary URLs, automatically stripping cookie consent banners, navbars, ads, and tracking scripts:
 
 ```bash
+# Token-optimized compact JSON fetch (~65% token savings for AI harnesses)
+webfind fetch https://news.ycombinator.com --compact --output json
+
+# Intent-based token modes: auto picks relevant with a query, compact without
+webfind fetch https://docs.rs/tokio --mode auto --query "async runtime" --output json
+webfind fetch https://docs.rs/tokio --mode compact --output markdown
+webfind fetch https://docs.rs/tokio --mode relevant --query "spawn tasks" --output markdown
+
+# Structured entities per fetch (21 slots): code, tables, headings, diagrams,
+# examples, FAQs, steps, math, callouts, versions, licenses, contacts & more
+
+# Pure Markdown article extraction (full parsed body without HTML bloat)
+webfind fetch https://en.wikipedia.org/wiki/Rust_(programming_language) --output markdown
+
 # Fast static fetch with link and keyword extraction
 webfind fetch https://news.ycombinator.com --extract-links --output report
 

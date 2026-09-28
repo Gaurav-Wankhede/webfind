@@ -17,6 +17,7 @@ pub struct RenderContext {
     pub reading_ease: f64,
     pub grade_level: f64,
     pub excerpt: String,
+    pub content_markdown: String,
     pub keywords: Vec<Keyword>,
     pub internal_links: Vec<String>,
     pub external_links: Vec<String>,
@@ -43,6 +44,7 @@ impl RenderContext {
             reading_ease: content.reading_ease,
             grade_level: content.grade_level,
             excerpt: content.excerpt.clone(),
+            content_markdown: content.content_markdown.clone(),
             keywords: content.keywords.clone(),
             internal_links: content.internal_links.clone(),
             external_links: content.external_links.clone(),
@@ -70,9 +72,34 @@ impl RenderContext {
                 .as_ref()
                 .map(|c| c.reading_time_seconds)
                 .unwrap_or(0),
-            reading_ease: 0.0, // Not available
-            grade_level: 0.0,  // Not available
+            reading_ease: result
+                .metrics
+                .as_ref()
+                .map(|m| m.reading_ease)
+                .unwrap_or_else(|| {
+                    if !result.snippet.trim().is_empty() {
+                        textstat::flesch_reading_ease(&result.snippet)
+                    } else {
+                        65.0
+                    }
+                }),
+            grade_level: result
+                .metrics
+                .as_ref()
+                .map(|m| m.grade_level)
+                .unwrap_or_else(|| {
+                    if !result.snippet.trim().is_empty() {
+                        textstat::flesch_kincaid_grade(&result.snippet)
+                    } else {
+                        8.0
+                    }
+                }),
             excerpt: result.snippet.clone(),
+            content_markdown: result
+                .content
+                .as_ref()
+                .and_then(|c| c.markdown.clone())
+                .unwrap_or_else(|| result.snippet.clone()),
             keywords: result.keywords.clone().unwrap_or_default(),
             internal_links: vec![],
             external_links: vec![],
@@ -282,10 +309,12 @@ impl RenderFormat for MarkdownFormat {
     }
 
     fn render_excerpt(&self, ctx: &RenderContext) -> String {
-        if ctx.excerpt.is_empty() {
-            String::new()
+        if !ctx.content_markdown.is_empty() {
+            format!("{}\n\n", ctx.content_markdown.trim())
+        } else if !ctx.excerpt.is_empty() {
+            format!("> {}\n\n", ctx.excerpt.trim())
         } else {
-            format!("> {}\n\n", ctx.excerpt)
+            String::new()
         }
     }
 

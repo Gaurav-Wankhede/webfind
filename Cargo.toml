@@ -8,7 +8,7 @@ resolver = "2"
 
 [package]
 name = "webfind"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.98.0"
 description = "Self-hosted native search engine for AI agents — pure CLI, zero cost"
@@ -77,18 +77,15 @@ readability-rust = "0.1"
 unicode-normalization = "0.1"
 unicode-segmentation = "1.13"
 whatlang = "0.18"
-lingua = "1.8"
 dateparser = "0.3"
 keyword_extraction = "1.5"
 stop-words = "0.8"
 textstat = "0.1"
-htmlescape = "0.3"
 simdutf8 = "0.1"
 ahash = "0.8"
 
 # Index
 tantivy = "0.26"
-hnsw_rs = "0.3"
 fastembed = "4"
 
 # Storage
@@ -120,6 +117,9 @@ async-trait = "0.1"
 
 # Code Mode sandbox (FR-10)
 rquickjs = { version = "0.11", features = ["full-async"] }
+
+# Stage 1 and Stage 2 Neural Schemas & Decision Tensors
+webfind-models = { path = "crates/webfind-models" }
 
 # Templating / GUI
 askama = "0.13"

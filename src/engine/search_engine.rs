@@ -187,8 +187,13 @@ impl SearchEngine for InMemorySearchEngine {
                         bm25: Some(score),
                         vector: None,
                         graph: None,
-                        freshness: None,
-                        quality: None,
+                        freshness: Some(crate::engine::ranker::Ranker::freshness_score(
+                            doc.published_at.unwrap_or(doc.fetched_at),
+                        )),
+                        quality: Some(crate::engine::ranker::Ranker::quality_score(
+                            doc.reading_ease,
+                            doc.grade_level,
+                        )),
                         ax_score: None,
                         final_score: score,
                     },

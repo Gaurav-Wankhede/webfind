@@ -7,6 +7,49 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.4.0] - 2026-09-28
+
+### Added
+
+- **Fetch token modes** (`src/cli.rs`, `src/commands/fetch.rs`, `src/main.rs`) — new `--mode full|compact|relevant|auto` on `webfind fetch` plus `--query` for question-guided extraction. Compact renders excerpt-first, Relevant keeps TF-IDF-weighted overlapping sentences (order preserved, excerpt fallback), Auto resolves by intent (query present → Relevant, else Compact). No hardcoded char budgets anywhere; non-full outputs print a `Budget: mode=… ~T tokens` witness line.
+- **Semantic entity projection** (`src/commands/fetch.rs`) — JSON compact/relevant outputs now project entities: headings always travel (the document map); code, tables, diagrams, examples, and contact/factoid lists keep items overlapping the shared query/keyword/heading vocabulary. Zero-overlap noise stays behind.
+- **21-slot entity taxonomy** (`src/schema/content.rs`, `src/engine/fetcher.rs`) — six new deterministic extractors: Diagram (mermaid/dot code + diagram-hint images), Example (code + nearest heading), FAQ (question heading + first paragraph), Steps (ordered lists under how-to headings), Math (TeX delimiters, price-safe), Callout (blockquote kind incl. `[!WARNING]` admonitions).
+- **Robust detection guards** (`src/engine/fetcher.rs`) — photograph/telegraph denylist for diagrams, FAQ length floors, operator-required `\(...\)` math, pull-quote default for callouts, plus golden exact-count fixtures per entity.
+
+### Changed
+
+- **Quality-weighted live fusion** (`src/commands/search.rs`) — live result final score now folds every computed signal into ranking (`RRF×0.55 + freshness×0.15 + quality×0.15 + BM25×0.10 + authority×0.05 + fusion bonus`) instead of RRF + freshness alone, so thin generic hits can no longer win on position.
+- **Top-5 search default** (`src/cli.rs`) — `webfind search --limit` default `10` → `5` (Top-5 high-quality; pass `-l 3` for Top 3).
+
+---
+
+## [0.3.4] - 2026-09-26
+
+### Added & Refined
+
+- **Concurrent Multi-Query Parallel Search** (`src/commands/search.rs`, `src/cli.rs`, `src/main.rs`) — added `--queries <q1,q2,...>` to `webfind search`. Supports executing multiple search queries concurrently across active web engines via `try_join_all`, deduplicating discovered hits across queries by canonical URL, and fusing candidates with Reciprocal Rank Fusion (`RRF`).
+- **Token-Optimized Compact Fetch Output** (`src/schema/content.rs`, `src/commands/fetch.rs`, `src/cli.rs`) — added `--compact` flag to `webfind fetch`. Strips redundant raw `content_html`, `content_text`, and `normalized_text` representations (~65% token savings) while preserving clean Markdown (`content_markdown`), author metadata, reading metrics, and technical entities (`code_blocks`, `tables`, `headings`, `package_versions`).
+- **Full Markdown Body Rendering** (`src/render.rs`, `src/commands/fetch.rs`) — updated `MarkdownFormat::render_excerpt` to render the full parsed markdown article body when available rather than truncating to blockquoted excerpts.
+
+---
+
+## [0.3.3] - 2026-09-22
+
+### Bug Fixes & Grounded Scoring Telemetry
+
+- **Complete Score Telemetry for Live Search** (`src/commands/search.rs`) — fixed missing score telemetry where `BM25=— | Vector=— | Graph=— | Fresh=— | Quality=—` appeared on live queries. Dynamic live results now calculate:
+  - **BM25 lexical density**: Evaluated from query keyword matches across title and snippet (`keyword_match_count / keywords.len()`).
+  - **Vector proxy**: Fused multi-engine Reciprocal Rank Fusion consensus score.
+  - **Graph authority**: Domain-level institutional authority and TLD evaluation boost via `Ranker::institutional_authority_boost`.
+  - **Freshness**: Evaluated from page publication timestamp or live crawl time.
+  - **Quality score**: Computed from snippet Flesch Reading Ease and Flesch-Kincaid Grade level via `textstat`.
+- **In-Memory Search Engine Score Hydration** (`src/engine/search_engine.rs`) — populated pre-computed `quality` and `freshness` from `StructuredContent` fields during `search_bm25` instead of defaulting to `None`.
+- **Ranker Readability & Domain Authority Fallbacks** (`src/engine/ranker.rs`) — `Ranker::rank` now computes fallback quality directly on snippet/content text when `r.metrics` is absent, and surfaces institutional domain authority in `r.scores.graph` when a URL lacks an explicit PageRank cache node.
+- **REST API Route Score Normalization** (`src/api.rs`) — eliminated hardcoded `score: 0.0` and `None` placeholders in `search_handler` and `deep_search_handler` database fallback paths, passing grounded scores across all components.
+- **Dynamic Readability in HTML Renderer** (`src/render.rs`) — replaced hardcoded `reading_ease: 0.0` and `grade_level: 0.0` with dynamic Flesch metric calculation.
+
+---
+
 ## [0.3.2] - 2026-09-20
 
 ### Performance & Latency Optimization

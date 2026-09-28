@@ -38,6 +38,24 @@ impl ManifestTensor {
             || self.has_openapi_spec
     }
 
+    /// Creates a ManifestTensor with initial machine manifest flags.
+    #[inline]
+    #[must_use]
+    pub const fn new(has_llms_full_txt: bool, has_llms_txt: bool, has_ai_catalog_json: bool) -> Self {
+        Self {
+            has_llms_full_txt,
+            has_llms_txt,
+            has_ai_catalog_json,
+            has_sitemap_xml: false,
+            has_robots_txt: false,
+            has_openapi_spec: false,
+            has_rss_feed: false,
+            has_json_ld: false,
+            has_open_graph: false,
+            has_canonical_link: false,
+        }
+    }
+
     /// Converts the descriptor flags into a normalized float feature array for Burn tensor ingestion.
     #[inline]
     #[must_use]

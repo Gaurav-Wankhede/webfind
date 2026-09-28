@@ -67,7 +67,7 @@ fn main() {
 
         println!("  --> Jev Route Decision:");
         println!("      Protocol: {:?}", decision.protocol);
-        println!("      Saliency: {:.2}", decision.saliency_score);
+        println!("      Density:  {:.2}", decision.structural_density);
         println!("      Quality:  {:.2}", decision.quality_score);
         println!("      Should Fetch: {}", decision.should_fetch());
     }

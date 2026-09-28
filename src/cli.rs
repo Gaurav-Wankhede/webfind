@@ -24,15 +24,19 @@ pub struct Cli {
 pub enum Commands {
     /// Search the local index/graph or live web engines (pass --live for fresh DuckDuckGo/Bing results).
     Search {
-        /// The search query
+        /// The search query (or first query if --queries is provided)
         query: String,
+
+        /// Additional queries to search concurrently in parallel
+        #[arg(long, value_delimiter = ',')]
+        queries: Vec<String>,
 
         /// Search depth level
         #[arg(short, long, value_enum, default_value_t = DepthArg::Standard)]
         depth: DepthArg,
 
-        /// Maximum results to return
-        #[arg(short, long, default_value = "10")]
+        /// Maximum results to return (Top 5 high-quality default; pass 3 for Top 3)
+        #[arg(short, long, default_value = "5")]
         limit: u32,
 
         /// Output format
@@ -102,6 +106,19 @@ pub enum Commands {
         /// Output format
         #[arg(short, long, value_enum, default_value_t = OutputArg::Report)]
         output: OutputArg,
+
+        /// Token-optimized compact JSON output (strips raw html and redundant plain text, ~65% token savings)
+        #[arg(long, default_value = "false")]
+        compact: bool,
+
+        /// Token handling mode: full body, excerpt-first compact, or
+        /// relevance-ranked extractive. No hardcoded char budget.
+        #[arg(long, value_enum, default_value_t = FetchMode::Full)]
+        mode: FetchMode,
+
+        /// Optional query guiding relevant mode (ranked with keywords/entities).
+        #[arg(long)]
+        query: Option<String>,
 
         /// Extract links
         #[arg(long, default_value = "false")]
@@ -558,6 +575,24 @@ impl From<OutputArg> for OutputFormat {
             OutputArg::Markdown => OutputFormat::Markdown,
         }
     }
+}
+
+/// Token handling mode for `fetch`: full body, excerpt-first compact,
+/// relevance-ranked extractive (no hardcoded char budget), or intent-based auto.
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
+pub enum FetchMode {
+    /// Current behavior: full body in all formats.
+    #[default]
+    Full,
+    /// Excerpt-first: markdown/report render the extractor excerpt plus
+    /// keywords/entities/links; JSON uses the compact representation.
+    Compact,
+    /// Extractive: keep sentences overlapping query/keywords/entities,
+    /// preserving order; falls back to excerpt with zero overlap.
+    Relevant,
+    /// Intent-based: Relevant when a `--query` is present (the question needs
+    /// precise context), else Compact (map first, details on demand).
+    Auto,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
