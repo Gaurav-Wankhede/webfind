@@ -422,6 +422,8 @@ pub async fn search(
                 } else {
                     None
                 },
+                tier: None,
+                examples: None,
                 keywords: None,
                 metrics: None,
                 favicon: c.favicon.clone(),
@@ -773,6 +775,8 @@ pub async fn research(
                         html: Some(c.content_html.clone()),
                         markdown: Some(c.content_markdown.clone()),
                     }),
+                    tier: None,
+                    examples: None,
                     keywords: None,
                     metrics: None,
                     favicon: c.favicon.clone(),

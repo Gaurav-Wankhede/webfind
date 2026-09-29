@@ -54,15 +54,31 @@ fn to_report(response: &SearchResponse) -> String {
         }
 
         // Score breakdown
+        let tier_label = match result.tier {
+            Some(crate::schema::response::QualityTier::HighQualityRelevant) => " [HIGH QUALITY]",
+            Some(crate::schema::response::QualityTier::Marginal) => " [MARGINAL]",
+            Some(crate::schema::response::QualityTier::RejectedLowQuality) => " [REJECTED]",
+            None => "",
+        };
         out.push_str(&format!(
-            "      Scores: BM25={} | Vector={} | Graph={} | Fresh={} | Quality={} | Final={:.3}\n",
+            "      Scores: BM25={} | Vector={} | Graph={} | Fresh={} | Quality={} | Final={:.3}{}\n",
             fmt_opt(result.scores.bm25),
             fmt_opt(result.scores.vector),
             fmt_opt(result.scores.graph),
             fmt_opt(result.scores.freshness),
             fmt_opt(result.scores.quality),
             result.scores.final_score,
+            tier_label,
         ));
+
+        if let Some(ref examples) = result.examples {
+            out.push_str(&format!("      Examples: {} extracted block(s)\n", examples.len()));
+            for ex in examples.iter().take(2) {
+                let lang = ex.language.as_deref().unwrap_or("snippet");
+                let first_line = ex.snippet.lines().next().unwrap_or("").trim();
+                out.push_str(&format!("        • [{}] {}…\n", lang, first_line));
+            }
+        }
 
         if let Some(ref content) = result.content {
             out.push_str(&format!(
@@ -196,6 +212,8 @@ mod tests {
                     final_score: 1.0,
                 },
                 content: None,
+                tier: None,
+                examples: None,
                 keywords: None,
                 metrics: None,
                 favicon: None,

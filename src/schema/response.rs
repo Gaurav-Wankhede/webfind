@@ -22,6 +22,27 @@ pub struct SearchResponse {
 }
 
 /// Individual search result
+/// Classification tier based on threshold outcomes (Funnel Stage 1)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QualityTier {
+    #[default]
+    HighQualityRelevant,
+    Marginal,
+    RejectedLowQuality,
+}
+
+/// Extracted practical code, command, or demonstration example from content
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExtractedExample {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    pub snippet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    pub relevance: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub rank: u32,
@@ -40,6 +61,10 @@ pub struct SearchResult {
     pub site_name: Option<String>,
     pub score: f64,
     pub scores: ScoreBreakdown,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<QualityTier>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub examples: Option<Vec<ExtractedExample>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentBlock>,
     #[serde(skip_serializing_if = "Option::is_none")]

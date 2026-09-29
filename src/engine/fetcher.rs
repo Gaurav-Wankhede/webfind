@@ -1549,12 +1549,30 @@ pub(crate) fn extract_entities(text: &str) -> Entities {
             .collect()
     };
 
+    let parsed_examples = crate::engine::ranker::Ranker::extract_examples(text);
+    let code_blocks = parsed_examples
+        .iter()
+        .map(|e| CodeBlockEntity {
+            language: e.language.clone(),
+            code: e.snippet.clone(),
+            line_count: e.snippet.lines().count(),
+        })
+        .collect();
+    let examples = parsed_examples
+        .into_iter()
+        .map(|e| ExampleEntity {
+            context_heading: e.context,
+            language: e.language,
+            code: e.snippet,
+        })
+        .collect();
+
     Entities {
-        code_blocks: Vec::new(),
+        code_blocks,
         tables: Vec::new(),
         headings: Vec::new(),
         diagrams: Vec::new(),
-        examples: Vec::new(),
+        examples,
         faqs: Vec::new(),
         steps: Vec::new(),
         maths,

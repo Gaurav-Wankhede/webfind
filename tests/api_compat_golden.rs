@@ -55,6 +55,8 @@ fn sample_response() -> SearchResponse {
             html: Some("<p>Rust</p>".to_string()),
             markdown: Some("# Rust".to_string()),
         }),
+        tier: None,
+        examples: None,
         keywords: Some(vec![Keyword {
             text: "rust".to_string(),
             tfidf_score: 0.8,

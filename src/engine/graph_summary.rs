@@ -151,6 +151,8 @@ mod tests {
                 final_score: 0.0,
             },
             content: None,
+            tier: None,
+            examples: None,
             keywords: None,
             metrics: None,
             favicon: None,

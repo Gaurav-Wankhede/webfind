@@ -225,7 +225,7 @@ impl LiveIndex {
         let mut reports = Vec::with_capacity(self.engines.len());
         let mut total_hits_seen = 0;
         let target_hits = opts.max_results.saturating_mul(2).max(10);
-        let min_engines = 3.min(self.engines.len());
+        let min_engines = 2.min(self.engines.len());
         let max_duration = std::time::Duration::from_millis(opts.timeout_ms.max(1000));
 
         loop {
@@ -243,14 +243,14 @@ impl LiveIndex {
                     total_hits_seen += report.hits.len();
                     reports.push(report);
 
-                    // Speculative early return: if we already received responses from key engines
-                    // and accumulated ample candidate hits, do not stall on slow/hanging endpoints.
+                    // Adaptive fast quorum: if we have collected responses from at least min_engines
+                    // and hit our target candidate volume, exit early to eliminate tail latency (P99 drop).
                     if reports.len() >= min_engines
                         && total_hits_seen >= target_hits
-                        && start.elapsed().as_millis() >= 750
+                        && start.elapsed().as_millis() >= 400
                     {
                         tracing::debug!(
-                            "LiveIndex early completion: got {} hits from {} engines in {}ms",
+                            "LiveIndex fast quorum satisfied: got {} hits from {} engines in {}ms",
                             total_hits_seen,
                             reports.len(),
                             start.elapsed().as_millis()

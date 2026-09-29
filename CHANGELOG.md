@@ -7,6 +7,25 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.5.0] - 2026-09-29
+
+### Added
+
+- **Two-Stage Zero-Heap Candidate Funnel** (`src/engine/ranker.rs`) — Introduced `ZeroHeapFunnelEngine` utilizing a stack-allocated fixed array `[CandidateDescriptor; 128]` for L1/L2 cache-resident candidate evaluation with zero dynamic heap allocations.
+- **Dual-Gate Threshold Cutoffs** (`src/engine/ranker.rs`, `src/schema/response.rs`) — Added deterministic classification gates:
+  - *Gate 1 (Semantic Relevance)*: Vector Similarity $\ge 0.60$ cutoff to purge off-topic noise early.
+  - *Gate 2 (Quality & Density)*: Readability score $\ge 0.45$ to drop thin scrapings and cookie banners.
+  - Added `QualityTier` classification enum (`high_quality_relevant`, `marginal`, `rejected_low_quality`).
+- **Deterministic Practical Example Extraction** (`src/engine/ranker.rs`, `src/engine/fetcher.rs`, `src/schema/response.rs`) — Introduced `ExtractedExample` and `Ranker::extract_examples` to isolate fenced code blocks, CLI commands, and API payloads directly into candidate models with a $+0.05$ ranking boost for practical utility.
+- **Live Classification Badges** (`src/report.rs`) — CLI search reports now explicitly surface threshold outcomes (`[HIGH QUALITY]`, `[MARGINAL]`, `[REJECTED]`) and extracted code snippet counts.
+
+### Changed & Optimized
+
+- **Adaptive Fast Quorum Latency Optimization** (`src/engine/web_index.rs`) — Refined `LiveIndex::search` to return speculatively once $\ge 2$ active engines respond with sufficient target candidate hits after $400\text{ms}$, slashing P99 tail latency across live multi-engine search dispatches.
+- **Unified Entity Code Extraction** (`src/engine/fetcher.rs`) — Direct deterministic extraction of code blocks and usage examples wired into `extract_entities` on every document fetch without neural model dependencies.
+
+---
+
 ## [0.4.0] - 2026-09-28
 
 ### Added

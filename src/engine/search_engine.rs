@@ -198,6 +198,8 @@ impl SearchEngine for InMemorySearchEngine {
                         final_score: score,
                     },
                     content: None,
+                    tier: None,
+                    examples: None,
                     keywords: None,
                     metrics: None,
                     favicon: None,

@@ -29,6 +29,97 @@ const H_AX: f64 = 0.12;
 /// Diversity penalty factor per prior occurrence of the same domain.
 const DIVERSITY_PENALTY: f64 = 0.85;
 
+/// Stage 1 Funnel Cutoff Thresholds:
+pub const FUNNEL_SEMANTIC_THRESHOLD: f64 = 0.60;
+pub const FUNNEL_QUALITY_THRESHOLD: f64 = 0.45;
+pub const MAX_STACK_CANDIDATES: usize = 128;
+
+/// Compact descriptor representing a candidate result in stack memory without heap allocation.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CandidateDescriptor {
+    pub index: usize,
+    pub vector_sim: f32,
+    pub quality_metric: f32,
+    pub bm25_score: f32,
+    pub freshness_score: f32,
+    pub graph_score: f32,
+    pub example_count: u8,
+    pub final_rank_score: f32,
+    pub passed_gates: bool,
+}
+
+/// Zero-Heap Candidate Funnel Engine for high-throughput L1/L2 cache ranking.
+pub struct ZeroHeapFunnelEngine {
+    pub buffer: [CandidateDescriptor; MAX_STACK_CANDIDATES],
+    pub count: usize,
+    pub semantic_threshold: f32,
+    pub quality_threshold: f32,
+}
+
+impl ZeroHeapFunnelEngine {
+    pub fn new(semantic_threshold: f32, quality_threshold: f32) -> Self {
+        Self {
+            buffer: [CandidateDescriptor {
+                index: 0,
+                vector_sim: 0.0,
+                quality_metric: 0.0,
+                bm25_score: 0.0,
+                freshness_score: 0.0,
+                graph_score: 0.0,
+                example_count: 0,
+                final_rank_score: 0.0,
+                passed_gates: false,
+            }; MAX_STACK_CANDIDATES],
+            count: 0,
+            semantic_threshold,
+            quality_threshold,
+        }
+    }
+
+    /// Evaluates candidate through Stage 1 dual-gate thresholds and pushes if buffer allows.
+    #[inline(always)]
+    pub fn ingest_candidate(&mut self, mut desc: CandidateDescriptor) -> bool {
+        // Dual-gate filtering
+        let passes_semantic = desc.vector_sim >= self.semantic_threshold;
+        let passes_quality = desc.quality_metric >= self.quality_threshold;
+        desc.passed_gates = passes_semantic && passes_quality;
+
+        if self.count < MAX_STACK_CANDIDATES {
+            let example_bonus = if desc.example_count > 0 { 0.05 } else { 0.0 };
+            desc.final_rank_score = 0.40 * desc.vector_sim
+                + 0.20 * desc.quality_metric
+                + 0.15 * desc.bm25_score
+                + 0.10 * desc.freshness_score
+                + 0.10 * desc.graph_score
+                + example_bonus;
+
+            self.buffer[self.count] = desc;
+            self.count += 1;
+            desc.passed_gates
+        } else {
+            false
+        }
+    }
+
+    /// In-place slice sort on stack buffer (zero dynamic heap allocation).
+    #[inline]
+    pub fn rank_and_slice(&mut self) -> &[CandidateDescriptor] {
+        let active = &mut self.buffer[..self.count];
+        // Sort descending: items that passed both gates first, then by final score.
+        active.sort_unstable_by(|a, b| {
+            b.passed_gates
+                .cmp(&a.passed_gates)
+                .then_with(|| {
+                    b.final_rank_score
+                        .partial_cmp(&a.final_rank_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        active
+    }
+}
+
 impl Ranker {
     pub fn new() -> Self {
         Self
@@ -77,6 +168,46 @@ impl Ranker {
 
     /// Re-rank results by combining BM25 with freshness, quality, graph, vector,
     /// authority, machine-readability (S_AX) and domain-diversity signals.
+    /// Extracts high-value code blocks or CLI usage examples from markdown/text.
+    pub fn extract_examples(text: &str) -> Vec<crate::schema::response::ExtractedExample> {
+        let mut examples = Vec::new();
+        let mut in_block = false;
+        let mut current_lang = None;
+        let mut current_snippet = Vec::new();
+
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("```") {
+                if in_block {
+                    // Ending block
+                    let snippet = current_snippet.join("\n");
+                    if !snippet.trim().is_empty() {
+                        examples.push(crate::schema::response::ExtractedExample {
+                            language: current_lang.take(),
+                            snippet,
+                            context: None,
+                            relevance: 1.0,
+                        });
+                    }
+                    current_snippet.clear();
+                    in_block = false;
+                } else {
+                    // Starting block
+                    in_block = true;
+                    let tag = trimmed.trim_start_matches("```").trim();
+                    current_lang = if !tag.is_empty() {
+                        Some(tag.to_string())
+                    } else {
+                        None
+                    };
+                }
+            } else if in_block {
+                current_snippet.push(line);
+            }
+        }
+        examples
+    }
+
     pub fn rank(
         &self,
         mut results: Vec<SearchResult>,
@@ -94,6 +225,7 @@ impl Ranker {
         // Build domain authority from per-URL graph scores.
         let domain_authority = Self::domain_authority(graph_scores, &results);
 
+        // Pre-evaluate candidate quality, freshness, and examples
         for r in results.iter_mut() {
             let time_ref = r.published_at.unwrap_or(r.crawled_at);
             let freshness = Self::freshness_score(time_ref);
@@ -141,6 +273,19 @@ impl Ranker {
             let ax = Self::calculate_ax_score(r);
             r.scores.ax_score = ax;
 
+            // Extract practical code or usage examples
+            let text_source = r
+                .content
+                .as_ref()
+                .and_then(|c| c.markdown.as_ref().or(Some(&c.text)))
+                .map(|s| s.as_str())
+                .unwrap_or(&r.snippet);
+            let extracted = Self::extract_examples(text_source);
+            let example_count = extracted.len();
+            if !extracted.is_empty() {
+                r.examples = Some(extracted);
+            }
+
             // Compute score dynamically over present signals without phantom defaults.
             let (quality_term, active_w_quality) = match quality {
                 Some(q) => (w_quality * q, w_quality),
@@ -154,6 +299,7 @@ impl Ranker {
                 Some(a) => (w_ax * a, w_ax),
                 None => (0.0, 0.0),
             };
+            let example_bonus = if example_count > 0 { 0.05 } else { 0.0 };
             let weight_sum = w_bm25 + w_fresh + active_w_quality + active_w_graph + w_vector + w_authority + active_w_ax;
             let raw_final = w_bm25 * r.scores.bm25.unwrap_or(0.0)
                 + w_fresh * freshness
@@ -161,7 +307,8 @@ impl Ranker {
                 + graph_term
                 + w_vector * vector
                 + w_authority * authority
-                + ax_term;
+                + ax_term
+                + example_bonus;
             let final_score = if weight_sum > 0.0 {
                 (raw_final / weight_sum).clamp(0.001, 1.0)
             } else {
@@ -170,12 +317,59 @@ impl Ranker {
 
             r.scores.final_score = final_score;
             r.score = final_score;
+
+            // Assign QualityTier according to dual thresholds
+            let q_val = quality.unwrap_or(0.5);
+            let v_val = if use_vector { vector } else { 1.0 };
+            let tier = if v_val >= FUNNEL_SEMANTIC_THRESHOLD && q_val >= FUNNEL_QUALITY_THRESHOLD {
+                crate::schema::response::QualityTier::HighQualityRelevant
+            } else if v_val >= FUNNEL_SEMANTIC_THRESHOLD || q_val >= FUNNEL_QUALITY_THRESHOLD {
+                crate::schema::response::QualityTier::Marginal
+            } else {
+                crate::schema::response::QualityTier::RejectedLowQuality
+            };
+            r.tier = Some(tier);
         }
 
+        // Execute Zero-Heap Stack-Allocated Funnel sorting over candidate descriptors
+        let mut funnel = ZeroHeapFunnelEngine::new(
+            FUNNEL_SEMANTIC_THRESHOLD as f32,
+            FUNNEL_QUALITY_THRESHOLD as f32,
+        );
+        for (idx, r) in results.iter().enumerate().take(MAX_STACK_CANDIDATES) {
+            let desc = CandidateDescriptor {
+                index: idx,
+                vector_sim: r.scores.vector.unwrap_or(1.0) as f32,
+                quality_metric: r.scores.quality.unwrap_or(0.5) as f32,
+                bm25_score: r.scores.bm25.unwrap_or(0.0) as f32,
+                freshness_score: r.scores.freshness.unwrap_or(0.0) as f32,
+                graph_score: r.scores.graph.unwrap_or(0.0) as f32,
+                example_count: r.examples.as_ref().map(|e| e.len() as u8).unwrap_or(0),
+                final_rank_score: r.score as f32,
+                passed_gates: r.tier == Some(crate::schema::response::QualityTier::HighQualityRelevant),
+            };
+            funnel.ingest_candidate(desc);
+        }
+
+        // Sort descending: High quality & relevant results stay on top
         results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            let tier_order_a = match a.tier {
+                Some(crate::schema::response::QualityTier::HighQualityRelevant) => 2,
+                Some(crate::schema::response::QualityTier::Marginal) => 1,
+                _ => 0,
+            };
+            let tier_order_b = match b.tier {
+                Some(crate::schema::response::QualityTier::HighQualityRelevant) => 2,
+                Some(crate::schema::response::QualityTier::Marginal) => 1,
+                _ => 0,
+            };
+            tier_order_b
+                .cmp(&tier_order_a)
+                .then_with(|| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
         });
 
         // Apply a domain-diversity penalty so one domain cannot dominate the top results.
@@ -452,6 +646,8 @@ mod tests {
                 final_score: 0.0,
             },
             content: None,
+            tier: None,
+            examples: None,
             keywords: None,
             metrics: Some(ContentMetrics {
                 reading_ease: 70.0,
@@ -534,6 +730,8 @@ mod tests {
                 final_score: 0.0,
             },
             content: None,
+            tier: None,
+            examples: None,
             keywords: None,
             metrics: Some(ContentMetrics {
                 reading_ease: 70.0,
@@ -621,6 +819,8 @@ mod tests {
                 html: None,
                 markdown: Some("### Events\n```bash\ncurl https://api.example.com/events\n```".to_string()),
             }),
+            tier: None,
+            examples: None,
             keywords: None,
             metrics: None,
             favicon: None,
@@ -644,5 +844,75 @@ mod tests {
         r.mcp_server = None;
         r.content = None;
         assert_eq!(Ranker::calculate_ax_score(&r), None);
+    }
+
+    #[test]
+    fn test_zero_heap_funnel_gate_filtering() {
+        use super::*;
+
+        let mut funnel = ZeroHeapFunnelEngine::new(0.60, 0.45);
+
+        // Candidate 1: High semantic & high quality (passes)
+        let pass_cand = CandidateDescriptor {
+            index: 0,
+            vector_sim: 0.85,
+            quality_metric: 0.75,
+            bm25_score: 0.5,
+            freshness_score: 1.0,
+            graph_score: 0.2,
+            example_count: 2,
+            final_rank_score: 0.0,
+            passed_gates: false,
+        };
+
+        // Candidate 2: Low semantic (fails Gate 1)
+        let fail_vector = CandidateDescriptor {
+            index: 1,
+            vector_sim: 0.30,
+            quality_metric: 0.80,
+            bm25_score: 0.5,
+            freshness_score: 1.0,
+            graph_score: 0.2,
+            example_count: 0,
+            final_rank_score: 0.0,
+            passed_gates: false,
+        };
+
+        // Candidate 3: Low quality (fails Gate 2)
+        let fail_quality = CandidateDescriptor {
+            index: 2,
+            vector_sim: 0.90,
+            quality_metric: 0.20,
+            bm25_score: 0.5,
+            freshness_score: 1.0,
+            graph_score: 0.2,
+            example_count: 0,
+            final_rank_score: 0.0,
+            passed_gates: false,
+        };
+
+        assert!(funnel.ingest_candidate(pass_cand));
+        assert!(!funnel.ingest_candidate(fail_vector));
+        assert!(!funnel.ingest_candidate(fail_quality));
+
+        let ranked = funnel.rank_and_slice();
+        assert_eq!(ranked.len(), 3);
+        // The one that passed both gates must be sorted first
+        assert!(ranked[0].passed_gates);
+        assert_eq!(ranked[0].index, 0);
+        // Failed gate candidates must follow
+        assert!(!ranked[1].passed_gates);
+        assert!(!ranked[2].passed_gates);
+    }
+
+    #[test]
+    fn test_extract_examples() {
+        let text = "Here is a guide:\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\nAnd a CLI command:\n```bash\ncargo build --release\n```\n";
+        let examples = Ranker::extract_examples(text);
+        assert_eq!(examples.len(), 2);
+        assert_eq!(examples[0].language.as_deref(), Some("rust"));
+        assert!(examples[0].snippet.contains("println"));
+        assert_eq!(examples[1].language.as_deref(), Some("bash"));
+        assert!(examples[1].snippet.contains("cargo build"));
     }
 }

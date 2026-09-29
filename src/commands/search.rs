@@ -99,6 +99,8 @@ fn store_hit_to_result(
                 markdown: None,
             }
         }),
+        tier: None,
+        examples: None,
         keywords: None,
         metrics: None,
         favicon: None,
@@ -213,6 +215,8 @@ fn live_fused_to_result(
                 markdown: None,
             }
         }),
+        tier: None,
+        examples: None,
         keywords: None,
         metrics: None,
         favicon: None,
