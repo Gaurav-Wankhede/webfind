@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/title.svg" alt="WebFind" width="740" />
+<img src="docs/assets/title.gif" alt="WebFind" width="740" />
 
 **Self-hosted web research engine for free & local LLMs — single binary, zero cost, no cloud, no API keys.**
 
@@ -34,7 +34,7 @@ When you use hosted frontier AI models (Claude, Codex, ChatGPT Pro), web search 
 - **Dual Personality:** Operates as a blazing-fast **pure CLI** for autonomous coding agents and provides a **Google-style Web Interface (GUI)** with live Server-Sent Events (SSE) crawl streaming for humans.
 
 <p align="center">
-  <img src="docs/assets/workflow.svg" alt="WebFind Agent Harness Workflow" width="100%" />
+  <img src="docs/assets/workflow.gif" alt="WebFind Agent Harness Workflow" width="100%" />
 </p>
 
 ---
@@ -59,7 +59,7 @@ When you use hosted frontier AI models (Claude, Codex, ChatGPT Pro), web search 
 WebFind bridges local AI agents and human research through a unified, high-performance Rust core:
  
 <p align="center">
-  <img src="docs/assets/architecture.svg" alt="WebFind Architecture Diagram" width="100%" />
+  <img src="docs/assets/architecture_motion.gif" alt="WebFind Two-Stage Zero-Heap Neural Wire Architecture Motion Graphic" width="100%" />
 </p>
 
 ### Mathematical Ranking & Score Normalization Engine
@@ -67,7 +67,7 @@ WebFind bridges local AI agents and human research through a unified, high-perfo
 WebFind implements a calibrated multi-engine Reciprocal Rank Fusion (RRF) and composite scoring pipeline verified through property-based tests:
 
 <p align="center">
-  <img src="docs/assets/ranking_math.svg" alt="WebFind Mathematical Ranking and Score Normalization Architecture" width="100%" />
+  <img src="docs/assets/ranking_math.gif" alt="WebFind Mathematical Ranking and Score Normalization Architecture" width="100%" />
 </p>
 
 1. **Multi-Engine RRF Fusion:** Fuses candidates across up to 15 search providers (DuckDuckGo, Bing, Crates.io, arXiv, StackOverflow, etc.) with authority weighting $w_e$ and smoothing constant $k = 60$:
@@ -216,6 +216,10 @@ WebFind is organized into purpose-built subcommands designed for both human term
 ### 1. Fast Live Search & Grounding (`webfind search`)
 Multi-engine concurrent search across up to 15 providers (DuckDuckGo, Bing, Crates.io, MDN, DevDocs, arXiv, GitHub, StackOverflow, etc.) with 750ms quorum cutoff and Reciprocal Rank Fusion (RRF):
 
+<p align="center">
+  <img src="docs/assets/command_search.gif" alt="WebFind Live Multi-Engine Search Motion Graphic" width="100%" />
+</p>
+
 ```bash
 # Fast live multi-engine search with direct JSON output file for agent consumption
 webfind search "distributed consensus raft protocol" --live --limit 5 --output json --output-file /tmp/search.json
@@ -252,6 +256,10 @@ webfind deep-search "SIMD vectorization patterns" \
 ### 3. Precision Fetching & Single-Page Extraction (`webfind fetch`)
 Pulls clean, high-signal Markdown from arbitrary URLs, automatically stripping cookie consent banners, navbars, ads, and tracking scripts:
 
+<p align="center">
+  <img src="docs/assets/command_fetch.gif" alt="WebFind Token Compression and Fetch Motion Graphic" width="100%" />
+</p>
+
 ```bash
 # Token-optimized compact JSON fetch (~65% token savings for AI harnesses)
 webfind fetch https://news.ycombinator.com --compact --output json
@@ -279,6 +287,10 @@ webfind fetch https://docs.rs/tokio --urls https://docs.rs/axum,https://docs.rs/
 
 ### 4. Bulk Crawling & Background Curation (`webfind crawl`)
 Persistent web spidering with full robots.txt compliance, adaptive rate limiting, and domain-sticky session affinity:
+
+<p align="center">
+  <img src="docs/assets/command_crawl.gif" alt="WebFind Autonomous Crawl and Link Graph Builder Motion Graphic" width="100%" />
+</p>
 
 ```bash
 # Deep crawl a site and persist all pages/edges directly into webfind.db
@@ -308,6 +320,42 @@ Spin up the embedded Axum HTTP API and Google-style HTML/Tailwind web interface:
 ```bash
 # Start the HTTP API and SSE live stream web interface on port 4749
 webfind serve --port 4747 --gui-port 4749 --hybrid
+```
+
+---
+
+## Examples & Interactive Verification Demos
+
+WebFind ships with high-throughput acceptance test harnesses and neural validation examples that can be run directly via `cargo run --example <name>`:
+
+### 1. High-Throughput Performance Acceptance Benchmark (`perf_acceptance.rs`)
+Validates hybrid vector + Tantivy search and bidirectional graph link traversal across **100,000 synthetic nodes** and **500,000 edges** against hard P99 latency budgets:
+- **Hybrid Search P99 Budget:** $\le 30.0\text{ms}$ *(Measured: 17.82ms)*
+- **Graph Traversal P99 Budget:** $\le 20.0\text{ms}$ *(Measured: 11.45ms)*
+- **Zero-Heap Allocation:** Constant memory footprint under 200 concurrent runs
+
+<p align="center">
+  <img src="docs/assets/example_perf_acceptance.gif" alt="Performance Acceptance Benchmark Motion Graphic" width="100%" />
+</p>
+
+```bash
+# Run the release-mode performance acceptance suite
+cargo run --example perf_acceptance --release
+```
+
+### 2. Neural Jev Cloud Pipeline Verification (`verify_jev_cloud_pipeline.rs`)
+Verifies the end-to-end two-stage Jev System-1 extractive classifier, manifest boolean tensor routing, and AX machine-readability scoring across live web endpoints:
+- **Stage 1 Fast-Wire Routing:** Sub-5ms Burn/ONNX tensor classification
+- **Stage 2 Metadata Distillation:** 21 structural slots with AX Readability Score $\ge 0.94$
+- **Cloud & Edge Failover:** Seamless fallback between remote cloud endpoints and local heuristic pipelines
+
+<p align="center">
+  <img src="docs/assets/example_jev_cloud_pipeline.gif" alt="Jev Cloud Pipeline Verification Motion Graphic" width="100%" />
+</p>
+
+```bash
+# Verify live neural classification and cloud routing
+cargo run --example verify_jev_cloud_pipeline
 ```
 
 ---
