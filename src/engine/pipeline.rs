@@ -113,11 +113,6 @@ impl FetchPipeline {
         (success, failure, errors)
     }
 
-    /// Fetches and distills a URL using Stage 1 Jev Neural Routing and Stage 2 BLAKE3 Distillation.
-    pub async fn fetch_with_jev_router(&self, client: reqwest::Client, target_url: &str) -> anyhow::Result<webfind_models::DistilledDocument> {
-        let router = super::jev_router::JevRouter::new(client);
-        router.fetch_and_distill(target_url).await
-    }
 }
 
 #[cfg(test)]

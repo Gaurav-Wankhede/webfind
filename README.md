@@ -343,21 +343,6 @@ Validates hybrid vector + Tantivy search and bidirectional graph link traversal 
 cargo run --example perf_acceptance --release
 ```
 
-### 2. Neural Jev Cloud Pipeline Verification (`verify_jev_cloud_pipeline.rs`)
-Verifies the end-to-end two-stage Jev System-1 extractive classifier, manifest boolean tensor routing, and AX machine-readability scoring across live web endpoints:
-- **Stage 1 Fast-Wire Routing:** Sub-5ms Burn/ONNX tensor classification
-- **Stage 2 Metadata Distillation:** 21 structural slots with AX Readability Score $\ge 0.94$
-- **Cloud & Edge Failover:** Seamless fallback between remote cloud endpoints and local heuristic pipelines
-
-<p align="center">
-  <img src="docs/assets/example_jev_cloud_pipeline.gif" alt="Jev Cloud Pipeline Verification Motion Graphic" width="100%" />
-</p>
-
-```bash
-# Verify live neural classification and cloud routing
-cargo run --example verify_jev_cloud_pipeline
-```
-
 ---
 
 ## REST API Endpoints

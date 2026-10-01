@@ -12,9 +12,6 @@ use crate::storage::cache_store::ReCrawlPolicy;
     subcommand_required = false
 )]
 pub struct Cli {
-    /// Print the AI agent skills reference (progressive disclosure, ~800 tokens) and exit
-    #[arg(long, hide = true)]
-    pub print_skills: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,

@@ -9,16 +9,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod commands;
 
-// Embedded skills reference for AI agents (progressive disclosure)
-const SKILLS_MD: &str = include_str!("../webfind/SKILL.md");
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Check for WEBFIND_PRINT_SKILLS=1 early (before CLI parsing)
-    if std::env::var("WEBFIND_PRINT_SKILLS").is_ok() {
-        print!("{}", SKILLS_MD);
-        return Ok(());
-    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -31,11 +23,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Handle --print-skills flag (also triggered by WEBFIND_PRINT_SKILLS=1)
-    if cli.print_skills {
-        print!("{}", SKILLS_MD);
-        return Ok(());
-    }
+
 
     let Some(command) = cli.command else {
         // No subcommand provided and no --print-skills: show help

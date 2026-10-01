@@ -1,8 +1,6 @@
 [workspace]
 members = [
     ".",
-    "crates/webfind-models",
-    "crates/webfind-trainer",
 ]
 resolver = "2"
 
@@ -117,9 +115,6 @@ async-trait = "0.1"
 
 # Code Mode sandbox (FR-10)
 rquickjs = { version = "0.11", features = ["full-async"] }
-
-# Stage 1 and Stage 2 Neural Schemas & Decision Tensors
-webfind-models = { path = "crates/webfind-models" }
 
 # Templating / GUI
 askama = "0.13"
