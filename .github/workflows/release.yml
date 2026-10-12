@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: webfind
+          - os: macos-13
+            target: x86_64-apple-darwin
+            binary_name: webfind
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: webfind
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: webfind.exe
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/
+          cd dist
+          tar -czf webfind-${{ matrix.target }}.tar.gz ${{ matrix.binary_name }}
+          shasum -a 256 webfind-${{ matrix.target }}.tar.gz > webfind-${{ matrix.target }}.tar.gz.sha256
+
+      - name: Package binary (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/
+          cd dist
+          7z a webfind-${{ matrix.target }}.zip ${{ matrix.binary_name }}
+          sha256sum webfind-${{ matrix.target }}.zip > webfind-${{ matrix.target }}.zip.sha256
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/webfind-${{ matrix.target }}.tar.gz
+            dist/webfind-${{ matrix.target }}.tar.gz.sha256
+            dist/webfind-${{ matrix.target }}.zip
+            dist/webfind-${{ matrix.target }}.zip.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
