@@ -4,6 +4,8 @@
 
 **Self-hosted web research engine for free & local LLMs — single binary, zero cost, no cloud, no API keys.**
 
+[![Crates.io](https://img.shields.io/crates/v/webfind.svg?style=flat-square&color=orange)](https://crates.io/crates/webfind)
+[![Homebrew](https://img.shields.io/badge/homebrew-tap-yellow.svg?style=flat-square&logo=homebrew)](https://github.com/Gaurav-Wankhede/homebrew-tap)
 [![Rust 1.98+](https://img.shields.io/badge/rust-1.98%2B-blue.svg?logo=rust&style=flat-square)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
 [![Platform: Linux | macOS | Windows](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg?style=flat-square)](#quick-start--installation)
@@ -114,16 +116,26 @@ source "$HOME/.cargo/env"
 
 ## Quick Start & Installation
 
+### Option 1: Homebrew (macOS & Linux) — Fastest (1 Second)
 ```bash
-# Clone the repository
+brew install Gaurav-Wankhede/tap/webfind
+```
+
+### Option 2: Cargo (Crates.io)
+```bash
+cargo install webfind
+```
+
+### Option 3: Universal One-Line Shell Installer (macOS & Linux)
+```bash
+curl -fsSL https://raw.githubusercontent.com/Gaurav-Wankhede/webfind/main/install.sh | sh
+```
+
+### Option 4: Build From Source
+```bash
 git clone https://github.com/Gaurav-Wankhede/webfind.git
 cd webfind
-
-# Build the optimized release binary
 cargo build --release
-
-# Install globally to system PATH (~/.cargo/bin)
-cargo install --path . --force && cargo clean
 ```
 
 Verify the installation:
