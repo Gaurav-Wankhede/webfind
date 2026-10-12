@@ -132,6 +132,42 @@ pub fn sanitize_url(raw_url: &str) -> Result<String, SecurityGateError> {
     Ok(parsed.to_string())
 }
 
+const ADULT_NSFW_TOKENS: &[&str] = &[
+    "porn", "pornography", "xxx", "sex", "erotic", "adult content",
+    "hentai", "nsfw", "escort", "nude", "nudity", "webcam", "onlyfans",
+    "camgirl", "dating adult", "xvideos", "pornhub", "redtube", "xnxx",
+    "milf", "bdsm", "fetish", "erotica", "fuck", "pussy", "penis",
+];
+
+const AD_TRACKING_DOMAINS: &[&str] = &[
+    "doubleclick.net", "googlesyndication.com", "adnxs.com", "criteo.com",
+    "taboola.com", "outbrain.com", "advertising.com", "popads.net",
+    "propellerads.com", "adroll.com", "zedo.com", "adsterra.com",
+];
+
+/// Hard quarantine gate: Returns true if any text contains adult/NSFW signals.
+pub fn is_adult_or_nsfw_text(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    for token in ADULT_NSFW_TOKENS {
+        // Match word boundaries or exact substrings
+        if lower.contains(token) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Hard quarantine gate: Returns true if domain is known ad-network or tracking hub.
+pub fn is_ad_or_tracker_domain(domain: &str) -> bool {
+    let d = domain.to_lowercase();
+    for ad_domain in AD_TRACKING_DOMAINS {
+        if d == *ad_domain || d.ends_with(&format!(".{ad_domain}")) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

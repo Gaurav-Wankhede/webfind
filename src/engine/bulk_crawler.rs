@@ -854,6 +854,8 @@ impl BulkDomainCrawler {
                     from: from.to_string(),
                     to: to.to_string(),
                     anchor_text: anchor_text.map(String::from),
+                    // Links discovered while crawling are ordinary hyperlinks.
+                    ..Default::default()
                 })
                 .await;
         }

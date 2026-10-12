@@ -5,6 +5,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::engine::crawl_graph::CrawlGraphStore;
+use crate::storage::turso_store::QualityVerdict;
 use crate::engine::embedder::Embedder;
 use crate::schema::content::{PageContentRecord, StructuredContent};
 
@@ -91,6 +92,44 @@ async fn process_job(
     let _ = graph_store
         .mark_crawl_job_status(&job_id, "processing", None)
         .await;
+
+    // Near-duplicate gate: reject syndicated/near-identical pages before they
+    // are persisted. A rejection is a SUCCESS-with-skip, not a failure, so the
+    // job is marked done (never "failed" — that would trigger a pointless retry).
+    match graph_store
+        .find_duplicate(&job.url, &job.content.content_text)
+        .await
+    {
+        Ok(Some(canonical)) => {
+            tracing::debug!(
+                "near-duplicate of {} rejected at ingest: {}",
+                canonical,
+                job.url
+            );
+            let _ = graph_store
+                .mark_crawl_job_status(&job_id, "done", None)
+                .await;
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(e) => {
+            // A gate failure must not silently drop content: fall through and
+            // persist, logging the reason.
+            tracing::warn!("near-duplicate check failed for {}: {e}", job.url);
+        }
+    }
+
+    // Thin-content quality gate: reject pages with no substantive value.
+    // Same success-with-skip semantics as the dedup gate.
+    if let QualityVerdict::Reject(reason) =
+        crate::storage::turso_store::TursoStore::check_quality(&job.content.content_text)
+    {
+        tracing::debug!("thin content rejected at ingest ({}): {}", reason, job.url);
+        let _ = graph_store
+            .mark_crawl_job_status(&job_id, "done", None)
+            .await;
+        return Ok(());
+    }
 
     // Persist full content into the knowledge graph.
     if let Err(e) = graph_store.record_page_content(record).await {

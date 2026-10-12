@@ -211,21 +211,34 @@ impl CacheStore {
 pub struct SimHash;
 
 impl SimHash {
-    /// Compute a 64-bit SimHash from 3-character n-grams.
+    /// Hamming-distance threshold for near-duplicate classification.
     ///
-    /// N-grams make the fingerprint stable even for short texts and small edits.
+    /// Charikar (2002) introduced SimHash for near-duplicate detection; Manku
+    /// et al. (2007) validated a threshold of 3 bits over 64-bit fingerprints
+    /// at 8-billion-page scale. Higher values admit genuine duplicates.
+    /// Sources: https://hld.handbook.academy/curriculum/case-studies/web-crawler/
+    ///          https://ijasrm.com/wp-content/uploads/2019/05/IJASRM_V4S5_1458_122_125.pdf
+    pub const NEAR_DUP_THRESHOLD: u32 = 3;
+
+    /// Compute a 64-bit SimHash from 3-word shingles (k=3 words).
+    ///
+    /// Word-level shingling (Charikar 2002; Manku et al. 2007) — not character
+    /// n-grams — is what makes the ≤3-bit near-duplicate threshold valid; char
+    /// trigrams are noisy enough that a single edit exceeds 3 bits on short text.
+    /// Unweighted (classic Charikar) vote; TF-weighting would shift the bit
+    /// distribution and invalidate the calibrated threshold.
     pub fn compute(text: &str) -> u64 {
-        let normalized: String = text
-            .chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .flat_map(|c| c.to_lowercase())
+        const SHINGLE_K: usize = 3;
+        let words: Vec<String> = text
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .filter(|w| !w.is_empty())
             .collect();
-        let chars: Vec<char> = normalized.chars().collect();
         let mut vec = [0i64; 64];
-        if chars.len() < 3 {
+        if words.len() < SHINGLE_K {
             return 0;
         }
-        for window in chars.windows(3) {
+        for window in words.windows(SHINGLE_K) {
             let mut hasher = DefaultHasher::new();
             window.hash(&mut hasher);
             let h = hasher.finish();
@@ -252,12 +265,13 @@ impl SimHash {
         (a ^ b).count_ones()
     }
 
-    /// True if the two texts are near-duplicates (≤15 bit difference).
+    /// True if the two texts are near-duplicates (≤ [`Self::NEAR_DUP_THRESHOLD`] bit difference).
     ///
-    /// The threshold is intentionally loose for short crawled excerpts; the
-    /// main goal is to avoid indexing obviously identical/syndicated pages.
+    /// Threshold fixed to the Manku et al. (2007) validated value; see the
+    /// const docs for citations. Boilerplate-strip-before-hash mitigates
+    /// stop-word false positives (https://sharief007.github.io/dev-docs/system-design/web-crawler/frontier-deep-dive/).
     pub fn is_near_duplicate(a: &str, b: &str) -> bool {
-        Self::hamming_distance(Self::compute(a), Self::compute(b)) <= 15
+        Self::hamming_distance(Self::compute(a), Self::compute(b)) <= Self::NEAR_DUP_THRESHOLD
     }
 }
 
@@ -265,6 +279,14 @@ impl SimHash {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Realistic-length prose (~40 words) for SimHash distance tests. The ≤3-bit
+    /// threshold is calibrated for full documents, not short strings — a one-word
+    /// edit must be a tiny fraction of total shingles.
+    const BASE_PROSE: &str = "the distributed search engine indexes crawled web pages across \
+        many hosts and stores their content in a local database so that agents can \
+        query it later without hitting the network again every single time which \
+        saves bandwidth and improves latency for repeated research tasks over time";
 
     #[test]
     fn test_normalize_url() {
@@ -357,10 +379,20 @@ mod tests {
 
     #[test]
     fn test_simhash_near_duplicate() {
-        let a = "Rust is a systems programming language focused on safety";
-        let b = "Rust is a systems programming language focused on safety and speed";
-        let c = "Python is a high level scripting language for web development";
-        assert!(SimHash::is_near_duplicate(a, b));
-        assert!(!SimHash::is_near_duplicate(a, c));
+        // Realistic-length document (~150 words): a one-word edit is a tiny
+        // fraction of total shingles, so it stays within the 3-bit threshold.
+        let a = format!("{} jumped", BASE_PROSE);
+        let b = format!("{} leapt", BASE_PROSE);
+        let c = "Python is a high level scripting language for web development with \
+                 dynamic typing automatic memory management and an extensive standard \
+                 library covering web data science and automation tasks for beginners".to_string();
+        let d = SimHash::hamming_distance(SimHash::compute(&a), SimHash::compute(&b));
+        assert!(
+            SimHash::is_near_duplicate(&a, &b),
+            "one-word edit on a real document must stay within {} bits (dist={d})",
+            SimHash::NEAR_DUP_THRESHOLD
+        );
+        assert!(!SimHash::is_near_duplicate(&a, &c), "distinct doc must not be a near-dup");
+        assert!(d <= SimHash::NEAR_DUP_THRESHOLD, "near-dup distance {d} within threshold");
     }
 }

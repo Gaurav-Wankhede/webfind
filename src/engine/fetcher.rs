@@ -22,7 +22,7 @@ use crate::schema::content::{
 };
 use crate::schema::response::Keyword;
 
-const USER_AGENT: &str = "webfind/0.3.4 (+https://github.com/Gaurav-Wankhede/webfind)";
+const USER_AGENT: &str = crate::engine::util::USER_AGENT;
 const FETCH_TIMEOUT_SECS: u64 = 30;
 
 /// Minimum word count for a page to be considered valid content.

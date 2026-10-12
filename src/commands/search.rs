@@ -437,6 +437,20 @@ fn merge_live_results(
         if results.len() >= limit.max(1) as usize {
             break;
         }
+
+        // Hard quarantine gate: drop adult/nsfw and ad-tracker pages immediately
+        let domain = url::Url::parse(&f.url)
+            .map(|u| u.host_str().unwrap_or("").to_string())
+            .unwrap_or_default();
+        if webfind::engine::security_gate::is_ad_or_tracker_domain(&domain)
+            || webfind::engine::security_gate::is_adult_or_nsfw_text(&f.title)
+            || webfind::engine::security_gate::is_adult_or_nsfw_text(&f.snippet)
+            || webfind::engine::security_gate::is_adult_or_nsfw_text(&f.url)
+        {
+            tracing::debug!("dropped noisy/nsfw hit: {}", f.url);
+            continue;
+        }
+
         let rank = (results.len() + 1) as u32;
         seen_urls.insert(canonical_url(&f.url));
         if let Some(hit) = store_hit {
@@ -642,11 +656,32 @@ async fn turso_search(
     }
 
     let results = if let Some(outcome) = live_outcome {
+        // Persist live hits into the graph BEFORE merging. Previously the fused
+        // hits were returned and dropped, so the graph never learned from live
+        // search — the README's "graph memory compounds" claim was false for
+        // this path. Ingestion records nodes and enqueues background
+        // enrichment; it does not fetch, so the response is not delayed.
+        match webfind::engine::live_ingest::ingest_fused_hits(&store, &outcome.fused).await {
+            Ok(report) if report.ingested() > 0 => {
+                signals.push("live_graph_ingest".to_string());
+                tracing::info!(
+                    "live: ingested {} new node(s), enqueued {} job(s)",
+                    report.ingested(),
+                    report.jobs_enqueued
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // Ingestion is best-effort: a graph write failure must not
+                // break the search the user actually asked for.
+                tracing::warn!("live: graph ingest failed: {e}");
+            }
+        }
         merge_live_results(outcome, &hits, limit, include_content, &mut signals, query)?
     } else {
         if hits.is_empty() {
             eprintln!(
-                "note: 0 results found in local index for \"{query}\".\n      To query live search engines, run: webfind search \"{query}\" --live\n      For deep crawling and page synthesis, run: webfind deep-search \"{query}\""
+                "note: 0 results found in local index for \"{query}\".\n      To query live search engines, run: webfind search \"{query}\" --live\n      To crawl and index a site, run: webfind crawl --seed <URL>"
             );
         }
         let max_s = hits.iter().map(|h| h.score).fold(f64::NEG_INFINITY, f64::max);

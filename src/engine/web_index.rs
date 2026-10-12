@@ -279,6 +279,7 @@ impl LiveIndex {
         // segment) so URL variants of the same page accumulate evidence, and
         // break score ties by query-keyword matches instead of URL order.
         let fused = aggregate_fused(fused, query);
+        let fused = normalize_rrf_scores(fused);
 
         let engines_ok = reports.iter().filter(|r| r.error.is_none()).count();
         let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);

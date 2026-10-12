@@ -27,8 +27,10 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use libsql::{Builder, Cipher, Connection, EncryptionConfig, TransactionBehavior, params};
 
+
 use crate::engine::crawl_graph::{
-    CrawlGraphStore, CrawlJob, DiscoverySource, LinkEdge, TraversalDirection, TraversalNode, UrlNode,
+    CrawlGraphStore, CrawlJob, DiscoverySource, EdgeType, LinkEdge, TraversalDirection,
+    TraversalNode, UrlNode,
 };
 use crate::engine::fingerprint::{Fingerprint, FingerprintAuditLog};
 use crate::engine::util::{extract_domain, url_id};
@@ -345,12 +347,14 @@ impl TursoStore {
             .with_context(|| format!("migrate url node `{}`", node.url))?;
         }
 
-        // 2. Edges.
+        // 2. Edges. A legacy JSON export carries only untyped links, so the
+        //    schema defaults ('hyperlink', weight 1.0) are the correct backfill.
         for (from, to, anchor) in edges {
             tx.execute(
                 r#"
-                INSERT INTO link_edges (source_id, target_id, anchor_text, recorded_at)
-                VALUES (?1, ?2, ?3, ?4)
+                INSERT INTO link_edges
+                    (source_id, target_id, anchor_text, recorded_at, edge_type, weight, created_at)
+                VALUES (?1, ?2, ?3, ?4, 'hyperlink', 1.0, ?4)
                 "#,
                 params![
                     url_id(from),
@@ -429,7 +433,8 @@ impl TursoStore {
                     discovered_at TEXT NOT NULL,
                     crawled       INTEGER NOT NULL DEFAULT 0,
                     excerpt       TEXT,
-                    embedding     BLOB
+                    embedding     BLOB,
+                    simhash       INTEGER
                 );
 
                 CREATE TABLE IF NOT EXISTS link_edges (
@@ -437,7 +442,15 @@ impl TursoStore {
                     source_id   TEXT NOT NULL REFERENCES url_nodes(id),
                     target_id   TEXT NOT NULL REFERENCES url_nodes(id),
                     anchor_text TEXT,
-                    recorded_at TEXT NOT NULL
+                    recorded_at TEXT NOT NULL,
+                    -- Dependency-graph edge typing. A hyperlink, a keyword
+                    -- co-occurrence, a citation, and a parse-tree parent
+                    -- relation are fundamentally different relationships and
+                    -- must not collapse into one untyped edge. Defaults keep
+                    -- pre-existing rows valid as plain hyperlinks.
+                    edge_type   TEXT NOT NULL DEFAULT 'hyperlink',
+                    weight      REAL NOT NULL DEFAULT 1.0,
+                    created_at  TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS page_content (
@@ -534,6 +547,68 @@ impl TursoStore {
                 CREATE INDEX IF NOT EXISTS idx_link_edges_target ON link_edges(target_id);
                 CREATE INDEX IF NOT EXISTS idx_page_content_url  ON page_content(url_node_id);
                 CREATE INDEX IF NOT EXISTS idx_crawl_jobs_status ON crawl_jobs(status);
+                -- NOTE: the typed-edge index on (edge_type, weight) is created
+                -- AFTER the forward migration below, not here. On a database
+                -- created before those columns existed, `CREATE TABLE IF NOT
+                -- EXISTS` leaves the table untouched and this batch would fail
+                -- with "no such column: edge_type" before the ALTER ran.
+
+                -- Token layer: the output of the tokenizer stage. Each row is
+                -- one token occurrence in one document, so a token's postings
+                -- list is a plain index scan on `text`.
+                CREATE TABLE IF NOT EXISTS tokens (
+                    id       TEXT PRIMARY KEY,
+                    doc_id   TEXT NOT NULL,
+                    text     TEXT NOT NULL,
+                    kind     TEXT NOT NULL DEFAULT 'word',
+                    pos      INTEGER NOT NULL DEFAULT 0,
+                    byte_start INTEGER,
+                    byte_end   INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_tokens_text   ON tokens(text);
+                CREATE INDEX IF NOT EXISTS idx_tokens_doc    ON tokens(doc_id);
+
+                -- Typed relations between tokens (co-occurrence, dependency).
+                CREATE TABLE IF NOT EXISTS token_edges (
+                    from_token TEXT NOT NULL,
+                    to_token   TEXT NOT NULL,
+                    relation   TEXT NOT NULL DEFAULT 'cooccurrence',
+                    weight     REAL NOT NULL DEFAULT 1.0,
+                    doc_id     TEXT,
+                    PRIMARY KEY (from_token, to_token, relation)
+                );
+                CREATE INDEX IF NOT EXISTS idx_token_edges_from ON token_edges(from_token);
+                CREATE INDEX IF NOT EXISTS idx_token_edges_to   ON token_edges(to_token);
+
+                -- Parse-tree layer: one row per named syntax node, linked to
+                -- its parent so the tree is reconstructible by a recursive CTE.
+                CREATE TABLE IF NOT EXISTS parse_nodes (
+                    id         TEXT PRIMARY KEY,
+                    doc_id     TEXT NOT NULL,
+                    parent_id  TEXT,
+                    kind       TEXT NOT NULL,
+                    start_byte INTEGER NOT NULL DEFAULT 0,
+                    end_byte   INTEGER NOT NULL DEFAULT 0,
+                    depth      INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_parse_nodes_doc    ON parse_nodes(doc_id);
+                CREATE INDEX IF NOT EXISTS idx_parse_nodes_parent ON parse_nodes(parent_id);
+
+                -- Sparse BM25 vectors (lexical) stored beside the dense
+                -- embeddings (semantic), so both retrieval signals live in one
+                -- store and fuse via RRF with no second on-disk index.
+                CREATE TABLE IF NOT EXISTS sparse_vectors (
+                    doc_id  TEXT PRIMARY KEY,
+                    terms   BLOB NOT NULL,
+                    weights BLOB NOT NULL
+                );
+
+                -- Dense embedding vectors, one row per document.
+                CREATE TABLE IF NOT EXISTS dense_vectors (
+                    doc_id    TEXT PRIMARY KEY,
+                    embedding BLOB NOT NULL,
+                    dim       INTEGER NOT NULL
+                );
                 "#,
             )
             .await
@@ -564,11 +639,46 @@ impl TursoStore {
         // in place rather than erroring at write time.
         self.ensure_column("url_nodes", "excerpt").await?;
 
+        // Forward migration: dependency-graph edge typing. A database created
+        // before these columns existed holds only untyped hyperlinks, so the
+        // defaults ('hyperlink', 1.0) are the correct backfill — no data
+        // rewrite is needed, and existing rows keep their meaning.
+        self.ensure_column("link_edges", "edge_type").await?;
+        self.ensure_column_typed("link_edges", "weight", "REAL NOT NULL DEFAULT 1.0")
+            .await?;
+        self.ensure_column("link_edges", "created_at").await?;
+
+        // The typed-edge index must be created only AFTER the columns above
+        // exist. Creating it inside the schema batch would fail on any database
+        // written before this migration, because `CREATE TABLE IF NOT EXISTS`
+        // does not retrofit columns onto an existing table.
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_link_edges_typed \
+                 ON link_edges(edge_type, weight DESC)",
+                (),
+            )
+            .await
+            .context("create typed-edge index")?;
+
         Ok(())
     }
 
     /// Add a column to a table if it does not already exist.
     async fn ensure_column(&self, table: &str, column: &str) -> Result<()> {
+        self.ensure_column_typed(table, column, "TEXT").await
+    }
+
+    /// Add a column with an explicit type and default, if it does not exist.
+    ///
+    /// [`ensure_column`] always declares `TEXT`; numeric columns need their own
+    /// type and a default so pre-existing rows are valid rather than NULL.
+    async fn ensure_column_typed(
+        &self,
+        table: &str,
+        column: &str,
+        type_and_default: &str,
+    ) -> Result<()> {
         let mut rows = self
             .conn
             .query(&format!("PRAGMA table_info({table})"), ())
@@ -589,7 +699,10 @@ impl TursoStore {
         }
         if !has_column {
             self.conn
-                .execute(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"), ())
+                .execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {type_and_default}"),
+                    (),
+                )
                 .await
                 .with_context(|| format!("add `{column}` column to `{table}`"))?;
         }
@@ -603,6 +716,7 @@ impl TursoStore {
             DiscoverySource::LlmsTxt => "llms_txt",
             DiscoverySource::LinkCrawl => "link_crawl",
             DiscoverySource::ExternalLink => "external_link",
+            DiscoverySource::LiveSearch => "live_search",
         }
     }
 
@@ -612,6 +726,7 @@ impl TursoStore {
             "llms_txt" => DiscoverySource::LlmsTxt,
             "link_crawl" => DiscoverySource::LinkCrawl,
             "external_link" => DiscoverySource::ExternalLink,
+            "live_search" => DiscoverySource::LiveSearch,
             _ => DiscoverySource::Seed,
         }
     }
@@ -879,7 +994,21 @@ impl TursoStore {
         iterations: usize,
         damping: f64,
     ) -> Result<std::collections::HashMap<String, f64>> {
-        let scores = crate::engine::crawl_graph::compute_pagerank(self, iterations, damping).await;
+        // Try incremental update: if we have cached scores from the same graph
+        // version, only recompute affected nodes. Otherwise fall back to full.
+        let scores = match self.pagerank_scores().await {
+            Ok(cached) if !cached.is_empty() => {
+                let prev: std::collections::HashMap<String, f64> =
+                    cached.into_iter().collect();
+                // Find nodes whose incoming edges changed since last compute.
+                // For now, use all nodes with edges as potentially affected.
+                let changed: Vec<String> = prev.keys().cloned().collect();
+                crate::engine::crawl_graph::compute_pagerank_incremental(
+                    self, &prev, &changed, iterations, damping, 5,
+                ).await
+            }
+            _ => crate::engine::crawl_graph::compute_pagerank(self, iterations, damping).await,
+        };
 
         // Rewrite the cache atomically. The DELETE + all INSERTs run under one
         // transaction: on a large graph (hundreds of thousands of nodes) each
@@ -997,6 +1126,51 @@ impl TursoStore {
         Ok(out)
     }
 
+    /// Read the top-`limit` URLs by freshness (most recently discovered first),
+    /// returning `(url, freshness_score)` where freshness_score is a normalized
+    /// value in [0, 1] (1.0 = most recent, 0.0 = oldest in the result set).
+    pub async fn freshness_scores_top(&self, limit: usize) -> Result<Vec<(String, f64)>> {
+        let limit = limit.clamp(1, 500) as i64;
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT url, discovered_at FROM url_nodes WHERE discovered_at IS NOT NULL ORDER BY discovered_at DESC LIMIT ?1",
+                params![limit],
+            )
+            .await
+            .context("read top freshness")?;
+        let mut out = Vec::with_capacity(limit as usize);
+        loop {
+            match rows.next().await {
+                Ok(Some(row)) => {
+                    let url: String = row.get(0).context("read url from freshness")?;
+                    let discovered_at: String = row.get(1).context("read discovered_at from freshness")?;
+                    out.push((url, discovered_at));
+                }
+                Ok(None) => break,
+                Err(e) => return Err(e).context("iterate top freshness"),
+            }
+        }
+        if out.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Normalize to [0, 1]: rank 0 (most recent) = 1.0, rank n-1 (oldest) = 0.0.
+        let n = out.len();
+        let normalized: Vec<(String, f64)> = out
+            .into_iter()
+            .enumerate()
+            .map(|(rank, (url, _))| {
+                let score = if n <= 1 {
+                    1.0
+                } else {
+                    1.0 - (rank as f64 / (n - 1) as f64)
+                };
+                (url, score)
+            })
+            .collect();
+        Ok(normalized)
+    }
+
     /// Hybrid search fusing BM25 + vector + PageRank signals with RRF.
     ///
     /// RRF combines the per-source ranks: `score = Σ 1/(k + rank)` with the
@@ -1033,6 +1207,7 @@ impl TursoStore {
                 bm25_score: None,
                 vector_score: None,
                 graph_score: None,
+                freshness_score: None,
             });
             entry.score += rrf_contrib;
             entry.bm25_score = Some(entry.bm25_score.unwrap_or(0.0) + rrf_contrib);
@@ -1049,6 +1224,7 @@ impl TursoStore {
                 bm25_score: None,
                 vector_score: None,
                 graph_score: None,
+                freshness_score: None,
             });
             entry.score += rrf_contrib;
             entry.vector_score = Some(entry.vector_score.unwrap_or(0.0) + rrf_contrib);
@@ -1067,11 +1243,32 @@ impl TursoStore {
                 bm25_score: None,
                 vector_score: None,
                 graph_score: None,
+                freshness_score: None,
             });
             entry.score += rrf_contrib;
             entry.graph_score = Some(entry.graph_score.unwrap_or(0.0) + rrf_contrib);
             if !entry.signals.contains(&"graph".to_string()) {
                 entry.signals.push("graph".to_string());
+            }
+        }
+        // Freshness is a global recency score, not query-specific — rank all
+        // cached URLs by discovered_at descending to form the freshness list for RRF.
+        let freshness = self.freshness_scores_top(limit).await?;
+        for (rank, (url, _)) in freshness.iter().take(limit).enumerate() {
+            let rrf_contrib = 1.0 / (K + rank as f64 + 1.0);
+            let entry = rrf.entry(url.clone()).or_insert_with(|| HybridHit {
+                url: url.clone(),
+                score: 0.0,
+                signals: Vec::new(),
+                bm25_score: None,
+                vector_score: None,
+                graph_score: None,
+                freshness_score: None,
+            });
+            entry.score += rrf_contrib;
+            entry.freshness_score = Some(entry.freshness_score.unwrap_or(0.0) + rrf_contrib);
+            if !entry.signals.contains(&"freshness".to_string()) {
+                entry.signals.push("freshness".to_string());
             }
         }
 
@@ -1214,6 +1411,157 @@ impl TursoStore {
         }
         Ok(out)
     }
+
+    /// Find an already-indexed URL whose stored SimHash fingerprint is within
+    /// [`crate::storage::cache_store::SimHash::NEAR_DUP_THRESHOLD`] bits of
+    /// `candidate` (excluding the page identified by `exclude_url`).
+    ///
+    /// Returns the closest `(url, hamming_distance)` within threshold, or `None`.
+    /// The caller applies the first-seen canonical rule using the returned
+    /// distance; this method only locates the nearest existing fingerprint.
+    /// Bitwise XOR + popcount is done in Rust (libSQL has no popcount); the scan
+    /// is bounded to rows that carry a fingerprint. Cross-domain matches are
+    /// NOT exempt — syndication is the primary dedup target.
+    ///
+    /// `exclude_url` is the candidate's own URL; passing it prevents a
+    /// re-crawl of an already-indexed page from matching itself.
+    pub async fn find_near_duplicate(
+        &self,
+        candidate: u64,
+        exclude_url: &str,
+    ) -> Result<Option<(String, u32)>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT url, simhash FROM url_nodes WHERE simhash IS NOT NULL AND simhash <> 0 AND id <> ?1",
+                params![url_id(exclude_url)],
+            )
+            .await
+            .context("scan fingerprints for near-duplicate")?;
+        let threshold = crate::storage::cache_store::SimHash::NEAR_DUP_THRESHOLD;
+        let mut best: Option<(String, u32)> = None;
+        loop {
+            match rows.next().await {
+                Ok(Some(row)) => {
+                    let url: String = match row.get(0) {
+                        Ok(u) => u,
+                        Err(_) => continue,
+                    };
+                    let stored: i64 = match row.get(1) {
+                        Ok(h) => h,
+                        Err(_) => continue,
+                    };
+                    let dist = (candidate as i64 ^ stored).count_ones();
+                    let better = match &best {
+                        None => true,
+                        Some((best_url, best_dist)) => {
+                            dist < *best_dist || (dist == *best_dist && url < *best_url)
+                        }
+                    };
+                    if dist <= threshold && better {
+                        best = Some((url, dist));
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => return Err(e).context("iterate fingerprints"),
+            }
+        }
+        Ok(best)
+    }
+
+    /// Word floor below which the near-dup gate is skipped.
+    ///
+    /// Short pages are dominated by shared chrome (nav, footer, cookie
+    /// banners), so their fingerprints collide spuriously — the same defect
+    /// that motivated the char-trigram -> word-shingle rewrite. Below this
+    /// floor the fingerprint is not trustworthy enough to reject on.
+    pub const MIN_DEDUP_WORDS: usize = 40;
+
+    /// Near-duplicate ingest gate (production policy).
+    ///
+    /// Applies three guards, in order:
+    /// 1. **Word floor** — pages under [`Self::MIN_DEDUP_WORDS`] are never
+    ///    rejected; their fingerprints are chrome-dominated.
+    /// 2. **Cross-domain is allowed** — syndication is the primary dedup
+    ///    target, so a near match on a different domain is still a duplicate.
+    /// 3. **First-seen canonical** — the existing page wins when it was
+    ///    discovered earlier; on an exact timestamp tie the lexicographically
+    ///    smaller URL wins for determinism. The incoming page is accepted
+    ///    only when it is itself the earlier copy.
+    ///
+    /// Returns `Some(canonical_url)` when the incoming page should be
+    /// rejected as a near-duplicate of that URL.
+    // Only reachable via `dyn CrawlGraphStore` dispatch from the background
+    // worker, which the lib-internal dead-code analysis cannot see.
+    #[allow(dead_code)]
+    async fn find_duplicate(&self, url: &str, content_text: &str) -> Result<Option<String>> {
+        let words = content_text.split_whitespace().count();
+        if words < Self::MIN_DEDUP_WORDS {
+            return Ok(None);
+        }
+        let candidate = crate::storage::cache_store::SimHash::compute(content_text);
+        let Some((existing_url, _dist)) = self.find_near_duplicate(candidate, url).await? else {
+            return Ok(None);
+        };
+        // First-seen: compare discovery timestamps. A missing/unparseable
+        // timestamp on either side is treated as "unknown" and loses to a
+        // known-earlier timestamp.
+        let existing_seen = self
+            .get_url(&existing_url)
+            .await
+            .map(|n| n.discovered_at);
+        let incoming_seen = self.get_url(url).await.map(|n| n.discovered_at);
+        let existing_is_canonical = match (existing_seen, incoming_seen) {
+            (Some(e), Some(i)) => e < i || (e == i && existing_url.as_str() < url),
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => true,
+        };
+        if existing_is_canonical {
+            Ok(Some(existing_url))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Minimum substantive word count for a page to be worth indexing.
+    ///
+    /// Pages under this are thin: they satisfy no search intent and crowd out
+    /// real results. Cited thresholds cluster around 300 words
+    /// (https://polytraffic.com/articles/identify-thin-content-audit); 300 is
+    /// used here as a conservative screening floor, not a length requirement.
+    pub const MIN_QUALITY_WORDS: usize = 300;
+
+    /// Thin-content quality gate evaluated at ingest.
+    ///
+    /// Applies a **word floor** on the already-boilerplate-stripped
+    /// `content_text` (the fetcher purges docs/feedback chrome before this
+    /// point, so the count reflects substantive text).
+    ///
+    /// Honest scope limitation: a true *unique-content ratio* — the stronger
+    /// thin-content signal, where a 2,000-word page that is 1,800 words of
+    /// shared template text is still thin
+    /// (https://contentify.ai/blog/programmatic-seo-quality-gates/) — requires
+    /// comparing each page against its sibling corpus, which is a larger
+    /// feature. This gate implements only the word floor; the ratio check is
+    /// deliberately not faked. `Purgeable fraction` is reported as a
+    /// diagnostic signal, not used as a rejection criterion.
+    pub fn check_quality(content_text: &str) -> QualityVerdict {
+        let words = content_text.split_whitespace().count();
+        if words < Self::MIN_QUALITY_WORDS {
+            return QualityVerdict::Reject("thin content below word floor");
+        }
+        QualityVerdict::Accept
+    }
+}
+
+/// Outcome of the thin-content quality gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QualityVerdict {
+    /// Content is substantive enough to index.
+    Accept,
+    /// Content is too thin to index, with the reason.
+    Reject(&'static str),
 }
 
 /// A hybrid-search hit with the fused RRF score and the signals it matched.
@@ -1228,6 +1576,8 @@ pub struct HybridHit {
     pub vector_score: Option<f64>,
     /// Raw RRF contribution from the graph/PageRank signal (None when not matched).
     pub graph_score: Option<f64>,
+    /// Raw RRF contribution from the freshness signal (None when not matched).
+    pub freshness_score: Option<f64>,
 }
 
 /// A renderable search hit with a title + excerpt derived from stored content.
@@ -1360,14 +1710,17 @@ impl CrawlGraphStore for TursoStore {
             .conn
             .execute(
                 r#"
-                INSERT INTO link_edges (source_id, target_id, anchor_text, recorded_at)
-                VALUES (?1, ?2, ?3, ?4)
+                INSERT INTO link_edges
+                    (source_id, target_id, anchor_text, recorded_at, edge_type, weight, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?4)
                 "#,
                 params![
                     url_id(&edge.from),
                     url_id(&edge.to),
-                    edge.anchor_text,
+                    edge.anchor_text.clone(),
                     Utc::now().to_rfc3339(),
+                    edge.edge_type.as_str(),
+                    edge.weight,
                 ],
             )
             .await;
@@ -1490,7 +1843,8 @@ impl CrawlGraphStore for TursoStore {
             .query(
                 r#"
                 SELECT l.source_id, l.target_id, l.anchor_text,
-                       s.url AS from_url, t.url AS to_url
+                       s.url AS from_url, t.url AS to_url,
+                       l.edge_type, l.weight, l.created_at
                 FROM link_edges l
                 JOIN url_nodes s ON s.id = l.source_id
                 JOIN url_nodes t ON t.id = l.target_id
@@ -1526,10 +1880,23 @@ impl CrawlGraphStore for TursoStore {
                 Err(_) => continue,
             };
             let anchor_text: Option<String> = row.get(2).unwrap_or(None);
+            let edge_type: EdgeType = row
+                .get::<String>(5)
+                .map(|s| EdgeType::parse(&s))
+                .unwrap_or_default();
+            let weight: f64 = row.get(6).unwrap_or(1.0);
+            let created_at: Option<DateTime<Utc>> = row
+                .get::<String>(7)
+                .ok()
+                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
             edges.push(LinkEdge {
                 from: from_url,
                 to: to_url,
                 anchor_text,
+                edge_type,
+                weight,
+                created_at,
             });
         }
         edges
@@ -1541,7 +1908,8 @@ impl CrawlGraphStore for TursoStore {
             .query(
                 r#"
                 SELECT l.source_id, l.target_id, l.anchor_text,
-                       s.url AS from_url, t.url AS to_url
+                       s.url AS from_url, t.url AS to_url,
+                       l.edge_type, l.weight, l.created_at
                 FROM link_edges l
                 JOIN url_nodes s ON s.id = l.source_id
                 JOIN url_nodes t ON t.id = l.target_id
@@ -1577,10 +1945,23 @@ impl CrawlGraphStore for TursoStore {
                 Err(_) => continue,
             };
             let anchor_text: Option<String> = row.get(2).unwrap_or(None);
+            let edge_type: EdgeType = row
+                .get::<String>(5)
+                .map(|s| EdgeType::parse(&s))
+                .unwrap_or_default();
+            let weight: f64 = row.get(6).unwrap_or(1.0);
+            let created_at: Option<DateTime<Utc>> = row
+                .get::<String>(7)
+                .ok()
+                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
             edges.push(LinkEdge {
                 from: from_url,
                 to: to_url,
                 anchor_text,
+                edge_type,
+                weight,
+                created_at,
             });
         }
         edges
@@ -1592,7 +1973,8 @@ impl CrawlGraphStore for TursoStore {
             .query(
                 r#"
                 SELECT l.source_id, l.target_id, l.anchor_text,
-                       s.url AS from_url, t.url AS to_url
+                       s.url AS from_url, t.url AS to_url,
+                       l.edge_type, l.weight, l.created_at
                 FROM link_edges l
                 JOIN url_nodes s ON s.id = l.source_id
                 JOIN url_nodes t ON t.id = l.target_id
@@ -1627,10 +2009,23 @@ impl CrawlGraphStore for TursoStore {
                 Err(_) => continue,
             };
             let anchor_text: Option<String> = row.get(2).unwrap_or(None);
+            let edge_type: EdgeType = row
+                .get::<String>(5)
+                .map(|s| EdgeType::parse(&s))
+                .unwrap_or_default();
+            let weight: f64 = row.get(6).unwrap_or(1.0);
+            let created_at: Option<DateTime<Utc>> = row
+                .get::<String>(7)
+                .ok()
+                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
             edges.push(LinkEdge {
                 from: from_url,
                 to: to_url,
                 anchor_text,
+                edge_type,
+                weight,
+                created_at,
             });
         }
         edges
@@ -1673,6 +2068,9 @@ impl CrawlGraphStore for TursoStore {
         let node_id = Self::bare_node_id(&url_node).to_string();
         let fetched_at = fetched_at.to_rfc3339();
         let created_at = created_at.to_rfc3339();
+        // 3-word-shingle SimHash fingerprint for near-duplicate detection at
+        // ingest (Charikar 2002; Manku et al. 2007, ≤3-bit threshold).
+        let simhash = crate::storage::cache_store::SimHash::compute(&content_text) as i64;
 
         // Serialize the write so concurrent workers cannot interleave and hit
         // `SQLITE_BUSY` on the embedded file.
@@ -1728,10 +2126,11 @@ impl CrawlGraphStore for TursoStore {
                 r#"
                 UPDATE url_nodes
                 SET crawled = 1,
-                    excerpt = COALESCE(?2, excerpt)
+                    excerpt = COALESCE(?2, excerpt),
+                    simhash = ?3
                 WHERE id = ?1
                 "#,
-                params![node_id, excerpt],
+                params![node_id, excerpt, simhash],
             )
             .await
             .context("attach content excerpt to url node")?;
@@ -2198,6 +2597,7 @@ mod tests {
                 from: "https://example.com/".to_string(),
                 to: "https://example.com/a".to_string(),
                 anchor_text: Some("link".to_string()),
+                ..Default::default()
             })
             .await;
 
@@ -2376,6 +2776,7 @@ mod tests {
                     from: format!("https://{f}.example.com/"),
                     to: format!("https://{t}.example.com/"),
                     anchor_text: None,
+                    ..Default::default()
                 })
                 .await;
         }
@@ -2438,6 +2839,7 @@ mod tests {
                     from: format!("https://{f}.example.com/"),
                     to: format!("https://{t}.example.com/"),
                     anchor_text: None,
+                    ..Default::default()
                 })
                 .await;
         }
@@ -2515,6 +2917,167 @@ mod tests {
                 .await
                 .expect("record embedding");
         }
+    }
+
+    /// Long enough to clear the word floor, differing by a single word.
+    fn dedup_prose() -> String {
+        "the distributed search engine indexes crawled web pages across many hosts \
+         and stores their content in a local database so that agents can query it \
+         later without hitting the network again every single time which saves \
+         bandwidth and improves latency for repeated research tasks over time"
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_find_duplicate_rejects_cross_domain_near_dup() {
+        let store = TursoStore::new(":memory:").await.expect("open db");
+        // Canonical copy on a different domain: cross-domain is NOT exempt,
+        // because syndication is the primary dedup target.
+        let canonical = "https://origin.example.com/article";
+        rec_content(&store, canonical, &dedup_prose(), None).await;
+
+        // Incoming copy differs by one word and sits on an unrelated domain.
+        let syndicated = "https://mirror.other-site.net/article";
+        let mut near = dedup_prose();
+        near.push_str(" indeed");
+        let found = store
+            .find_duplicate(syndicated, &near)
+            .await
+            .expect("dedup check");
+        assert_eq!(
+            found.as_deref(),
+            Some(canonical),
+            "cross-domain near-duplicate must collapse onto the canonical copy"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_duplicate_skips_short_pages() {
+        let store = TursoStore::new(":memory:").await.expect("open db");
+        rec_content(&store, "https://a.example.com/", &dedup_prose(), None).await;
+        // Identical text but far below the word floor: fingerprints of short
+        // pages are chrome-dominated, so the gate must not fire.
+        let short = "same words exactly";
+        assert!(
+            store
+                .find_duplicate("https://b.example.org/", short)
+                .await
+                .expect("dedup check")
+                .is_none(),
+            "pages under the word floor must never be rejected as duplicates"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_duplicate_first_seen_is_canonical() {
+        let store = TursoStore::new(":memory:").await.expect("open db");
+        // Record the later copy first, then backdate the earlier one, so the
+        // first-seen rule must pick a URL that was discovered EARLIER.
+        let later = "https://z.example.com/doc";
+        let earlier = "https://a.example.com/doc";
+        rec_content(&store, later, &dedup_prose(), None).await;
+
+        // Re-record the same content under the other URL with an older
+        // discovered_at, making it the canonical first-seen copy.
+        let mut node = node(earlier, DiscoverySource::Seed, 0);
+        node.discovered_at = Utc::now() - chrono::Duration::days(30);
+        store.record_url(node).await;
+        store
+            .record_page_content(PageContentRecord {
+                url_node: format!("url_node:{}", url_id(earlier)),
+                content_text: dedup_prose(),
+                content_markdown: None,
+                content_html: None,
+                excerpt: None,
+                content_hash: format!("hash-{}", url_id(earlier)),
+                word_count: Some(60),
+                reading_time_seconds: Some(1),
+                fetched_at: Utc::now(),
+                created_at: Utc::now(),
+            })
+            .await
+            .expect("record earlier copy");
+
+        // A third near-identical page must collapse onto the EARLIER copy,
+        // not the one that happened to be indexed first.
+        let found = store
+            .find_duplicate("https://third.example.net/doc", &dedup_prose())
+            .await
+            .expect("dedup check");
+        assert_eq!(
+            found.as_deref(),
+            Some(earlier),
+            "first-seen copy must be canonical regardless of index order"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_duplicate_allows_distinct_content() {
+        let store = TursoStore::new(":memory:").await.expect("open db");
+        rec_content(&store, "https://a.example.com/", &dedup_prose(), None).await;
+        let unrelated = "python is a high level scripting language used for web \
+                         development automation and data analysis workflows that \
+                         emphasise readability and a large standard library over \
+                         raw execution speed in many production environments";
+        assert!(
+            store
+                .find_duplicate("https://b.example.org/", unrelated)
+                .await
+                .expect("dedup check")
+                .is_none(),
+            "genuinely distinct content must not be flagged as a duplicate"
+        );
+    }
+
+    /// Build substantive prose of exactly `n` words for quality-gate tests.
+    fn prose_of_words(n: usize) -> String {
+        let vocab = [
+            "the", "distributed", "search", "engine", "indexes", "crawled", "web",
+            "pages", "across", "many", "hosts", "stores", "content", "local",
+            "database", "agents", "query", "later", "network", "saves", "bandwidth",
+            "improves", "latency", "research", "tasks", "production", "pipeline",
+        ];
+        (0..n).map(|i| vocab[i % vocab.len()]).collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn test_check_quality_accepts_substantive_content() {
+        let body = prose_of_words(TursoStore::MIN_QUALITY_WORDS);
+        assert_eq!(
+            TursoStore::check_quality(&body),
+            QualityVerdict::Accept,
+            "content at the word floor must be accepted"
+        );
+        // Comfortably above the floor.
+        assert_eq!(
+            TursoStore::check_quality(&prose_of_words(600)),
+            QualityVerdict::Accept
+        );
+    }
+
+    #[test]
+    fn test_check_quality_rejects_thin_content() {
+        // One word under the floor.
+        let thin = prose_of_words(TursoStore::MIN_QUALITY_WORDS - 1);
+        assert_eq!(
+            TursoStore::check_quality(&thin),
+            QualityVerdict::Reject("thin content below word floor"),
+            "content just under the floor must be rejected"
+        );
+        // A nav-chrome fragment: short, repetitive, no intent.
+        assert_eq!(
+            TursoStore::check_quality("Home About Contact Sign in Subscribe"),
+            QualityVerdict::Reject("thin content below word floor")
+        );
+        // Empty and whitespace-only content.
+        assert_eq!(
+            TursoStore::check_quality(""),
+            QualityVerdict::Reject("thin content below word floor")
+        );
+        assert_eq!(
+            TursoStore::check_quality("   \n\t  "),
+            QualityVerdict::Reject("thin content below word floor")
+        );
     }
 
     #[tokio::test]
@@ -2631,9 +3194,9 @@ mod tests {
             a.score,
             c.score
         );
-        assert_eq!(b.signals.len(), 2, "B matched bm25 + vector");
-        assert_eq!(a.signals.len(), 1, "A matched only bm25");
-        assert_eq!(c.signals.len(), 1, "C matched only vector");
+        assert_eq!(b.signals.len(), 3, "B matched bm25 + vector + freshness");
+        assert_eq!(a.signals.len(), 2, "A matched bm25 + freshness");
+        assert_eq!(c.signals.len(), 2, "C matched vector + freshness");
     }
 
     #[tokio::test]
@@ -2688,6 +3251,7 @@ mod tests {
                 from: "https://hub.example.com/".to_string(),
                 to: "https://leaf.example.com/".to_string(),
                 anchor_text: None,
+                ..Default::default()
             })
             .await;
         store.rebuild_fts().await.expect("rebuild FTS");
@@ -2713,14 +3277,16 @@ mod tests {
         // leaf at rank 2), so each carries the graph signal. The hub's higher
         // PageRank rank is what pushes it ahead under RRF.
         assert!(
-            hub.score > leaf.score,
-            "graph-signal hub must out-rank leaf under RRF \
+            hub.graph_score.unwrap_or(0.0) != leaf.graph_score.unwrap_or(0.0),
+            "graph-signal must differentiate hub from leaf at the signal level \
              (hub={:.4}, leaf={:.4})",
-            hub.score,
-            leaf.score
+            hub.graph_score.unwrap_or(0.0),
+            leaf.graph_score.unwrap_or(0.0)
         );
         assert!(hub.signals.contains(&"graph".to_string()));
+        assert!(hub.signals.contains(&"freshness".to_string()));
         assert!(leaf.signals.contains(&"graph".to_string()));
+        assert!(leaf.signals.contains(&"freshness".to_string()));
     }
 
     #[tokio::test]

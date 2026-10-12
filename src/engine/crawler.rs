@@ -254,7 +254,7 @@ impl Crawler {
                                 existing.simhash,
                                 Some(SimHash::compute(&content.content_text)),
                             )
-                                && SimHash::hamming_distance(old, new) <= 15 {
+                                && SimHash::hamming_distance(old, new) <= SimHash::NEAR_DUP_THRESHOLD {
                                     stats.pages_skipped_dup += 1;
                                     continue;
                                 }

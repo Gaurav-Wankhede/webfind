@@ -6,6 +6,21 @@ use anyhow::{Context, Result};
 /// Hex nibble lookup table for fast byte → hex encoding.
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
+/// Canonical outbound User-Agent for every WebFind HTTP client.
+///
+/// Derived from `CARGO_PKG_VERSION` so it can never drift from the crate
+/// version again. Before this constant existed the version was hardcoded in
+/// six places and had drifted to three different values (`0.3.2`, `0.3.4`,
+/// and the real `0.5.0`), which made server-side logs misattribute traffic.
+///
+/// Engines that deliberately spoof a browser UA (e.g. Semantic Scholar) keep
+/// their own constant — that is intentional, not drift.
+pub const USER_AGENT: &str = concat!(
+    "webfind/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/Gaurav-Wankhede/webfind)"
+);
+
 /// Generate a stable 32-hex-char ID from a URL using BLAKE3.
 ///
 /// Used by TursoStore, search engines, and background workers as the

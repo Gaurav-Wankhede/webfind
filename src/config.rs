@@ -131,13 +131,27 @@ fn resolve(cli: Option<&str>, env_key: &str, config: Option<&str>, default: &str
 }
 
 /// Resolve the Turso/libSQL database file path (CLI → env → config → default).
+///
+/// The default is anchored under [`data_dir`] rather than the bare relative
+/// name `webfind.db`. A relative default made the graph path cwd-dependent:
+/// running `webfind` from a different directory silently opened (and created)
+/// a *different, empty* graph, so accumulated crawl memory appeared to vanish.
+/// An absolute default means every invocation shares one graph unless the
+/// caller deliberately overrides the path.
 pub fn resolve_turso(config: &WebfindConfig, cli_path: Option<&str>) -> String {
-    resolve(
+    let resolved = resolve(
         cli_path,
         "WEBFIND_TURSO_PATH",
         config.turso.as_ref().and_then(|t| t.path.as_deref()),
-        "webfind.db",
-    )
+        "",
+    );
+    if !resolved.is_empty() {
+        return resolved;
+    }
+    data_dir()
+        .join("webfind.db")
+        .to_string_lossy()
+        .into_owned()
 }
 
 use crate::cli::GraphStoreArg;
@@ -158,13 +172,28 @@ pub fn resolve_graph_store(config: &WebfindConfig, cli: Option<GraphStoreArg>) -
     .unwrap_or(GraphStoreArg::Turso)
 }
 
-/// Resolve the data directory path. Defaults to the current working directory.
+/// Resolve the data directory path.
+///
+/// Precedence: config `data_dir` → `WEBFIND_DATA_DIR` → `$HOME/.webfind`.
+///
+/// The final fallback is deliberately **not** the current working directory.
+/// A cwd default meant the embedded graph moved with the shell, so the same
+/// command produced different results depending on where it was run. Anchoring
+/// to a stable per-user directory makes graph memory genuinely persistent.
 pub fn resolve_data_dir(config: &WebfindConfig) -> PathBuf {
     config
         .data_dir
         .clone()
         .or_else(|| std::env::var("WEBFIND_DATA_DIR").map(PathBuf::from).ok())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .or_else(default_home_data_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// `$HOME/.webfind`, or `None` when `HOME` is unset.
+fn default_home_data_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".webfind"))
 }
 
 /// Resolve requests-per-second rate limit from CLI → env → config.

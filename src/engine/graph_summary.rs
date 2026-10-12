@@ -126,6 +126,7 @@ mod tests {
                 from: "https://example.com/".to_string(),
                 to: "https://example.com/a".to_string(),
                 anchor_text: Some("a".to_string()),
+                ..Default::default()
             })
             .await;
 

@@ -48,11 +48,19 @@ pub trait SearchEngine: Send + Sync {
     async fn optimize(&self) -> Result<()>;
 }
 
-/// In-memory search engine for tests.
+/// In-memory search engine for tests and local crawls.
+///
+/// Lexical scoring is delegated to [`Bm25Index`], which implements real BM25
+/// (IDF + document-length normalization + term-frequency saturation) over an
+/// inverted index. The previous implementation scored with
+/// `title.contains(term) ? 10.0 : 0.0`, which had none of those properties and
+/// scanned every document on every query.
 pub struct InMemorySearchEngine {
     documents: RwLock<Vec<std::sync::Arc<StructuredContent>>>,
     vectors: dashmap::DashMap<String, Vec<f32>>,
     embedder: Option<std::sync::Arc<dyn crate::engine::embedder::Embedder>>,
+    /// Real BM25 lexical index, keyed by document URL.
+    lexical: crate::engine::bm25_index::Bm25Index,
 }
 
 impl InMemorySearchEngine {
@@ -61,6 +69,7 @@ impl InMemorySearchEngine {
             documents: RwLock::new(Vec::new()),
             vectors: dashmap::DashMap::new(),
             embedder: None,
+            lexical: crate::engine::bm25_index::Bm25Index::default(),
         }
     }
 
@@ -69,6 +78,18 @@ impl InMemorySearchEngine {
             documents: RwLock::new(Vec::new()),
             vectors: dashmap::DashMap::new(),
             embedder: Some(embedder),
+            lexical: crate::engine::bm25_index::Bm25Index::default(),
+        }
+    }
+
+    /// The text a document is lexically indexed under: title plus body, so a
+    /// title match outranks an incidental body mention through term frequency
+    /// rather than an arbitrary constant.
+    fn lexical_text(content: &StructuredContent) -> String {
+        if content.title.is_empty() {
+            content.content_text.clone()
+        } else {
+            format!("{} {}", content.title, content.content_text)
         }
     }
 }
@@ -97,6 +118,9 @@ impl SearchEngine for InMemorySearchEngine {
                 self.vectors.insert(content.url.clone(), vec);
             }
         }
+        // Real BM25 lexical index, keyed by URL so re-indexing replaces.
+        self.lexical
+            .upsert(&content.url, &Self::lexical_text(content));
         self.documents
             .write()
             .await
@@ -131,45 +155,35 @@ impl SearchEngine for InMemorySearchEngine {
                 }
             }
         }
+        // Feed the lexical index, then re-fit avgdl against the new corpus so
+        // length normalization tracks the real document set rather than the
+        // initial estimate.
+        for item in &valid {
+            self.lexical.upsert(&item.url, &Self::lexical_text(item));
+        }
+        if count > 0 {
+            self.lexical.refit();
+        }
         self.documents.write().await.extend(valid);
         Ok(count)
     }
 
     async fn search_bm25(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        // Real BM25 via the inverted index — only documents sharing a token
+        // with the query are scored, and scores carry IDF and length
+        // normalization. No linear scan over the corpus.
+        let hits = self.lexical.search(query, limit);
+
         let docs = self.documents.read().await;
-        let query_lower = query.to_lowercase();
-        let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
+        let by_url: std::collections::HashMap<&str, &std::sync::Arc<StructuredContent>> =
+            docs.iter().map(|d| (d.url.as_str(), d)).collect();
 
-        let mut scored: Vec<(usize, f64)> = docs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, doc)| {
-                let title_lower = doc.title.to_lowercase();
-                let content_lower = doc.content_text.to_lowercase();
-                let mut score = 0.0;
-
-                for term in &query_terms {
-                    if title_lower.contains(term) {
-                        score += 10.0;
-                    }
-                    if content_lower.contains(term) {
-                        score += 1.0;
-                    }
-                }
-
-                if score > 0.0 { Some((i, score)) } else { None }
-            })
-            .collect();
-
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(limit);
-
-        let results = scored
+        let results = hits
             .into_iter()
             .enumerate()
-            .map(|(rank, (idx, score))| {
-                let doc = &docs[idx];
-                SearchResult {
+            .filter_map(|(rank, (url, score))| {
+                let doc = by_url.get(url.as_str())?;
+                Some(SearchResult {
                     rank: (rank + 1) as u32,
                     url: doc.url.clone(),
                     title: doc.title.clone(),
@@ -182,9 +196,9 @@ impl SearchEngine for InMemorySearchEngine {
                     crawled_at: doc.fetched_at,
                     author: doc.author.clone(),
                     site_name: doc.site_name.clone(),
-                    score,
+                    score: f64::from(score),
                     scores: ScoreBreakdown {
-                        bm25: Some(score),
+                        bm25: Some(f64::from(score)),
                         vector: None,
                         graph: None,
                         freshness: Some(crate::engine::ranker::Ranker::freshness_score(
@@ -195,7 +209,7 @@ impl SearchEngine for InMemorySearchEngine {
                             doc.grade_level,
                         )),
                         ax_score: None,
-                        final_score: score,
+                        final_score: f64::from(score),
                     },
                     content: None,
                     tier: None,
@@ -210,7 +224,7 @@ impl SearchEngine for InMemorySearchEngine {
                     mcp_server: None,
                     language: doc.language.clone(),
                     content_type: doc.content_type.clone(),
-                }
+                })
             })
             .collect();
 
@@ -219,45 +233,22 @@ impl SearchEngine for InMemorySearchEngine {
 
     /// Search returning `Arc<StructuredContent>` to avoid field-by-field clone.
     /// Use this when the caller needs full content or will do its own conversion.
+    ///
+    /// Uses the same real BM25 index as [`SearchEngine::search_bm25`].
     async fn search_bm25_arc(
         &self,
         query: &str,
         limit: usize,
     ) -> Result<Vec<std::sync::Arc<StructuredContent>>> {
+        let hits = self.lexical.search(query, limit);
         let docs = self.documents.read().await;
-        let query_lower = query.to_lowercase();
-        let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
+        let by_url: std::collections::HashMap<&str, &std::sync::Arc<StructuredContent>> =
+            docs.iter().map(|d| (d.url.as_str(), d)).collect();
 
-        let mut scored: Vec<(usize, f64)> = docs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, doc)| {
-                let title_lower = doc.title.to_lowercase();
-                let content_lower = doc.content_text.to_lowercase();
-                let mut score = 0.0;
-
-                for term in &query_terms {
-                    if title_lower.contains(term) {
-                        score += 10.0;
-                    }
-                    if content_lower.contains(term) {
-                        score += 1.0;
-                    }
-                }
-
-                if score > 0.0 { Some((i, score)) } else { None }
-            })
-            .collect();
-
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(limit);
-
-        let results = scored
+        Ok(hits
             .into_iter()
-            .map(|(idx, _)| docs[idx].clone())
-            .collect();
-
-        Ok(results)
+            .filter_map(|(url, _)| by_url.get(url.as_str()).map(|d| (*d).clone()))
+            .collect())
     }
 
     async fn index_vector(&self, id: &str, text: &str) -> Result<()> {

@@ -51,36 +51,7 @@ async fn main() -> anyhow::Result<()> {
             turso_path,
             hybrid,
             live,
-            deep,
-        } => {
-            if deep {
-                return commands::research::run(
-                    &cfg,
-                    None,
-                    query,
-                    100,
-                    300,
-                    false,
-                    None,
-                    hybrid,
-                    limit,
-                    include_graph,
-                    include_content,
-                    false,
-                    0,
-                    0,
-                    false,
-                    None,
-                    None,
-                    false,
-                    true,
-                    output_file,
-                    graph_store,
-                    turso_path,
-                )
-                .await;
-            }
-            return commands::search::run(
+        } => {            return commands::search::run(
                 &cfg,
                 query,
                 queries,
@@ -225,56 +196,7 @@ async fn main() -> anyhow::Result<()> {
             return commands::proxy_pool::run(listen, cidr, source_ips).await;
         }
 
-        Commands::DeepSearch {
-            seed,
-            query,
-            depth: _,
-            max_pages,
-            delay,
-            respect_robots,
-            proxies,
-            hybrid,
-            limit,
-            include_graph,
-            include_content,
-            follow_external,
-            min_depth,
-            max_depth,
-            auto_depth,
-            topics,
-            seeds,
-            dynamic,
-            deep,
-            output,
-            graph_store,
-            turso_path,
-        } => {
-            return commands::research::run(
-                &cfg,
-                seed,
-                query,
-                max_pages,
-                delay,
-                respect_robots,
-                proxies,
-                hybrid,
-                limit,
-                include_graph,
-                include_content,
-                follow_external,
-                min_depth,
-                max_depth,
-                auto_depth,
-                topics,
-                seeds,
-                dynamic,
-                deep,
-                output,
-                graph_store,
-                turso_path,
-            )
-            .await;
-        }
+
 
         Commands::Serve {
             port,

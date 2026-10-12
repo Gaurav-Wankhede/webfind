@@ -111,6 +111,7 @@ async fn seed_store(path: &str, n: usize) -> TursoStore {
                 from: format!("https://example.com/page{i}"),
                 to: format!("https://example.com/page{}", i + 1),
                 anchor_text: Some("next".to_string()),
+                ..Default::default()
             })
             .await;
     }

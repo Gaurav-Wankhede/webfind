@@ -17,6 +17,7 @@ use webfind::schema::response::SearchResponse;
 use webfind::storage::turso_store::TursoStore;
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub async fn run(
     cfg: &WebfindConfig,
     seed: Option<String>,

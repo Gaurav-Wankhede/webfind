@@ -29,6 +29,9 @@ const H_AX: f64 = 0.12;
 /// Diversity penalty factor per prior occurrence of the same domain.
 const DIVERSITY_PENALTY: f64 = 0.85;
 
+/// Half-life for freshness decay in days.
+const FRESHNESS_HALF_LIFE_DAYS: f64 = 180.0;
+
 /// Stage 1 Funnel Cutoff Thresholds:
 pub const FUNNEL_SEMANTIC_THRESHOLD: f64 = 0.60;
 pub const FUNNEL_QUALITY_THRESHOLD: f64 = 0.45;
@@ -351,26 +354,21 @@ impl Ranker {
             funnel.ingest_candidate(desc);
         }
 
-        // Sort descending: High quality & relevant results stay on top
-        results.sort_by(|a, b| {
-            let tier_order_a = match a.tier {
-                Some(crate::schema::response::QualityTier::HighQualityRelevant) => 2,
-                Some(crate::schema::response::QualityTier::Marginal) => 1,
-                _ => 0,
-            };
-            let tier_order_b = match b.tier {
-                Some(crate::schema::response::QualityTier::HighQualityRelevant) => 2,
-                Some(crate::schema::response::QualityTier::Marginal) => 1,
-                _ => 0,
-            };
-            tier_order_b
-                .cmp(&tier_order_a)
-                .then_with(|| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-        });
+        // Use the funnel sort to reorder results: High quality & relevant first, then by score.
+        let ranked = funnel.rank_and_slice();
+        let mut reordered: Vec<SearchResult> = ranked
+            .iter()
+            .map(|d| results[d.index].clone())
+            .collect();
+        // Append any results that did not fit in the funnel buffer.
+        let funnel_indices: std::collections::HashSet<usize> =
+            ranked.iter().map(|d| d.index).collect();
+        for (idx, r) in results.iter().enumerate() {
+            if !funnel_indices.contains(&idx) {
+                reordered.push(r.clone());
+            }
+        }
+        results = reordered;
 
         // Apply a domain-diversity penalty so one domain cannot dominate the top results.
         results = Self::apply_diversity_penalty(results);
@@ -396,14 +394,14 @@ impl Ranker {
                 .copied()
                 .unwrap_or(0.0);
             let entry = sums.entry(r.domain.clone()).or_insert((0.0, 0));
-            entry.0 += page_auth;
+            entry.0 = entry.0.max(page_auth);
             entry.1 += 1;
         }
         sums.into_iter()
-            .map(|(domain, (sum, count))| {
-                let mean_graph = if count > 0 { sum / count as f64 } else { 0.0 };
+            .map(|(domain, (sum, _count))| {
+                let max_graph = sum;
                 let institutional_boost = Self::institutional_authority_boost(&domain);
-                (domain, (mean_graph + institutional_boost).clamp(0.0, 1.0))
+                (domain, (max_graph + institutional_boost).clamp(0.0, 1.0))
             })
             .collect()
     }
@@ -533,7 +531,7 @@ impl Ranker {
     /// Exponential decay with 180-day half-life.
     pub fn freshness_score(crawled_at: chrono::DateTime<chrono::Utc>) -> f64 {
         let age_days = (chrono::Utc::now() - crawled_at).num_days().max(0) as f64;
-        (-age_days / 180.0).exp()
+        (-age_days / FRESHNESS_HALF_LIFE_DAYS).exp()
     }
 
     /// Quality proxy from readability metrics.

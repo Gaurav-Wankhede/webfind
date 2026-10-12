@@ -157,6 +157,7 @@ mod tests {
                 from: "https://example.com/a".to_string(),
                 to: "https://example.com/".to_string(),
                 anchor_text: None,
+                ..Default::default()
             })
             .await;
         let third = cache.get_or_compute(&graph, 10, 0.85).await.unwrap();

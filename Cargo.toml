@@ -6,11 +6,14 @@ resolver = "2"
 
 [package]
 name = "webfind"
+readme = "README.md"
 version = "0.5.0"
 edition = "2024"
 rust-version = "1.98.0"
 description = "Self-hosted native search engine for AI agents — pure CLI, zero cost"
 license = "MIT"
+keywords = ["search", "crawler", "agent", "turso", "offline"]
+categories = ["command-line-utilities", "web-programming"]
 repository = "https://github.com/Gaurav-Wankhede/webfind"
 
 [[bin]]
@@ -76,15 +79,25 @@ unicode-normalization = "0.1"
 unicode-segmentation = "1.13"
 whatlang = "0.18"
 dateparser = "0.3"
-keyword_extraction = "1.5"
+keyword_extraction = { version = "1.5.0", features = ["all", "co_occurrence"] }
 stop-words = "0.8"
 textstat = "0.1"
 simdutf8 = "0.1"
 ahash = "0.8"
 
+# Tokenization: LLM-aligned BPE token counts (context budgeting).
+# The linguistic tokenizer (words/sentences) is unicode-segmentation below.
+tiktoken = "4.1.2"
+
 # Index
 tantivy = "0.26"
 fastembed = "4"
+
+# Real BM25 lexical scoring. Emits SPARSE embeddings (token-index -> weight)
+# that persist in the same Turso store as the dense vectors, so lexical and
+# semantic retrieval fuse in one place with no second on-disk index.
+# `parallelism` enables rayon batch-fitting; `language_detection` adds whichlang.
+bm25 = { version = "2.3.2", features = ["parallelism", "language_detection"] }
 
 # Storage
 blake3 = "1.8.5"
@@ -119,9 +132,17 @@ rquickjs = { version = "0.11", features = ["full-async"] }
 # Templating / GUI
 askama = "0.13"
 tokio-stream = { version = "0.1", features = ["sync"] }
+tree-sitter = "0.27.0"
+tree-sitter-language-pack = { version = "1.21.0", features = ["download"] }
+petgraph = "0.8.3"
 
 [features]
-default = ["dynamic"]
+# `dynamic` (headless-Chromium rendering) is OPT-IN. It used to be a default
+# feature, which pulled chromiumoxide — and therefore a full Chromium/CDP
+# dependency chain — into every build, including the common case where nobody
+# passes `--dynamic`. Enable it explicitly when SPA rendering is needed:
+#   cargo build --release --features dynamic
+default = []
 dynamic = ["dep:chromiumoxide"]
 
 [dependencies.chromiumoxide]

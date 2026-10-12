@@ -73,6 +73,7 @@ async fn seed_store(dir: &TempDir) -> TursoStore {
             from: "https://example.com/".to_string(),
             to: "https://example.com/page1".to_string(),
             anchor_text: Some("Page One".to_string()),
+            ..Default::default()
         })
         .await;
     store
@@ -220,4 +221,148 @@ async fn rollback_leaves_no_committed_rows() {
     assert_eq!(store.count_rows("url_nodes").await.unwrap(), 1);
     assert!(store.get_url("https://example.com/phantom").await.is_none());
     assert!(store.get_url("https://example.com/page1").await.is_some());
+}
+
+/// Typed, weighted edges must survive a real file-backed round trip.
+///
+/// Before this schema change `link_edges` had no `edge_type` or `weight`
+/// column, so every relationship collapsed into an untyped hyperlink and a
+/// dependency graph was impossible to express. This asserts the type and the
+/// weight are actually persisted and read back, not just carried in memory.
+#[tokio::test]
+async fn typed_weighted_edges_round_trip_through_turso() {
+    use webfind::engine::crawl_graph::{EdgeType, LinkEdge};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("webfind.db");
+    let store = TursoStore::new(db_path.to_str().unwrap())
+        .await
+        .expect("open store");
+
+    store
+        .record_url(node("https://example.com/a", DiscoverySource::Seed, 0))
+        .await;
+    store
+        .record_url(node("https://example.com/b", DiscoverySource::LinkCrawl, 1))
+        .await;
+
+    store
+        .record_link(LinkEdge {
+            from: "https://example.com/a".to_string(),
+            to: "https://example.com/b".to_string(),
+            anchor_text: Some("see also".to_string()),
+            edge_type: EdgeType::Cooccurrence,
+            weight: 7.5,
+            created_at: None,
+        })
+        .await;
+
+    let edges = store.get_links_from("https://example.com/a").await;
+    assert_eq!(edges.len(), 1, "one edge must be stored");
+    assert_eq!(
+        edges[0].edge_type,
+        EdgeType::Cooccurrence,
+        "edge type must survive persistence"
+    );
+    assert!(
+        (edges[0].weight - 7.5).abs() < 1e-6,
+        "weight must survive persistence, got {}",
+        edges[0].weight
+    );
+
+    // The same edge must be visible from the target's inbound side.
+    let inbound = store.get_links_to("https://example.com/b").await;
+    assert_eq!(inbound.len(), 1);
+    assert_eq!(inbound[0].edge_type, EdgeType::Cooccurrence);
+
+    // And through the whole-graph read path.
+    let all = store.get_all_links().await;
+    assert_eq!(all.len(), 1);
+    assert!((all[0].weight - 7.5).abs() < 1e-6);
+}
+
+/// A plain hyperlink keeps the schema defaults.
+#[tokio::test]
+async fn default_hyperlink_edge_uses_schema_defaults() {
+    use webfind::engine::crawl_graph::LinkEdge;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("webfind.db");
+    let store = TursoStore::new(db_path.to_str().unwrap())
+        .await
+        .expect("open store");
+
+    store
+        .record_url(node("https://example.com/x", DiscoverySource::Seed, 0))
+        .await;
+    store
+        .record_url(node("https://example.com/y", DiscoverySource::LinkCrawl, 1))
+        .await;
+
+    store
+        .record_link(LinkEdge {
+            from: "https://example.com/x".to_string(),
+            to: "https://example.com/y".to_string(),
+            ..Default::default()
+        })
+        .await;
+
+    let edges = store.get_links_from("https://example.com/x").await;
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].edge_type, webfind::engine::crawl_graph::EdgeType::Hyperlink);
+    assert!((edges[0].weight - 1.0).abs() < 1e-6);
+}
+
+/// Live search hits must persist into a real database file.
+///
+/// This is the end-to-end guard for the `search --live` graph-ingest path.
+/// Before it existed, live hits were RRF-fused, returned, and dropped — the
+/// graph never learned from live search and the README's "graph memory
+/// compounds" claim was false for that path.
+#[tokio::test]
+async fn live_search_hits_persist_as_graph_nodes() {
+    use webfind::engine::live_ingest::ingest_fused_hits;
+    use webfind::engine::web_index::FusedHit;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("webfind.db");
+    let store = TursoStore::new(db_path.to_str().unwrap())
+        .await
+        .expect("open store");
+
+    // Raw RRF-scale scores, as the live index actually produces them.
+    let mk = |url: &str, score: f64| FusedHit {
+        url: url.to_string(),
+        title: format!("Title for {url}"),
+        snippet: "snippet".to_string(),
+        published_at: None,
+        score,
+        engine_count: 1,
+        engines: vec!["ddg"],
+    };
+    let hits = vec![
+        mk("https://example.com/live-a", 0.033),
+        mk("https://example.com/live-b", 0.0164),
+    ];
+
+    let report = ingest_fused_hits(&store, &hits).await.expect("ingest");
+    assert_eq!(report.nodes_recorded, 2);
+    assert_eq!(report.jobs_enqueued, 2);
+
+    // Reopen the file to prove the write is durable, not just in memory.
+    drop(store);
+    let reopened = TursoStore::new(db_path.to_str().unwrap())
+        .await
+        .expect("reopen store");
+    let nodes = reopened.get_urls().await;
+    assert_eq!(nodes.len(), 2, "nodes must survive a reopen");
+    assert!(
+        nodes
+            .iter()
+            .all(|n| n.source == DiscoverySource::LiveSearch),
+        "live hits must be tagged LiveSearch"
+    );
+
+    let jobs = reopened.dequeue_crawl_jobs(10).await.expect("jobs");
+    assert_eq!(jobs.len(), 2, "background enrichment must be queued");
 }

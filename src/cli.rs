@@ -77,10 +77,6 @@ pub enum Commands {
         #[arg(long, default_value = "false")]
         live: bool,
 
-        /// Deep research mode: runs autonomous multi-page crawl + CDP JS rendering
-        /// + persistent Turso graph memory ingestion.
-        #[arg(long, default_value = "false")]
-        deep: bool,
 
         /// Graph store to load PageRank from for ranking.
         #[arg(long, value_enum, env = "WEBFIND_GRAPH_STORE")]
@@ -314,109 +310,6 @@ pub enum Commands {
         /// Comma-separated list of explicit egress source IPs.
         #[arg(long)]
         source_ips: Option<String>,
-    },
-
-    /// Autonomous deep crawl, scraping, and real-time synthesis (deep-search)
-    #[command(name = "deep-search", alias = "research")]
-    DeepSearch {
-        /// Seed URL to start crawling from. If omitted, WebFind auto-discovers seeds.
-        #[arg(long)]
-        seed: Option<String>,
-
-        /// Query to run against the freshly indexed pages.
-        query: String,
-
-        /// Crawl depth.
-        #[arg(short, long, default_value = "2")]
-        depth: u32,
-
-        /// Maximum pages to crawl.
-        #[arg(long, default_value = "100")]
-        max_pages: u32,
-
-        /// Delay between requests (ms).
-        #[arg(long, default_value = "1000")]
-        delay: u32,
-
-        /// Respect robots.txt Disallow/Crawl-delay directives.
-        #[arg(long, default_value = "true")]
-        respect_robots: bool,
-
-        /// Proxy URLs to route requests through (comma-separated).
-        #[arg(long)]
-        proxies: Option<String>,
-
-        /// Enable dense vector indexing + hybrid search for the query.
-        #[arg(long, default_value = "false")]
-        hybrid: bool,
-
-        /// Maximum results to return.
-        #[arg(long, default_value = "10")]
-        limit: u32,
-
-        /// Include graph relationships in the response.
-        #[arg(long, default_value = "false")]
-        include_graph: bool,
-
-        /// Include full page content in each result. Enabled by default: this
-        /// is the primary web-research path for agents, and they need the
-        /// scraped body text (the MCP/CLI previously defaulted this off, so
-        /// research returned content: null and agents fell back to other
-        /// engines). Pass --include-content=false for tiny responses.
-        #[arg(long, default_value = "true")]
-        include_content: bool,
-
-        /// Follow external (cross-domain) links during crawl.
-        #[arg(long, default_value = "false")]
-        follow_external: bool,
-
-        /// Minimum hop depth to force-fetch (bypasses budget).
-        #[arg(long, default_value = "0")]
-        min_depth: u32,
-
-        /// Maximum hop depth from seed before stopping discovery.
-        #[arg(long, default_value = "5")]
-        max_depth: u32,
-
-        /// Auto-map crawl depth from the site's own map (sitemap/llms.txt)
-        /// and keep link-following inside the site's declared content surface.
-        #[arg(long, default_value = "true")]
-        auto_depth: bool,
-
-        /// Query topics for content-aware link prioritization (comma-separated).
-        #[arg(long)]
-        topics: Option<String>,
-
-        /// Additional seed URLs for multi-seed crawling (comma-separated).
-        #[arg(long)]
-        seeds: Option<String>,
-
-        /// Render JS-heavy / bot-protected pages in headless Chromium (CDP)
-        /// when a plain HTTP fetch yields no meaningful content. Enables
-        /// stealth mode so bot-protected sites serve real content.
-        #[arg(long, default_value = "false")]
-        dynamic: bool,
-
-        /// Deep research mode: no crawl deadline and no backoff caps, and use
-        /// the full CDP browser (stealth + infinite-scroll) to capture
-        /// progressively rendered pages. Intended for long-running, thorough
-        /// investigations; may run for many minutes.
-        #[arg(long, default_value = "false")]
-        deep: bool,
-
-        /// Write the JSON result to this file instead of stdout. Agents read
-        /// the file with their file-read tool — no shell/Python parsing needed.
-        #[arg(long)]
-        output: Option<std::path::PathBuf>,
-
-        /// Graph store backend to persist crawled records into (default: turso).
-        #[arg(long, value_enum, env = "WEBFIND_GRAPH_STORE")]
-        graph_store: Option<GraphStoreArg>,
-
-        /// Path to the Turso/libSQL database file (when --graph-store turso).
-        /// Every crawled record is persisted here for graph-memory awareness.
-        #[arg(long)]
-        turso_path: Option<String>,
     },
 
     /// Start the HTTP API + Web UI server (pure CLI / HTTP, no MCP)
