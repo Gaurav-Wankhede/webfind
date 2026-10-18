@@ -43,9 +43,9 @@ impl HnEngine {
 
     fn build_url(query: &str, opts: &EngineOptions) -> String {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("query", query);
-        serializer.append_pair("hitsPerPage", &opts.max_results.to_string());
-        serializer.append_pair("tags", "story");
+        let _ = serializer.append_pair("query", query);
+        let _ = serializer.append_pair("hitsPerPage", &opts.max_results.to_string());
+        let _ = serializer.append_pair("tags", "story");
         format!(
             "https://hn.algolia.com/api/v1/search?{}",
             serializer.finish()

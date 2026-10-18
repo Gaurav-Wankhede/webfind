@@ -1,9 +1,10 @@
-pub mod api;
 pub mod cli;
 pub mod config;
 pub mod engine;
-pub mod gui;
 pub mod render;
 pub mod report;
 pub mod schema;
 pub mod storage;
+pub mod db;
+pub mod pipeline;
+// pub mod commands;

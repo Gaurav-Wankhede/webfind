@@ -123,7 +123,7 @@ pub fn sanitize_url(raw_url: &str) -> Result<String, SecurityGateError> {
         } else {
             let mut serializer = url::form_urlencoded::Serializer::new(String::new());
             for (k, v) in clean_pairs {
-                serializer.append_pair(&k, &v);
+                let _ = serializer.append_pair(&k, &v);
             }
             parsed.set_query(Some(&serializer.finish()));
         }
@@ -139,11 +139,7 @@ const ADULT_NSFW_TOKENS: &[&str] = &[
     "milf", "bdsm", "fetish", "erotica", "fuck", "pussy", "penis",
 ];
 
-const AD_TRACKING_DOMAINS: &[&str] = &[
-    "doubleclick.net", "googlesyndication.com", "adnxs.com", "criteo.com",
-    "taboola.com", "outbrain.com", "advertising.com", "popads.net",
-    "propellerads.com", "adroll.com", "zedo.com", "adsterra.com",
-];
+
 
 /// Hard quarantine gate: Returns true if any text contains adult/NSFW signals.
 pub fn is_adult_or_nsfw_text(text: &str) -> bool {
@@ -159,13 +155,15 @@ pub fn is_adult_or_nsfw_text(text: &str) -> bool {
 
 /// Hard quarantine gate: Returns true if domain is known ad-network or tracking hub.
 pub fn is_ad_or_tracker_domain(domain: &str) -> bool {
-    let d = domain.to_lowercase();
-    for ad_domain in AD_TRACKING_DOMAINS {
-        if d == *ad_domain || d.ends_with(&format!(".{ad_domain}")) {
-            return true;
-        }
+    let host = domain.to_lowercase();
+    let host_clean = host.strip_prefix("www.").unwrap_or(&host);
+    if let Some(parsed_domain) = psl::domain(host_clean.as_bytes()) {
+        let suffix = parsed_domain.suffix();
+        // Check if suffix or domain signals standard tracking or dynamic ad hubs
+        suffix.as_bytes() == b"click" || suffix.as_bytes() == b"ads"
+    } else {
+        false
     }
-    false
 }
 
 #[cfg(test)]

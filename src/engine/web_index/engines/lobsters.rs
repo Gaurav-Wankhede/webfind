@@ -42,8 +42,8 @@ impl LobstersEngine {
 
     fn build_url(query: &str) -> String {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("q", query);
-        serializer.append_pair("what", "stories");
+        let _ = serializer.append_pair("q", query);
+        let _ = serializer.append_pair("what", "stories");
         format!("https://lobste.rs/search?{}", serializer.finish())
     }
 }
@@ -75,7 +75,7 @@ impl Engine for LobstersEngine {
 #[must_use]
 pub fn parse_results(html: &str, max_results: usize) -> Vec<Hit> {
     let document = Html::parse_document(html);
-    let stories: Vec<ElementRef> = document.select(&STORY).collect();
+    let stories: Vec<ElementRef<'_>> = document.select(&STORY).collect();
     let total = stories.len().min(max_results);
     let mut hits = Vec::with_capacity(total);
     for (i, story) in stories.into_iter().take(total).enumerate() {

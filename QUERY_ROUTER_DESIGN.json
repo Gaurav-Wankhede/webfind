@@ -1,0 +1,94 @@
+{
+  "architecture": "Cascade Router with Confidence Short-Circuit",
+  "principle": "Deterministic first -> Embedding similarity -> No LLM (avoid bloat). Use WebFind's existing FastEmbed + whatlang + regex.",
+  "layers": [
+    {
+      "layer": 1,
+      "name": "Deterministic / Rule-Based",
+      "latency_ms": "< 1",
+      "coverage": "Exact identifiers (CVE, GHSA, E0xxx, RFC), code verbs, known source triggers",
+      "implementation": "Pre-compiled regex + keyword sets (already in route_intent_code)",
+      "output": "SourceTier + specific engine hints (e.g., raw_github, nvd, clinicaltrials)",
+      "confidence": "1.0 if hit else 0.0"
+    },
+    {
+      "layer": 2,
+      "name": "Embedding Similarity (FastEmbed)",
+      "latency_ms": "10-50",
+      "coverage": "Semantic domain routing when no deterministic signal",
+      "implementation": "FastEmbed BGE-small + pre-computed domain centroids",
+      "domains": [
+        "government",
+        "health",
+        "legal",
+        "scientific",
+        "software",
+        "financial",
+        "standards"
+      ],
+      "output": "Best-matching domain -> engine subset + SourceTier boost",
+      "confidence": "cosine similarity; threshold >= 0.75 routes; else fallback"
+    },
+    {
+      "layer": 3,
+      "name": "Language Detection (whatlang)",
+      "latency_ms": "< 1",
+      "coverage": "Multilingual queries -> route to language-specific indexes",
+      "implementation": "whatlang::detect(query) on short text",
+      "output": "Language code -> boost matching language engines"
+    },
+    {
+      "layer": 4,
+      "name": "Fallback / General Web",
+      "latency_ms": "N/A",
+      "coverage": "Everything else",
+      "implementation": "General web engines (DDG, Bing, Mojeek, Marginalia) with source-precision re-rank",
+      "output": "General results demoted by source tier"
+    }
+  ],
+  "data_structures": {
+    "RouteDecision": {
+      "tier": "SourceTier",
+      "engines": "Vec<EngineName>",
+      "boost_factors": "HashMap<EngineName, f64>",
+      "language": "Option<String>",
+      "intent": "QueryIntent",
+      "confidence": "f64",
+      "method": "RoutingMethod"
+    },
+    "QueryIntent": {
+      "variants": [
+        "CodeError",
+        "CodeHowTo",
+        "CVE",
+        "ClinicalTrial",
+        "LegalCase",
+        "Patent",
+        "FinancialFiling",
+        "ScientificPaper",
+        "StandardSpec",
+        "SoftwareDocs",
+        "General"
+      ]
+    },
+    "RoutingMethod": {
+      "variants": [
+        "Deterministic",
+        "Embedding",
+        "LanguageFallback",
+        "GeneralFallback"
+      ]
+    }
+  },
+  "integration_point": "src/commands/search.rs -> before LiveIndex search call",
+  "performance_target": "< 5ms for 95% of queries (deterministic), < 50ms for embedding fallback",
+  "dependencies": {
+    "existing": [
+      "fastembed",
+      "whatlang",
+      "regex",
+      "source_tier"
+    ],
+    "new": "none - zero bloat"
+  }
+}

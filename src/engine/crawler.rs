@@ -140,7 +140,7 @@ impl Crawler {
 
         // 1. Build spider
         let mut website = Website::new(&self.seed_url);
-        website
+        let _ = website
             .with_limit(self.max_pages)
             .with_delay(self.delay_ms as u64)
             .with_respect_robots_txt(self.respect_robots)
@@ -312,7 +312,7 @@ impl Crawler {
     /// Simple crawl-and-fetch (no indexing) — returns extracted content.
     pub async fn crawl_only(&self) -> Result<Vec<StructuredContent>> {
         let mut website = Website::new(&self.seed_url);
-        website
+        let _ = website
             .with_limit(self.max_pages)
             .with_delay(self.delay_ms as u64)
             .with_respect_robots_txt(self.respect_robots)

@@ -56,7 +56,7 @@ type LexicalEmbedding = Embedding;
 /// inverted token index internally, so `search` only visits documents that
 /// actually contain at least one query token — it is not a linear scan.
 pub struct Bm25Index {
-    embedder: Embedder<u32, DefaultTokenizer>,
+    pub embedder: Embedder<u32, DefaultTokenizer>,
     scorer: RwLock<Scorer<String, u32>>,
     /// Document id -> its sparse embedding.
     embeddings: RwLock<HashMap<String, LexicalEmbedding>>,
@@ -128,8 +128,8 @@ impl Bm25Index {
     pub fn upsert(&self, id: &str, text: &str) {
         let embedding = self.embedder.embed(text);
         self.scorer.write().upsert(&id.to_string(), embedding.clone());
-        self.embeddings.write().insert(id.to_string(), embedding);
-        self.texts.write().insert(id.to_string(), text.to_string());
+        let _ = self.embeddings.write().insert(id.to_string(), embedding);
+        let _ = self.texts.write().insert(id.to_string(), text.to_string());
     }
 
     /// Index a batch of documents.
@@ -142,8 +142,8 @@ impl Bm25Index {
     /// Remove a document from the index.
     pub fn remove(&self, id: &str) {
         self.scorer.write().remove(&id.to_string());
-        self.embeddings.write().remove(id);
-        self.texts.write().remove(id);
+        let _ = self.embeddings.write().remove(id);
+        let _ = self.texts.write().remove(id);
     }
 
     /// Score every document against `query`, returning `(id, score)` pairs
@@ -188,7 +188,7 @@ impl Bm25Index {
         let mut hash_to_term: HashMap<u32, String> = HashMap::new();
         for token in DefaultTokenizer::default().tokenize(text) {
             let hash = <u32 as TokenEmbedder>::embed(&token);
-            hash_to_term.entry(hash).or_insert(token);
+            let _ = hash_to_term.entry(hash).or_insert(token);
         }
 
         Some(
@@ -227,7 +227,7 @@ impl Bm25Index {
         for (id, text) in texts.iter() {
             let embedding = refitted.embed(text);
             scorer.upsert(id, embedding.clone());
-            embeddings.insert(id.clone(), embedding);
+            let _ = embeddings.insert(id.clone(), embedding);
         }
         avgdl
     }

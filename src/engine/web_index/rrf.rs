@@ -56,7 +56,71 @@ pub fn reciprocal_rank_fusion(lists: &[(&[Hit], f64)], k: u32) -> Vec<FusedHit> 
                     acc.engines.push(hit.engine);
                 }
                 None => {
-                    by_url.insert(
+                    let _ = by_url.insert(
+                        key,
+                        FusedHit {
+                            url: hit.url.clone(),
+                            title: hit.title.clone(),
+                            snippet: hit.snippet.clone(),
+                            published_at: hit.published_at,
+                            score: contribution,
+                            engine_count: 1,
+                            engines: vec![hit.engine],
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    let mut fused: Vec<FusedHit> = by_url.into_values().collect();
+    fused.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.url.cmp(&b.url)));
+    fused
+}
+
+/// Dynamic Rank-Biased Lexical Fusion (RBLF).
+///
+/// Blends RRF rank scoring with exact query keyword coverage and snippet quality.
+/// Prevents low-relevance results from dominating the knowledge graph, solving the
+/// Lost-in-the-Middle and Context Rot issues on smaller AI models.
+///
+/// `alpha` controls the strength of the lexical coverage boost (default: 0.25).
+#[must_use]
+pub fn rank_biased_lexical_fusion(
+    lists: &[(&[Hit], f64)],
+    k: u32,
+    query_terms: &[String],
+    alpha: f64,
+) -> Vec<FusedHit> {
+    let k = k.max(1);
+    let alpha = alpha.clamp(0.0, 2.0);
+    let mut by_url: AHashMap<String, FusedHit> = AHashMap::new();
+
+    for (list, weight) in lists {
+        let weight = weight.max(0.0);
+        for (rank, hit) in list.iter().enumerate() {
+            let rank = u32::try_from(rank).unwrap_or(u32::MAX);
+            let base_rrf = weight / (f64::from(k) + f64::from(rank.saturating_add(1)));
+
+            // Dynamic lexical coverage multiplier
+            let coverage_multiplier = if query_terms.is_empty() {
+                1.0
+            } else {
+                let matches = keyword_match_count(query_terms, &hit.title, &hit.snippet);
+                1.0 + (alpha * (matches as f64 / query_terms.len() as f64))
+            };
+
+            let contribution = base_rrf * coverage_multiplier;
+            let key = canonical_url(&hit.url);
+
+            match by_url.get_mut(&key) {
+                Some(acc) => {
+                    acc.score += contribution;
+                    acc.engine_count += 1;
+                    acc.engines.push(hit.engine);
+                }
+                None => {
+                    let _ = by_url.insert(
                         key,
                         FusedHit {
                             url: hit.url.clone(),
@@ -125,7 +189,7 @@ pub fn aggregate_fused(fused: Vec<FusedHit>, query: &str) -> Vec<FusedHit> {
         match by_key.get_mut(&key) {
             Some(acc) => absorb(acc, &hit, &keywords),
             None => {
-                by_key.insert(key, hit);
+                let _ = by_key.insert(key, hit);
             }
         }
     }

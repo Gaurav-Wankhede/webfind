@@ -136,6 +136,23 @@ pub fn source_count() -> usize {
     all_source_urls().len()
 }
 
+/// All source URLs ordered by source-precision tier (highest trust first):
+/// PrimaryOfficial/RawSource before Reference before Encyclopedia/Community.
+/// The curation daemon consumes this so the local index fills with authoritative
+/// content first. Ties keep catalog order (stable sort).
+#[must_use]
+pub fn priority_ordered_sources() -> Vec<(&'static str, Recrawl, crate::engine::source_tier::SourceTier)> {
+    let mut v: Vec<(&'static str, Recrawl, crate::engine::source_tier::SourceTier)> = DOMAINS
+        .iter()
+        .flat_map(|d| d.sources.iter().map(|s| {
+            (s.url, s.recrawl, crate::engine::source_tier::classify(s.url))
+        }))
+        .collect();
+    // Sort by precision DESC, stable so equal-tier sources keep catalog order.
+    v.sort_by(|a, b| b.2.precision().total_cmp(&a.2.precision()));
+    v
+}
+
 /// Human-readable summary of the curated catalog.
 pub fn catalog_summary() -> String {
     let mut out = String::from("Curated seed catalog (non-Wikipedia, official sources)\n");
@@ -211,5 +228,31 @@ mod tests {
         assert!(domain_by_slug("finance").is_some());
         assert!(domain_by_slug("medical").is_some());
         assert!(domain_by_slug("nonexistent").is_none());
+    }
+
+    #[test]
+    fn priority_order_is_non_increasing() {
+        let ordered = priority_ordered_sources();
+        assert!(!ordered.is_empty());
+        let mut prev = f64::INFINITY;
+        for (_, _, tier) in &ordered {
+            let p = tier.precision();
+            assert!(p <= prev + 1e-9, "precision must be non-increasing: {} after {}", p, prev);
+            prev = p;
+        }
+    }
+
+    #[test]
+    fn official_sources_sort_before_encyclopedia() {
+        let ordered = priority_ordered_sources();
+        let first_official = ordered
+            .iter()
+            .position(|(_, _, t)| *t == crate::engine::source_tier::SourceTier::PrimaryOfficial);
+        let last_encyclopedia = ordered
+            .iter()
+            .rposition(|(_, _, t)| *t == crate::engine::source_tier::SourceTier::Encyclopedia);
+        if let (Some(fo), Some(le)) = (first_official, last_encyclopedia) {
+            assert!(fo < le, "official must precede encyclopedia in crawl priority");
+        }
     }
 }

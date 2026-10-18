@@ -57,27 +57,7 @@ pub struct Viewport {
     pub height: u16,
 }
 
-/// Timezones grouped by rough geographic region for geo-matching.
-const TIMEZONES: &[&str] = &[
-    "America/New_York",
-    "America/Chicago",
-    "America/Denver",
-    "America/Los_Angeles",
-    "America/Toronto",
-    "America/Sao_Paulo",
-    "Europe/London",
-    "Europe/Paris",
-    "Europe/Berlin",
-    "Europe/Madrid",
-    "Europe/Moscow",
-    "Asia/Tokyo",
-    "Asia/Shanghai",
-    "Asia/Singapore",
-    "Asia/Dubai",
-    "Asia/Kolkata",
-    "Australia/Sydney",
-    "Pacific/Auckland",
-];
+// Timezone validation & synthesis provided dynamically by official IANA chrono_tz crate.
 
 impl DeviceProfile {
     /// Generate a realistic device fingerprint completely at random.
@@ -137,10 +117,10 @@ impl DeviceProfile {
                 .choose(&mut rng)
                 .expect("dpr mobile array non-empty"),
         };
-        let timezone = TIMEZONES
+        let timezone = chrono_tz::TZ_VARIANTS
             .choose(&mut rng)
-            .expect("TIMEZONES array non-empty")
-            .to_string();
+            .map(|tz| tz.name().to_string())
+            .unwrap_or_else(|| "UTC".to_string());
         let hardware_concurrency = *[2u8, 4, 6, 8, 10, 12, 16]
             .choose(&mut rng)
             .expect("concurrency array non-empty");
@@ -564,7 +544,7 @@ impl SessionManager {
         };
 
         if self.sticky {
-            self.sessions
+            let _ = self.sessions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(domain.to_string(), session.clone());

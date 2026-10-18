@@ -17,7 +17,7 @@ fn run_research(query: &str, output: &str) -> (i32, String, String) {
     let _ = std::fs::remove_file(&out_path);
 
     let mut cmd = Command::new(BIN);
-    cmd.arg("research")
+    let _ = cmd.arg("research")
         .arg(query)
         .arg("--max-pages")
         .arg("5")

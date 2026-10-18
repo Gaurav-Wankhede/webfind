@@ -207,14 +207,14 @@ pub async fn migrate_graph(
             node.excerpt.clone(),
             node.embedding.clone(),
         ));
-        url_set.insert(node.url.clone());
+        let _ = url_set.insert(node.url.clone());
     }
 
     // Stub nodes for edge endpoints absent from url_nodes, so edges never dangle.
     let mut edge_endpoints: HashSet<String> = HashSet::new();
     for edge in &export.link_edges {
-        edge_endpoints.insert(edge.from.clone());
-        edge_endpoints.insert(edge.to.clone());
+        let _ = edge_endpoints.insert(edge.from.clone());
+        let _ = edge_endpoints.insert(edge.to.clone());
     }
     for url in edge_endpoints.difference(&url_set) {
         let domain = crate::engine::util::extract_domain(url).unwrap_or_default();
@@ -271,7 +271,7 @@ pub async fn migrate_graph(
         .rebuild_fts()
         .await
         .context("rebuild FTS index after migration")?;
-    store
+    let _ = store
         .compute_pagerank(20, 0.85)
         .await
         .context("compute PageRank after migration")?;

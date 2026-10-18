@@ -7,17 +7,6 @@ use std::time::Duration;
 
 use super::{EngineOptions, Error};
 
-/// Realistic desktop user agents, rotated per request so engines see varied
-/// fingerprints and a blocked request can retry with a fresh identity.
-const USER_AGENTS: &[&str] = &[
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:127.0) Gecko/20100101 Firefox/127.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
-];
-
 /// Body markers that indicate an anti-bot challenge page instead of results.
 const BLOCK_MARKERS: &[&str] = &[
     "captcha",
@@ -30,10 +19,7 @@ const BLOCK_MARKERS: &[&str] = &[
     "anomaly.js",
 ];
 
-/// Shared, cloneable HTTP client with user-agent rotation.
-///
-/// Clones share the rotation counter, so concurrent searches never repeat the
-/// same user agent in lockstep.
+/// Shared, cloneable HTTP client with dynamic user-agent generation.
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
@@ -62,11 +48,11 @@ impl Client {
         })
     }
 
-    /// Return the next user agent in the rotation.
+    /// Return the next user agent generated dynamically using `ua_generator`.
     #[must_use]
-    pub fn next_user_agent(&self) -> &'static str {
-        let idx = self.ua_counter.fetch_add(1, Ordering::Relaxed) % USER_AGENTS.len();
-        USER_AGENTS[idx]
+    pub fn next_user_agent(&self) -> String {
+        let _ = self.ua_counter.fetch_add(1, Ordering::Relaxed);
+        ua_generator::ua::spoof_ua().to_string()
     }
 
     /// Fetch a URL with a per-request timeout, returning the raw body.
@@ -83,11 +69,12 @@ impl Client {
     pub async fn fetch(
         &self,
         url: &str,
-        user_agent: &str,
+        user_agent: impl AsRef<str>,
         opts: &EngineOptions,
         accept: &str,
         extra_headers: &[(&str, &str)],
     ) -> Result<String, Error> {
+        let user_agent = user_agent.as_ref();
         let (sec_ch_ua, sec_ch_ua_platform) = if user_agent.contains("Chrome") {
             (
                 r#""Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126""#,
@@ -133,23 +120,77 @@ impl Client {
             request = request.header(*key, *value);
         }
 
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(e) if e.is_timeout() => return Err(Error::Timeout(opts.timeout_ms)),
-            Err(e) => return Err(Error::Transport(e)),
-        };
+        // Retry-with-fresh-identity on anti-bot block: a 403/429 from one request
+        // often clears on a second request with a rotated user-agent and a short
+        // randomized backoff (engines throttle by IP+UA fingerprint, not just IP).
+        // The first attempt uses the caller's UA; a blocked retry rotates to the
+        // next UA and jitters its delay so a burst of concurrent engine requests
+        // do not all retry in lockstep. Source: proxy/UA rotation best practice.
+        let mut retry_ua = user_agent.to_string();
+        let max_attempts = 3u32;
+        let mut last_response = None;
+        for attempt in 0..max_attempts {
+            let mut attempt_req = self
+                .http
+                .get(url)
+                .header(reqwest::header::USER_AGENT, &retry_ua)
+                .header(
+                    reqwest::header::ACCEPT_LANGUAGE,
+                    opts.language.as_deref().unwrap_or("en-US,en;q=0.9"),
+                )
+                .header(reqwest::header::ACCEPT, accept)
+                .header(reqwest::header::UPGRADE_INSECURE_REQUESTS, "1")
+                .header("sec-fetch-dest", "document")
+                .header("sec-fetch-mode", "navigate")
+                .header("sec-fetch-site", "none")
+                .header("sec-fetch-user", "?1")
+                .timeout(Duration::from_millis(opts.timeout_ms));
+            if !sec_ch_ua.is_empty() {
+                attempt_req = attempt_req
+                    .header("sec-ch-ua", sec_ch_ua)
+                    .header("sec-ch-ua-mobile", "?0")
+                    .header("sec-ch-ua-platform", sec_ch_ua_platform);
+            }
+            for (key, value) in extra_headers {
+                attempt_req = attempt_req.header(*key, *value);
+            }
 
-        let status = response.status();
-        if status == reqwest::StatusCode::FORBIDDEN
-            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        {
+            let response = match attempt_req.send().await {
+                Ok(response) => response,
+                Err(e) if e.is_timeout() => return Err(Error::Timeout(opts.timeout_ms)),
+                Err(e) => return Err(Error::Transport(e)),
+            };
+
+            let status = response.status();
+            if status == reqwest::StatusCode::FORBIDDEN
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            {
+                last_response = Some(response);
+                if attempt + 1 < max_attempts {
+                    // Rotate identity and back off with exponential jitter before retrying.
+                    retry_ua = self.next_user_agent();
+                    let exp_ms = 200u64.saturating_mul(2u64.pow(attempt));
+                    let jitter = (std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_nanos() as u64)
+                        .unwrap_or(0))
+                        % 350;
+                    tokio::time::sleep(Duration::from_millis(exp_ms + jitter)).await;
+                    continue;
+                }
+                return Err(Error::Blocked);
+            }
+            if !status.is_success() {
+                return Err(Error::HttpStatus(status.as_u16()));
+            }
+
+            return response.text().await.map_err(Error::Transport);
+        }
+        // Unreachable: the loop either returns or continues; if it exits, treat as blocked.
+        if last_response.is_some() {
             return Err(Error::Blocked);
         }
-        if !status.is_success() {
-            return Err(Error::HttpStatus(status.as_u16()));
-        }
-
-        response.text().await.map_err(Error::Transport)
+        Err(Error::Blocked)
     }
 
     /// Fetch a URL as HTML with a per-request timeout and challenge detection.
@@ -162,13 +203,13 @@ impl Client {
     pub async fn fetch_html(
         &self,
         url: &str,
-        user_agent: &str,
+        user_agent: impl AsRef<str>,
         opts: &EngineOptions,
     ) -> Result<String, Error> {
         let body = self
             .fetch(
                 url,
-                user_agent,
+                user_agent.as_ref(),
                 opts,
                 "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 &[],
@@ -211,10 +252,8 @@ mod tests {
         let client = Client::new().expect("client builds");
         let first = client.next_user_agent();
         let second = client.next_user_agent();
-        assert_ne!(first, second);
-        for _ in 0..USER_AGENTS.len() - 2 {
-            let _ = client.next_user_agent();
-        }
-        assert_eq!(client.next_user_agent(), first);
+        assert!(!first.is_empty());
+        assert!(!second.is_empty());
+        assert!(first.contains("Mozilla") || first.contains("AppleWebKit") || first.contains("Gecko"));
     }
 }

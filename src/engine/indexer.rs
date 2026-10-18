@@ -36,7 +36,7 @@ pub fn attach_content(results: &mut [SearchResult], contents: &[StructuredConten
     let mut by_url: ahash::AHashMap<&str, &StructuredContent> =
         ahash::AHashMap::with_capacity(contents.len());
     for c in contents {
-        by_url.insert(c.url.as_str(), c);
+        let _ = by_url.insert(c.url.as_str(), c);
     }
     for r in results {
         if let Some(c) = by_url.get(r.url.as_str()) {
@@ -198,7 +198,7 @@ mod tests {
                 "Go is a simple language for building fast concurrent software.",
             ),
         ];
-        engine.index_batch(&docs).await.unwrap();
+        let _ = engine.index_batch(&docs).await.unwrap();
         let hits = engine.search_vector("systems language", 5).await.unwrap();
         assert!(hits.contains_key("https://rust-lang.org"));
     }

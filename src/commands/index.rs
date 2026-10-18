@@ -9,7 +9,7 @@ pub async fn run(action: IndexAction) -> anyhow::Result<()> {
         IndexAction::Stats => {
             println!("Indexing is in-memory: no persistent index file exists.");
             println!(
-                "The search index is populated at runtime by 'webfind crawl', 'webfind research', or MCP research calls."
+                "The search index is populated at runtime by 'webfind crawl' or 'webfind research'."
             );
             println!("Engine: v{}", env!("CARGO_PKG_VERSION"));
             Ok(())

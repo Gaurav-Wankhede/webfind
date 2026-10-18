@@ -38,8 +38,8 @@ impl MojeekEngine {
 
     fn build_url(query: &str) -> String {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("q", query);
-        serializer.append_pair("safe", "0");
+        let _ = serializer.append_pair("q", query);
+        let _ = serializer.append_pair("safe", "0");
         format!("https://www.mojeek.com/search?{}", serializer.finish())
     }
 }
@@ -64,7 +64,7 @@ impl Engine for MojeekEngine {
 #[must_use]
 pub fn parse_results(html: &str, max_results: usize) -> Vec<Hit> {
     let document = Html::parse_document(html);
-    let items: Vec<ElementRef> = document.select(&RESULT_ITEM).collect();
+    let items: Vec<ElementRef<'_>> = document.select(&RESULT_ITEM).collect();
     let total = items.len().min(max_results);
     let mut hits = Vec::with_capacity(total);
     for (i, item) in items.into_iter().take(total).enumerate() {

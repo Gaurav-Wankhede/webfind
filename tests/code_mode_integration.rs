@@ -164,7 +164,7 @@ fn webfind_run_search_matches_direct_search_top3() {
     let engine = Arc::new(InMemorySearchEngine::new());
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        engine.index_batch(&sample_docs()).await.unwrap();
+        let _ = engine.index_batch(&sample_docs()).await.unwrap();
     });
 
     for query in ["rust", "language", "async", "concurrency"] {

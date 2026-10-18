@@ -7,11 +7,12 @@ use webfind::engine::bg_worker::BackgroundWorker;
 use webfind::engine::bulk_crawler::{BulkDomainCrawler, FollowExternalLinks, RespectRobots};
 use webfind::engine::crawl_graph::CrawlGraphStore;
 use webfind::engine::crawler::Crawler;
-use webfind::engine::embedder::{Embedder, FastembedEmbedder};
+use webfind::engine::embedder::Embedder;
+#[cfg(feature = "embed")]
+use webfind::engine::embedder::FastembedEmbedder;
 use webfind::engine::proxy_pool::{ProxyEndpoint, ProxyPool};
 use webfind::engine::search_engine::{InMemorySearchEngine, SearchEngine};
 
-#[allow(clippy::too_many_arguments)]
 pub async fn run(
     cfg: &webfind::config::WebfindConfig,
     seed: Option<String>,
@@ -68,9 +69,21 @@ pub async fn run(
     let graph_store = webfind::config::resolve_graph_store(cfg, graph_store);
     let path = crate::commands::index_path();
     let embedder: Option<Arc<dyn Embedder>> = if hybrid {
-        Some(Arc::new(
-            FastembedEmbedder::new().context("load embedding model for hybrid indexing")?,
-        ))
+        #[cfg(feature = "embed")]
+        {
+            Some(Arc::new(
+                FastembedEmbedder::new()
+                    .context("load embedding model for hybrid indexing")?,
+            ))
+        }
+        #[cfg(not(feature = "embed"))]
+        {
+            tracing::warn!(
+                "hybrid indexing requested but the `embed` feature is not enabled; \
+                 using the deterministic embedder"
+            );
+            Some(Arc::new(webfind::engine::embedder::DummyEmbedder))
+        }
     } else {
         None
     };

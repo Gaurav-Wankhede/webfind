@@ -47,5 +47,4 @@ pub mod migrate;
 pub mod proxy_pool;
 pub mod research;
 pub mod search;
-pub mod serve;
 pub mod status;

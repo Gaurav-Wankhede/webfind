@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 use anyhow::{Context, Result};
 
 /// Hex nibble lookup table for fast byte → hex encoding.
-const HEX: &[u8; 16] = b"0123456789abcdef";
+
 
 /// Canonical outbound User-Agent for every WebFind HTTP client.
 ///
@@ -52,13 +52,7 @@ pub fn url_id(url: &str) -> String {
     // `format!("{:032x}", u128)` formatting machinery, which dominates the cost
     // on short URL inputs (it is the shared step that dilutes BLAKE3's hashing
     // advantage — see PRD §7.5).
-    let mut bytes = [0u8; 32];
-    for (i, b) in digest[..16].iter().enumerate() {
-        bytes[2 * i] = HEX[(*b >> 4) as usize];
-        bytes[2 * i + 1] = HEX[(*b & 0x0f) as usize];
-    }
-    // The buffer contains only ASCII hex chars, so this cannot fail.
-    String::from_utf8(bytes.to_vec()).expect("hex encoding is always valid UTF-8")
+    hex::encode(&digest[..16])
 }
 
 /// Extract the registrable domain from a URL.
@@ -69,6 +63,18 @@ pub fn extract_domain(url: &str) -> Option<String> {
         let h = h.to_lowercase();
         h.strip_prefix("www.").map(String::from).unwrap_or(h)
     })
+}
+
+/// Extract the canonical registrable root domain (eTLD+1) using the Public Suffix List crate.
+pub fn extract_root_domain(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_lowercase();
+    let host_clean = host.strip_prefix("www.").unwrap_or(&host);
+    if let Some(domain) = psl::domain(host_clean.as_bytes()) {
+        std::str::from_utf8(domain.as_bytes()).ok().map(String::from)
+    } else {
+        Some(host_clean.to_string())
+    }
 }
 
 /// Parse a CIDR notation string `"x.x.x.x/y"` into `(Ipv4Addr, prefix)`.
@@ -110,8 +116,9 @@ pub fn parse_proxy_pool(
 
 /// Extract top keywords from text by frequency, filtering out stop words.
 pub fn extract_top_words(text: &str, top_n: usize) -> Vec<String> {
-    let stop_words: HashSet<String> = stop_words::get(stop_words::LANGUAGE::English)
-        .into_iter()
+    let stop_words: HashSet<String> = stop_words::get(stop_words::Language::English)
+        .iter()
+        .map(|s| (*s).to_string())
         .collect();
 
     let mut counts: HashMap<String, usize> = HashMap::new();

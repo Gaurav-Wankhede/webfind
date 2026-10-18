@@ -15,14 +15,14 @@ pub async fn start_test_server() -> (tokio::task::JoinHandle<()>, String) {
 
     let handle = tokio::spawn(async move {
         let mut pages: HashMap<String, (String, &'static str)> = HashMap::new();
-        pages.insert(
+        let _ = pages.insert(
             "/robots.txt".to_string(),
             (
                 "User-agent: *\nDisallow: /private/\nSitemap: http://127.0.0.1:PLACEHOLDER/sitemap.xml\nCrawl-delay: 0.1\n".to_string(),
                 "text/plain; charset=utf-8",
             ),
         );
-        pages.insert(
+        let _ = pages.insert(
             "/sitemap.xml".to_string(),
             (
                 r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -42,7 +42,7 @@ pub async fn start_test_server() -> (tokio::task::JoinHandle<()>, String) {
                 "application/xml; charset=utf-8",
             ),
         );
-        pages.insert(
+        let _ = pages.insert(
             "/".to_string(),
             (
                 r#"<!DOCTYPE html>
@@ -54,7 +54,7 @@ pub async fn start_test_server() -> (tokio::task::JoinHandle<()>, String) {
                 "text/html; charset=utf-8",
             ),
         );
-        pages.insert(
+        let _ = pages.insert(
             "/page1".to_string(),
             (
                 r#"<!DOCTYPE html>
@@ -65,7 +65,7 @@ pub async fn start_test_server() -> (tokio::task::JoinHandle<()>, String) {
                 "text/html; charset=utf-8",
             ),
         );
-        pages.insert(
+        let _ = pages.insert(
             "/page2".to_string(),
             (
                 r#"<!DOCTYPE html>
@@ -76,7 +76,7 @@ pub async fn start_test_server() -> (tokio::task::JoinHandle<()>, String) {
                 "text/html; charset=utf-8",
             ),
         );
-        pages.insert(
+        let _ = pages.insert(
             "/private/secret".to_string(),
             (
                 r#"<!DOCTYPE html>
@@ -91,7 +91,7 @@ pub async fn start_test_server() -> (tokio::task::JoinHandle<()>, String) {
         loop {
             let (mut socket, _) = listener.accept().await.unwrap();
             let pages = pages.clone();
-            tokio::spawn(async move {
+            let _ = tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
                 let n = socket.read(&mut buf).await.unwrap_or(0);
                 if n == 0 {

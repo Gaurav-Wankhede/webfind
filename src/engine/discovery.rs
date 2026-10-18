@@ -16,20 +16,37 @@ use crate::engine::crawl_graph::CrawlGraphStore;
 use crate::engine::search_engine::SearchEngine;
 use crate::engine::web_index::{EngineOptions, LiveIndex, extract_keywords};
 
-/// Minimum relevance score (0.0–1.0) for an auto-discovered seed to be accepted.
-const MIN_RELEVANCE: f64 = 0.55;
+/// Dynamic relevance threshold (defaults to 0.55, configurable via `WEBFIND_MIN_RELEVANCE`).
+fn min_relevance() -> f64 {
+    std::env::var("WEBFIND_MIN_RELEVANCE")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.55)
+}
 
-/// Hard floor for fallback seeds when nothing reaches `MIN_RELEVANCE`.
-const FALLBACK_RELEVANCE: f64 = 0.25;
+/// Dynamic floor for fallback seeds (defaults to 0.25, configurable via `WEBFIND_FALLBACK_RELEVANCE`).
+fn fallback_relevance() -> f64 {
+    std::env::var("WEBFIND_FALLBACK_RELEVANCE")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.25)
+}
 
-/// Maximum number of validated seeds to return.
-const MAX_SEEDS: usize = 5;
+/// Dynamic seed ceiling (defaults to 5, configurable via `WEBFIND_MAX_SEEDS`).
+fn max_seeds() -> usize {
+    std::env::var("WEBFIND_MAX_SEEDS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(5)
+}
 
-/// Hard ceiling on total seed-discovery time so research requests don't hang.
-/// Budget for the live seed-discovery fan-out. With 11 engines queried
-/// concurrently (each with a 10s per-request timeout), 25s leaves headroom for
-/// the slowest engine plus fusion.
-const DISCOVERY_TIMEOUT_SECS: u64 = 25;
+/// Dynamic timeout for seed discovery fan-out (defaults to 25s, configurable via `WEBFIND_DISCOVERY_TIMEOUT_SECS`).
+fn discovery_timeout_secs() -> u64 {
+    std::env::var("WEBFIND_DISCOVERY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(25)
+}
 
 /// Discover high-quality seed URLs for a query.
 ///
@@ -47,8 +64,13 @@ pub async fn discover_seeds(
     // and graph fill remaining slots as offline fallbacks — without this
     // ordering, accumulated graph memory (e.g. ruby-doc.org from an old Ruby
     // query) fills the cap and displaces live results for the current query.
+    let timeout_secs = discovery_timeout_secs();
+    let max_s = max_seeds();
+    let min_rel = min_relevance();
+    let fallback_rel = fallback_relevance();
+
     let generated = match tokio::time::timeout(
-        std::time::Duration::from_secs(DISCOVERY_TIMEOUT_SECS),
+        std::time::Duration::from_secs(timeout_secs),
         discover_from_live(query, &seen),
     )
     .await
@@ -61,7 +83,7 @@ pub async fn discover_seeds(
         Err(_) => {
             tracing::warn!(
                 "live seed discovery timed out after {}s",
-                DISCOVERY_TIMEOUT_SECS
+                timeout_secs
             );
             Vec::new()
         }
@@ -89,7 +111,7 @@ pub async fn discover_seeds(
     for seed in offline {
         if seen.insert(seed.url.clone()) {
             final_seeds.push(seed);
-            if final_seeds.len() >= MAX_SEEDS {
+            if final_seeds.len() >= max_s {
                 break;
             }
         }
@@ -103,7 +125,7 @@ pub async fn discover_seeds(
     // survives this filtering so an empty index still yields a crawlable URL.
     let high_quality: Vec<DiscoveredSeed> = final_seeds
         .iter()
-        .filter(|s| s.relevance >= MIN_RELEVANCE)
+        .filter(|s| s.relevance >= min_rel)
         .cloned()
         .collect();
     if !high_quality.is_empty() {
@@ -111,7 +133,7 @@ pub async fn discover_seeds(
     } else {
         let mut best: Vec<DiscoveredSeed> = final_seeds
             .iter()
-            .filter(|s| s.relevance >= FALLBACK_RELEVANCE)
+            .filter(|s| s.relevance >= fallback_rel)
             .cloned()
             .collect();
         if !best.is_empty() {
@@ -120,7 +142,7 @@ pub async fn discover_seeds(
                     .partial_cmp(&a.relevance)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            best.truncate(MAX_SEEDS);
+            best.truncate(max_s);
             final_seeds = best;
         }
         // else: keep the fallback seed(s) so the caller can still attempt a
@@ -215,7 +237,7 @@ fn discover_from_catalog(query: &str) -> Vec<DiscoveredSeed> {
     // Deduplicate by URL, keep the highest relevance.
     let mut by_url: HashMap<String, f64> = HashMap::new();
     for s in seeds {
-        by_url
+        let _ = by_url
             .entry(s.url)
             .and_modify(|r| *r = (*r).max(s.relevance))
             .or_insert(s.relevance);
@@ -230,7 +252,7 @@ fn discover_from_catalog(query: &str) -> Vec<DiscoveredSeed> {
             .partial_cmp(&a.relevance)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    seeds.truncate(MAX_SEEDS);
+    seeds.truncate(max_seeds());
     seeds
 }
 
@@ -240,10 +262,11 @@ async fn discover_from_index(
     query: &str,
 ) -> Result<Vec<DiscoveredSeed>> {
     let mut results = Vec::new();
+    let limit = max_seeds() * 3;
 
     // BM25 search.
     let bm25 = indexer
-        .search_bm25(query, MAX_SEEDS * 3)
+        .search_bm25(query, limit)
         .await
         .context("index BM25 search failed")?;
     for r in bm25 {
@@ -256,7 +279,7 @@ async fn discover_from_index(
 
     // Optional vector search.
     let vector = indexer
-        .search_vector(query, MAX_SEEDS * 3)
+        .search_vector(query, limit)
         .await
         .unwrap_or_default();
     for (url, score) in vector {
@@ -267,7 +290,7 @@ async fn discover_from_index(
     // Deduplicate by URL, keeping highest relevance.
     let mut by_url: HashMap<String, DiscoveredSeed> = HashMap::new();
     for seed in results {
-        by_url
+        let _ = by_url
             .entry(seed.url.clone())
             .and_modify(|e| {
                 if seed.relevance > e.relevance {
@@ -278,12 +301,7 @@ async fn discover_from_index(
     }
 
     let mut seeds: Vec<DiscoveredSeed> = by_url.into_values().collect();
-    seeds.sort_by(|a, b| {
-        b.relevance
-            .partial_cmp(&a.relevance)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    seeds.truncate(MAX_SEEDS * 2);
+    seeds.truncate(max_seeds() * 2);
     Ok(seeds)
 }
 
@@ -301,7 +319,7 @@ async fn discover_from_graph(graph: &dyn CrawlGraphStore, query: &str) -> Vec<Di
     for edge in &links {
         *inbound.entry(edge.to.clone()).or_insert(0) += 1;
         if let Some(text) = &edge.anchor_text {
-            anchors
+            let _ = anchors
                 .entry(edge.to.clone())
                 .and_modify(|t| {
                     t.push(' ');
@@ -336,7 +354,7 @@ async fn discover_from_graph(graph: &dyn CrawlGraphStore, query: &str) -> Vec<Di
             .partial_cmp(&a.relevance)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    seeds.truncate(MAX_SEEDS * 2);
+    seeds.truncate(max_seeds() * 2);
     seeds
 }
 
@@ -390,7 +408,7 @@ async fn discover_from_live(query: &str, exclude: &HashSet<String>) -> Result<Ve
             .partial_cmp(&a.relevance)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    seeds.truncate(MAX_SEEDS);
+    seeds.truncate(max_seeds());
     Ok(seeds)
 }
 
@@ -514,7 +532,7 @@ mod tests {
         );
         // Catalog seeds are authoritative: above the high-quality bar.
         assert!(
-            seeds.iter().all(|s| s.relevance >= MIN_RELEVANCE),
+            seeds.iter().all(|s| s.relevance >= min_relevance()),
             "catalog seeds must clear the high-quality threshold"
         );
     }

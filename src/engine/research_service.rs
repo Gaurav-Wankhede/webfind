@@ -8,7 +8,9 @@ use super::bg_worker::BackgroundWorker;
 use super::bulk_crawler::{BulkDomainCrawler, FollowExternalLinks, RespectRobots};
 use super::crawl_graph::{CrawlGraphStore, InMemoryCrawlGraph};
 use super::discovery;
-use super::embedder::{Embedder, FastembedEmbedder};
+use super::embedder::Embedder;
+#[cfg(feature = "embed")]
+use super::embedder::FastembedEmbedder;
 use super::proxy_pool::{ProxyEndpoint, ProxyPool};
 use super::search_engine::SearchEngine;
 use crate::schema::content::StructuredContent;
@@ -88,13 +90,25 @@ where
     // job. Production deployments with a loaded model keep real embeddings.
     let embedder: Arc<dyn Embedder> = match embedder {
         Some(e) => e,
-        None => match FastembedEmbedder::new() {
-            Ok(e) => Arc::new(e),
-            Err(e) => {
-                tracing::warn!("fastembed model unavailable, using dummy embedder: {}", e);
+        None => {
+            #[cfg(feature = "embed")]
+            {
+                match FastembedEmbedder::new() {
+                    Ok(e) => Arc::new(e),
+                    Err(e) => {
+                        tracing::warn!(
+                            "fastembed model unavailable, using dummy embedder: {}",
+                            e
+                        );
+                        Arc::new(crate::engine::embedder::DummyEmbedder)
+                    }
+                }
+            }
+            #[cfg(not(feature = "embed"))]
+            {
                 Arc::new(crate::engine::embedder::DummyEmbedder)
             }
-        },
+        }
     };
 
     let graph: Arc<dyn CrawlGraphStore + Send + Sync> = graph_store
@@ -256,7 +270,7 @@ where
     let filtered_contents = if options.domain_filter.is_empty() {
         contents
     } else {
-        let filter: std::collections::HashSet<String> = options
+        let filter: HashSet<String> = options
             .domain_filter
             .iter()
             .map(|d| d.to_lowercase())

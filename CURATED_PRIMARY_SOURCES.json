@@ -1,0 +1,261 @@
+{
+  "doctrine": "ELIMINATE any platform with restrictive rate limits (< 100 req/hr unauthenticated) OR low-quality output. Keep ONLY primary authoritative sources with generous/no rate limits and high-fidelity structured data.",
+  "curated_platforms": [
+    {
+      "domain": "government_statistics_finance",
+      "platforms": [
+        {
+          "name": "USAspending.gov (FiscalData Treasury)",
+          "base_url": "https://api.fiscaldata.treasury.gov",
+          "rate_limit": "No published hard limit; keyless, polite caching",
+          "auth": "None required",
+          "data": "Federal spending, agency budgets, awards, contracts, debt to the penny",
+          "quality": "PRIMARY - official US Treasury source"
+        },
+        {
+          "name": "Bureau of Labor Statistics (BLS)",
+          "base_url": "https://api.bls.gov/publicAPI/v2",
+          "rate_limit": "500 req/day unauthenticated; 1000/day with free key",
+          "auth": "Optional free registration key",
+          "data": "CPI, unemployment, payroll, productivity, occupational employment stats",
+          "quality": "PRIMARY - official US labor statistics"
+        },
+        {
+          "name": "Federal Reserve (FRED)",
+          "base_url": "https://api.stlouisfed.org/fred",
+          "rate_limit": "120 req/min with free API key",
+          "auth": "Free API key required",
+          "data": "815,000+ US/international economic time series",
+          "quality": "PRIMARY - St. Louis Fed official data"
+        },
+        {
+          "name": "SEC EDGAR (company filings)",
+          "base_url": "https://www.sec.gov/edgar/browse/ + api.edgarfiling.sec.gov",
+          "rate_limit": "No published limit; keyless; be polite (10 req/sec)",
+          "auth": "None for browse; token for submission APIs",
+          "data": "All public company filings (10-K, 10-Q, 8-K, XBRL financials)",
+          "quality": "PRIMARY - official SEC filings"
+        },
+        {
+          "name": "IMF / World Bank / OECD / BIS",
+          "base_url": "https://dataservices.imf.org / https://api.worldbank.org / https://stats.oecd.org",
+          "rate_limit": "Keyless, generous (SDMX/JSON)",
+          "auth": "None",
+          "data": "Global macro, debt, trade, financial stability indicators",
+          "quality": "PRIMARY - intergovernmental"
+        }
+      ]
+    },
+    {
+      "domain": "health_medical_clinical",
+      "platforms": [
+        {
+          "name": "ClinicalTrials.gov v2 (NIH/NLM)",
+          "base_url": "https://clinicaltrials.gov/api/v2",
+          "rate_limit": "~10 req/sec recommended; keyless",
+          "auth": "None",
+          "data": "500k+ clinical studies worldwide, protocols, results, sponsors",
+          "quality": "PRIMARY - FDAAA-mandated registry"
+        },
+        {
+          "name": "openFDA (FDA)",
+          "base_url": "https://api.fda.gov",
+          "rate_limit": "240 req/min unauthenticated; 120k/day with free key",
+          "auth": "Optional free key",
+          "data": "Drug labels (SPL), adverse events (FAERS), recalls, NDC, 510(k)",
+          "quality": "PRIMARY - FDA regulatory data"
+        },
+        {
+          "name": "PubMed / PubMedCentral (NLM)",
+          "base_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils + https://www.ncbi.nlm.nih.gov/pmc/tools/oai",
+          "rate_limit": "3 req/sec unauthenticated; 10/sec with API key",
+          "auth": "Optional free NCBI API key",
+          "data": "36M+ biomedical citations, 8M+ full-text articles",
+          "quality": "PRIMARY - NLM/NCBI authoritative"
+        },
+        {
+          "name": "WHO / CDC / NIH data portals",
+          "base_url": "https://ghoapi.azureedge.net / https://data.cdc.gov / https://dataportal.cdc.gov",
+          "rate_limit": "Keyless Socrata/ODATA; app token lifts throttle",
+          "auth": "Optional app token",
+          "data": "Global health observatory, US public health datasets, surveillance",
+          "quality": "PRIMARY - official health agencies"
+        },
+        {
+          "name": "ChEMBL (EBI/EMBL-EBI)",
+          "base_url": "https://www.ebi.ac.uk/chembl/api/data",
+          "rate_limit": "No hard limit at moderate volume; keyless",
+          "auth": "None",
+          "data": "Curated bioactivity (IC50, Ki, Kd), compounds, targets, assays",
+          "quality": "PRIMARY - EBI curated pharmacology"
+        }
+      ]
+    },
+    {
+      "domain": "legal_regulatory",
+      "platforms": [
+        {
+          "name": "CourtListener (Free Law Project)",
+          "base_url": "https://www.courtlistener.com/api/rest/v4",
+          "rate_limit": "5 req/min / 50/hr / 125/day unauth; membership expands",
+          "auth": "Optional membership token",
+          "data": "8.3M+ US judicial opinions, federal RECAP/PACER dockets, citations",
+          "quality": "PRIMARY - non-profit cleaned/verified case law",
+          "note": "Rate limit is RESTRICTIVE for high-volume; use BULK DATA (CSV) for bulk needs"
+        },
+        {
+          "name": "GovInfo (GPO)",
+          "base_url": "https://api.govinfo.gov",
+          "rate_limit": "Keyless; polite usage",
+          "auth": "Optional API key for higher limits",
+          "data": "Official publications from all 3 branches: Federal Register, CFR, US Code, Congressional docs",
+          "quality": "PRIMARY - US Government Publishing Office"
+        },
+        {
+          "name": "USPTO (patents & trademarks)",
+          "base_url": "https://api.uspto.gov / https://developer.uspto.gov",
+          "rate_limit": "Keyless for bulk; API key for search",
+          "auth": "Free USPTO developer account",
+          "data": "11M+ patents, trademark register, PTAB decisions, OCE data",
+          "quality": "PRIMARY - official USPTO"
+        },
+        {
+          "name": "Legislation.gov.uk / EUR-Lex / EUR-Lex SPARQL",
+          "base_url": "https://www.legislation.gov.uk / https://eur-lex.europa.eu",
+          "rate_limit": "Keyless, generous",
+          "auth": "None",
+          "data": "UK/EU legislation, case law, consolidated texts",
+          "quality": "PRIMARY - official legislative sources"
+        }
+      ]
+    },
+    {
+      "domain": "scientific_research_standards",
+      "platforms": [
+        {
+          "name": "arXiv (Cornell)",
+          "base_url": "https://export.arxiv.org/api/query",
+          "rate_limit": "3 req/sec + 10k/day; keyless",
+          "auth": "None",
+          "data": "2.4M+ preprints (physics, math, CS, econ, bio, etc.)",
+          "quality": "PRIMARY - moderated preprint server"
+        },
+        {
+          "name": "Semantic Scholar (Allen Institute)",
+          "base_url": "https://api.semanticscholar.org/graph/v1",
+          "rate_limit": "100 req/5min with free API key",
+          "auth": "Free API key",
+          "data": "200M+ papers, citations, references, embeddings, TLDRs",
+          "quality": "PRIMARY - AI-enhanced scholarly graph"
+        },
+        {
+          "name": "Crossref / DataCite",
+          "base_url": "https://api.crossref.org / https://api.datacite.org",
+          "rate_limit": "50 req/sec polite; keyless",
+          "auth": "Optional polite pool",
+          "data": "140M+ DOI metadata, citations, funding, license info",
+          "quality": "PRIMARY - DOI registration agencies"
+        },
+        {
+          "name": "IETF / RFC Editor / W3C / ISO",
+          "base_url": "https://www.rfc-editor.org / https://www.w3.org / https://www.iso.org",
+          "rate_limit": "Static files / keyless; no limits",
+          "auth": "None",
+          "data": "Internet standards (RFCs), Web standards, International standards",
+          "quality": "PRIMARY - standards bodies"
+        },
+        {
+          "name": "CORE (Open Access papers)",
+          "base_url": "https://api.core.ac.uk/v3",
+          "rate_limit": "10 req/sec with free API key",
+          "auth": "Free API key",
+          "data": "240M+ open access papers metadata + full text where available",
+          "quality": "PRIMARY - largest OA aggregator"
+        }
+      ]
+    },
+    {
+      "domain": "software_development_infrastructure",
+      "platforms": [
+        {
+          "name": "docs.rs (Rust)",
+          "base_url": "https://docs.rs/api/v1 / https://doc.rust-lang.org",
+          "rate_limit": "CDN-hosted, no practical limit",
+          "auth": "None",
+          "data": "All crates.io crate docs, rustdoc JSON, search, cross-crate links",
+          "quality": "PRIMARY - official Rust docs host"
+        },
+        {
+          "name": "crates.io / PyPI / npm / Maven Central",
+          "base_url": "https://crates.io/api/v1 / https://pypi.org/pypi / https://registry.npmjs.org / https://search.maven.org",
+          "rate_limit": "Generous CDN; keyless",
+          "auth": "None",
+          "data": "Package metadata, versions, dependencies, readmes, SBOM data",
+          "quality": "PRIMARY - official registries"
+        },
+        {
+          "name": "MDN (Mozilla Developer Network)",
+          "base_url": "https://developer.mozilla.org/api/v1 / https://github.com/mdn/content",
+          "rate_limit": "Generous; keyless",
+          "auth": "None",
+          "data": "Web platform reference, browser compat, specs, tutorials",
+          "quality": "PRIMARY - Mozilla + community curated"
+        },
+        {
+          "name": "Kubernetes / Docker / CNCF projects",
+          "base_url": "https://kubernetes.io/docs/reference/generated / https://hub.docker.com/v2",
+          "rate_limit": "Keyless static sites / generous API",
+          "auth": "None (Docker Hub: 100 pulls/6hr unauth)",
+          "data": "API reference, concepts, tasks, container images, SBOM",
+          "quality": "PRIMARY - official project docs"
+        },
+        {
+          "name": "GitHub (code search + raw) - WITH TOKEN ONLY",
+          "base_url": "https://api.github.com / https://raw.githubusercontent.com",
+          "rate_limit": "60/hr keyless (ELIMINATE); 5,000/hr with GITHUB_TOKEN (KEEP)",
+          "auth": "GITHUB_TOKEN REQUIRED for inclusion",
+          "data": "Code search, raw source files, repos, releases, advisories (GHSA)",
+          "quality": "CONDITIONAL - only with authenticated token"
+        }
+      ]
+    }
+  ],
+  "eliminated_platforms": [
+    {
+      "name": "Wikipedia / Wikimedia",
+      "reason": "Editable by anyone; documented vandalism/manipulation risk; not primary source",
+      "tier": "Encyclopedia (0.55)"
+    },
+    {
+      "name": "Reddit / StackOverflow / dev.to / Quora / Medium",
+      "reason": "Community content; useful but lowest trust; anecdotal not authoritative",
+      "tier": "Community (0.45)"
+    },
+    {
+      "name": "GitHub raw.githubusercontent.com (keyless)",
+      "reason": "60 req/hr/IP - TOO RESTRICTIVE; blocks production use",
+      "tier": "Eliminated without token"
+    },
+    {
+      "name": "CourtListener REST API (unauthenticated)",
+      "reason": "5 req/min / 125/day - TOO RESTRICTIVE for production; use bulk CSV instead",
+      "tier": "Conditional - bulk only"
+    },
+    {
+      "name": "DrugBank",
+      "reason": "Commercial license required; academic free but license trap",
+      "tier": "Eliminated for open use"
+    },
+    {
+      "name": "Generic web search engines (DDG/Bing/Mojeek)",
+      "reason": "Return mixed quality; secondary sources; noise; use only as discovery fallback",
+      "tier": "Discovery only, not primary"
+    }
+  ],
+  "integration_strategy": {
+    "primary_engines": "Each domain gets dedicated engine(s) with no rate limits or generous keyless access",
+    "fallback_chain": "Official API -> Bulk data (CSV/Parquet) -> Structured scrape (if no API) -> Eliminate",
+    "auth_handling": "Optional env var tokens (GITHUB_TOKEN, SEMANTIC_SCHOLAR_KEY, NCBI_API_KEY, COURTLISTENER_TOKEN) - never hardcoded",
+    "rate_limit_behavior": "Built-in retry-with-backoff (already in client.rs) + per-engine circuit breaker + proxy pool rotation"
+  }
+}

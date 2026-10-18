@@ -127,7 +127,7 @@ impl CacheStore {
     /// Insert or replace a cache entry and persist it.
     pub fn insert(&self, entry: CacheEntry) -> Result<()> {
         let key = Self::normalize_url(&entry.url);
-        self.entries
+        let _ = self.entries
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(key, entry);
@@ -185,7 +185,7 @@ impl CacheStore {
                 continue;
             }
             let entry: CacheEntry = serde_json::from_str(&line)?;
-            map.insert(Self::normalize_url(&entry.url), entry);
+            let _ = map.insert(Self::normalize_url(&entry.url), entry);
         }
         Ok(())
     }

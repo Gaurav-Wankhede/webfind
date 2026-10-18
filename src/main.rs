@@ -4,6 +4,13 @@ use webfind::cli::{Cli, Commands};
 
 // Global allocator (P4.5): mimalloc improves p99 latency for the concurrent
 // fetch/index workload vs. the system allocator. Must be declared before main.
+//
+// Only compiled with the `mimalloc` feature. mimalloc builds C sources that
+// some cross-compilers reject (`-Werror,-Wdate-time` on its own
+// `options.c`), which made the default build fail on Windows. Windows ships a
+// capable allocator already, so the default build uses the system allocator
+// there and native builders can opt in: `cargo build --release --features mimalloc`.
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -69,6 +76,57 @@ async fn main() -> anyhow::Result<()> {
                 turso_path,
                 hybrid,
                 live,
+            )
+            .await;
+        }
+
+
+        Commands::Research {
+            query,
+            seed,
+            seeds,
+            max_pages,
+            delay,
+            respect_robots,
+            proxies,
+            hybrid,
+            limit,
+            include_graph,
+            include_content,
+            follow_external,
+            min_depth,
+            max_depth,
+            auto_depth,
+            domains,
+            dynamic,
+            deep,
+            output,
+            graph_store,
+            turso_path,
+        } => {
+            return commands::research::run(
+                &cfg,
+                seed,
+                query,
+                max_pages,
+                delay,
+                respect_robots,
+                proxies,
+                hybrid,
+                limit,
+                include_graph,
+                include_content,
+                follow_external,
+                min_depth,
+                max_depth,
+                auto_depth,
+                domains,
+                Some(seeds.join(",")),
+                dynamic,
+                deep,
+                output,
+                graph_store,
+                turso_path,
             )
             .await;
         }
@@ -194,28 +252,6 @@ async fn main() -> anyhow::Result<()> {
             source_ips,
         } => {
             return commands::proxy_pool::run(listen, cidr, source_ips).await;
-        }
-
-
-
-        Commands::Serve {
-            port,
-            graph_store,
-            turso_path,
-            hybrid,
-            rate_limit,
-            gui_port,
-        } => {
-            return commands::serve::run(
-                &cfg,
-                port,
-                graph_store,
-                turso_path,
-                hybrid,
-                rate_limit,
-                gui_port,
-            )
-            .await;
         }
 
         Commands::Migrate { from, to } => {

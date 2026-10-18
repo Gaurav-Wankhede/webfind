@@ -7,6 +7,26 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.0] - 2026-10-19
+
+### Added
+
+- **Modern Rust 2024 Micro-Modular Architecture**:
+  - Eliminated monolithic source files down to <= 300 lines each, adhering to modern Rust 2024 module structure (file roots with sibling directory submodules, zero `mod.rs` files).
+  - Decomposed `src/engine/fetcher.rs` (3,348 lines -> 291 lines) into dedicated micro-modules under `src/engine/fetcher/`: `cleaner.rs`, `container.rs`, `dom_entities.rs`, `entities.rs`, `extract.rs`, `meta.rs`, `paywall.rs`, `quality_entities.rs`, `raw_content.rs`, `reddit.rs`, `text_process.rs`, `url_util.rs`, `tests.rs`.
+  - Decomposed `src/storage/turso_store.rs` (3,583 lines -> 228 lines) into dedicated micro-modules under `src/storage/turso_store/`: `schema.rs`, `crud.rs`, `dedup.rs`, `search.rs`, `graph.rs`, `crawl_graph.rs`, `audit.rs`, `tests.rs`.
+  - Decomposed `src/engine/ranker.rs` (908 lines -> 279 lines) into dedicated micro-modules under `src/engine/ranker/`: `funnel.rs`, `scoring.rs`, `examples.rs`, `post_process.rs`, `tests.rs`.
+- **Feature Flags Declarations** (`Cargo.toml`):
+  - Formally declared `embed` and `mimalloc` feature flags under `[features]` in `Cargo.toml`.
+  - Configured `mimalloc` as an optional dependency (`optional = true`) to allow clean opt-in performance tuning.
+
+### Removed & Refactored
+
+- **Zero Anti-Pattern Hardening**: Eradicated all `#[allow(dead_code)]` annotations across `src/`.
+- **Compiler Warning Elimination**: Resolved all rustc `check-cfg` compiler warnings for `embed` and `mimalloc` conditional compilation attributes across the binary and library crates.
+
+---
+
 ## [0.5.0] - 2026-09-29
 
 ### Added
@@ -99,7 +119,7 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed & Refined
 
-- **`deep-search` promoted to primary command** — `webfind deep-search` is now the canonical command for autonomous web crawling, dynamic CDP rendering, and real-time synthesis, with `research` maintained as an alias for backwards compatibility. This provides clear, unambiguous action-imperative metadata to LLMs and agent harnesses matching modern web search standards.
+- **Unified search interface with `--depth deep`** — `webfind search --depth deep` is now the canonical command for autonomous web crawling, dynamic CDP rendering, and real-time synthesis, with `research` maintained as an alias for backwards compatibility. This provides clear, unambiguous action-imperative metadata to LLMs and agent harnesses matching modern web search standards.
 - **Search command semantics refined** — updated `webfind search` documentation and CLI help to explicitly distinguish fast live search-engine retrieval (`webfind search "query" --live`) from pre-indexed local database/graph queries (`webfind search "query"`).
 - **Added `--output-file` to `webfind search`** — enables agents and automation scripts to write formatted JSON responses directly to a target file without requiring shell redirection or stdout piping.
 
@@ -111,7 +131,7 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Score mathematical collapse fixed** (`src/engine/web_index/rrf.rs`, `src/commands/search.rs`) — normalized min-max score calculation previously mapped the lowest-ranked hit to `0.000` (`(score - min) / range`), confusing callers and AI agents into discarding valid hits. Scaled score normalization to `[0.40, 1.0]` via `0.40 + 0.60 * ((score - min) / range)` so even the lowest ranked candidate preserves an informative confidence floor.
 - **Real index freshness metadata wired** (`src/storage/turso_store.rs`, `src/commands/search.rs`) — previously `metadata.index_freshness` returned null dates and 0.0 age when dates were missing. Added `index_freshness()` calculation querying real `min(discovered_at)`, `max(discovered_at)`, and `avg(age)` across indexed documents, populating valid UTC timestamps and accurate average age in days.
 - **Loopback SSRF gate bypass for local integration tests** (`src/engine/security_gate.rs`) — enabled loopback override when `WEBFIND_ALLOW_LOCAL_SEEDS=1` is set, allowing local integration test suites to execute without trigger false-positive SSRF blocks while keeping production fail-closed invariants intact.
-- **Silent zero-hit confusion resolved** — when `webfind search` runs against an empty or sparse local Turso index without `--live`, it now emits an actionable advisory note to `stderr` directing the caller to run `webfind search "<query>" --live` for real-time web retrieval or `webfind deep-search "<query>"` for deep page crawling and extraction.
+- **Silent zero-hit confusion resolved** — when `webfind search` runs against an empty or sparse local Turso index without `--live`, it now emits an actionable advisory note to `stderr` directing the caller to run `webfind search "<query>" --live` for real-time web retrieval or `webfind search "<query>" --depth deep` for deep page crawling and extraction.
 
 ---
 

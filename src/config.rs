@@ -124,9 +124,9 @@ pub fn load() -> anyhow::Result<WebfindConfig> {
 
 /// Resolve a single value from CLI → env → config → default.
 fn resolve(cli: Option<&str>, env_key: &str, config: Option<&str>, default: &str) -> String {
-    cli.map(std::string::ToString::to_string)
+    cli.map(ToString::to_string)
         .or_else(|| std::env::var(env_key).ok())
-        .or_else(|| config.map(std::string::ToString::to_string))
+        .or_else(|| config.map(ToString::to_string))
         .unwrap_or_else(|| default.to_string())
 }
 
@@ -145,13 +145,72 @@ pub fn resolve_turso(config: &WebfindConfig, cli_path: Option<&str>) -> String {
         config.turso.as_ref().and_then(|t| t.path.as_deref()),
         "",
     );
-    if !resolved.is_empty() {
-        return resolved;
+    if resolved.is_empty() {
+        return data_dir()
+            .join("webfind.db")
+            .to_string_lossy()
+            .into_owned();
     }
-    data_dir()
-        .join("webfind.db")
-        .to_string_lossy()
-        .into_owned()
+    // A relative override is resolved against the data dir, NOT the current
+    // directory. Without this, `WEBFIND_TURSO_PATH=foo.db` (or a relative
+    // `--turso-path`) opens a *different* graph depending on where the command
+    // was run from, which silently splits accumulated crawl memory across
+    // directories and looks exactly like "the index lost my data".
+    absolutize(PathBuf::from(resolved))
+}
+
+
+/// Strip the Windows verbatim-path prefix (`\\?\` / `\\?\UNC\`).
+///
+/// [`Path::canonicalize`] on Windows returns a *verbatim* path such as
+/// `\\?\C:\Users\...`. Most consumers — including libSQL's local-file opener —
+/// do not understand that prefix and fail to open the file. Removing it yields
+/// the ordinary `C:\Users\...` form. On non-Windows platforms the input has no
+/// prefix and is returned unchanged, so this is safe to call unconditionally.
+fn strip_windows_prefix(path: &str) -> String {
+    const VERBATIM: &str = r"\\?\";
+    const VERBATIM_UNC: &str = r"\\?\UNC\";
+    if let Some(rest) = path.strip_prefix(VERBATIM_UNC) {
+        // \\?\UNC\server\share -> \\server\share
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = path.strip_prefix(VERBATIM) {
+        return rest.to_string();
+    }
+    path.to_string()
+}
+
+/// Resolve `path` to an absolute, normalised path without touching the
+/// filesystem (so `:memory:` and remote URLs pass through untouched).
+///
+/// The result is the single canonical location every invocation agrees on, so
+/// the database persists across runs regardless of working directory.
+#[must_use]
+pub fn absolutize(path: PathBuf) -> String {
+    let s = path.to_string_lossy();
+    // In-memory and remote databases must be passed to libSQL verbatim.
+    if s == ":memory:" || s.contains("://") {
+        return s.into_owned();
+    }
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        // Anchor relative paths to the data dir (stable, home-based) rather
+        // than the process CWD (which changes per invocation).
+        data_dir().join(path)
+    };
+    match absolute.canonicalize() {
+        Ok(existing) => strip_windows_prefix(&existing.to_string_lossy()),
+        // The file does not exist yet: canonicalise the parent so the path is
+        // still absolute and normalised, then re-append the file name.
+        Err(_) => absolute
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .map(|parent| parent.join(absolute.file_name().unwrap_or_default()))
+            .unwrap_or(absolute)
+            .to_string_lossy()
+            .into_owned(),
+    }
 }
 
 use crate::cli::GraphStoreArg;
@@ -181,12 +240,23 @@ pub fn resolve_graph_store(config: &WebfindConfig, cli: Option<GraphStoreArg>) -
 /// command produced different results depending on where it was run. Anchoring
 /// to a stable per-user directory makes graph memory genuinely persistent.
 pub fn resolve_data_dir(config: &WebfindConfig) -> PathBuf {
-    config
+    let resolved = config
         .data_dir
         .clone()
         .or_else(|| std::env::var("WEBFIND_DATA_DIR").map(PathBuf::from).ok())
-        .or_else(default_home_data_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
+        .or_else(default_home_data_dir);
+    match resolved {
+        Some(dir) => dir,
+        // Never fall back to the current directory. A CWD-relative default
+        // means every working directory gets its own graph, so data indexed
+        // from one place is invisible from another — the "crawl memory
+        // vanished" symptom. Without HOME/USERPROFILE we cannot know a stable
+        // location, so fail loudly instead of silently splitting the store.
+        None => panic!(
+            "cannot determine the WebFind data directory: set HOME (or USERPROFILE), \
+             WEBFIND_DATA_DIR, or `data_dir` in webfind.toml"
+        ),
+    }
 }
 
 /// `$HOME/.webfind`, or `None` when `HOME` is unset.
@@ -305,5 +375,71 @@ mod tests {
         };
         assert_eq!(resolve_storage_max_bytes(&cfg), Some(500 * 1024 * 1024));
         assert_eq!(resolve_max_full_content_pages(&cfg), Some(1000));
+    }
+
+    #[test]
+    fn relative_turso_path_is_anchored_not_cwd_dependent() {
+        // A relative override must NOT resolve against the process CWD.
+        // Regression: it used to, so two runs from two directories opened two
+        // different graphs and accumulated crawl memory appeared to vanish.
+        let cfg = WebfindConfig::default();
+        let resolved = resolve_turso(&cfg, Some("relative.db"));
+        assert!(
+            PathBuf::from(&resolved).is_absolute(),
+            "expected an absolute path, got `{resolved}`"
+        );
+        assert!(resolved.ends_with("relative.db"), "got `{resolved}`");
+        // Anchored under the data dir, not under the CWD.
+        assert!(resolved.starts_with(&data_dir().to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn env_and_cli_overrides_are_also_absolutized() {
+        let cfg = WebfindConfig::default();
+        let via_env = resolve_turso(&cfg, None);
+        assert!(PathBuf::from(&via_env).is_absolute());
+        // The built-in default is <data_dir>/webfind.db.
+        assert!(via_env.ends_with("webfind.db"));
+    }
+
+    #[test]
+    fn memory_and_remote_paths_pass_through_untouched() {
+        assert_eq!(absolutize(PathBuf::from(":memory:")), ":memory:");
+        assert_eq!(
+            absolutize(PathBuf::from("libsql://example.com/db")),
+            "libsql://example.com/db"
+        );
+    }
+
+    #[test]
+    fn default_path_is_stable_across_calls() {
+        let cfg = WebfindConfig::default();
+        let a = resolve_turso(&cfg, None);
+        let b = resolve_turso(&cfg, None);
+        assert_eq!(a, b, "the default DB location must not drift between calls");
+    }
+
+    #[test]
+    fn windows_verbatim_prefix_is_stripped() {
+        // On Windows, canonicalize() yields `\\?\C:\...`, which libSQL cannot
+        // open. The prefix must be removed so the store path is usable there.
+        assert_eq!(
+            strip_windows_prefix(r"\\?\C:\Users\me\.webfind\webfind.db"),
+            r"C:\Users\me\.webfind\webfind.db"
+        );
+        assert_eq!(
+            strip_windows_prefix(r"\\?\UNC\server\share\db.sqlite"),
+            r"\\server\share\db.sqlite"
+        );
+    }
+
+    #[test]
+    fn strip_windows_prefix_is_a_noop_on_unix_paths() {
+        // The helper is called on every platform, so it must not mangle
+        // POSIX paths that happen to contain backslashes.
+        assert_eq!(
+            strip_windows_prefix("/home/me/.webfind/webfind.db"),
+            "/home/me/.webfind/webfind.db"
+        );
     }
 }

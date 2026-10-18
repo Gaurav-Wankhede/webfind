@@ -207,7 +207,7 @@ pub trait CrawlGraphStore: Send + Sync {
     ) -> Vec<TraversalNode> {
         let mut depth_map: HashMap<String, u32> = HashMap::new();
         let mut current = vec![start.to_string()];
-        depth_map.insert(start.to_string(), 0);
+        let _ = depth_map.insert(start.to_string(), 0);
 
         for d in 1..=max_depth {
             let mut next = Vec::new();
@@ -234,7 +234,7 @@ pub trait CrawlGraphStore: Send + Sync {
                         }
                     };
                     if !depth_map.contains_key(&neighbor) {
-                        depth_map.insert(neighbor.clone(), d);
+                        let _ = depth_map.insert(neighbor.clone(), d);
                         next.push(neighbor);
                     }
                 }
@@ -355,10 +355,10 @@ pub async fn compute_pagerank(
                     }
                 }
             }
-            new_scores.insert((*url).clone(), rank);
+            let _ = new_scores.insert((*url).clone(), rank);
         }
         for (url, rank) in new_scores {
-            scores.insert(url, rank);
+            let _ = scores.insert(url, rank);
         }
     }
 
@@ -406,7 +406,7 @@ pub async fn compute_pagerank_incremental(
 
     // Ensure all nodes have a score (new nodes get base).
     for url in &nodes {
-        scores.entry(url.clone()).or_insert(base);
+        let _ = scores.entry(url.clone()).or_insert(base);
     }
 
     // BFS from changed nodes to find all affected nodes.
@@ -414,7 +414,7 @@ pub async fn compute_pagerank_incremental(
     let mut queue: std::collections::VecDeque<(String, usize)> = std::collections::VecDeque::new();
     for url in changed_urls {
         if !affected.contains_key(url) {
-            affected.insert(url.clone(), 0);
+            let _ = affected.insert(url.clone(), 0);
             queue.push_back((url.clone(), 0));
         }
     }
@@ -425,7 +425,7 @@ pub async fn compute_pagerank_incremental(
         if let Some(out_nodes) = incoming.get(&url) {
             for in_url in out_nodes {
                 if !affected.contains_key(in_url) {
-                    affected.insert(in_url.clone(), depth + 1);
+                    let _ = affected.insert(in_url.clone(), depth + 1);
                     queue.push_back((in_url.clone(), depth + 1));
                 }
             }
@@ -446,10 +446,10 @@ pub async fn compute_pagerank_incremental(
                     }
                 }
             }
-            new_scores.insert((*url).clone(), rank);
+            let _ = new_scores.insert((*url).clone(), rank);
         }
         for (url, rank) in new_scores {
-            scores.insert(url, rank);
+            let _ = scores.insert(url, rank);
         }
     }
 
@@ -458,7 +458,7 @@ pub async fn compute_pagerank_incremental(
 
 /// In-memory graph store for tests and local crawls.
 ///
-/// Uses `DashMap` for lock-free reads and fine-grained writes so an MCP
+/// Uses `DashMap` for lock-free reads and fine-grained writes
 /// server can serve search/graph requests while a crawl is still running.
 pub struct InMemoryCrawlGraph {
     urls: DashMap<String, UrlNode>,
@@ -484,7 +484,7 @@ impl InMemoryCrawlGraph {
     }
 
     fn bump_version(&self) {
-        self.version.fetch_add(1, Ordering::SeqCst);
+        let _ = self.version.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -497,7 +497,7 @@ impl Default for InMemoryCrawlGraph {
 #[async_trait]
 impl CrawlGraphStore for InMemoryCrawlGraph {
     async fn record_url(&self, node: UrlNode) {
-        self.urls.insert(node.url.clone(), node);
+        let _ = self.urls.insert(node.url.clone(), node);
         self.bump_version();
     }
 
@@ -544,18 +544,18 @@ impl CrawlGraphStore for InMemoryCrawlGraph {
     }
 
     async fn record_page_content(&self, content: PageContentRecord) -> Result<()> {
-        self.page_content.insert(content.url_node.clone(), content);
+        let _ = self.page_content.insert(content.url_node.clone(), content);
         Ok(())
     }
 
     async fn record_embedding(&self, url: &str, embedding: Vec<f32>) -> Result<()> {
-        self.embeddings.insert(url.to_string(), embedding);
+        let _ = self.embeddings.insert(url.to_string(), embedding);
         Ok(())
     }
 
     async fn enqueue_crawl_job(&self, url: &str) -> Result<String> {
         let id = format!("job-{}", self.jobs.len() + 1);
-        self.jobs.insert(
+        let _ = self.jobs.insert(
             id.clone(),
             CrawlJob {
                 id: id.clone(),

@@ -132,7 +132,7 @@ impl DiskAnnIndex {
             .first()
             .context("DiskANN returned no id for added vector")?;
 
-        self.id_to_url.insert(id, url.to_string());
+        let _ = self.id_to_url.insert(id, url.to_string());
 
         Ok(id)
     }
@@ -223,7 +223,7 @@ pub async fn save_mapping(
     url: &str,
 ) -> Result<()> {
     let conn = turso.conn();
-    conn.execute(
+    let _ = conn.execute(
         "INSERT OR REPLACE INTO vector_index_map (id, url) VALUES (?1, ?2)",
         libsql::params![id as i64, url],
     )

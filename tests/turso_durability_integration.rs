@@ -109,7 +109,7 @@ async fn backup_restore_round_trip_preserves_data() {
 
     // "Backup" = copy the database file, exactly as documented.
     let backup_path = dir.path().join("backup.db");
-    std::fs::copy(&db_path, &backup_path).expect("copy db file as backup");
+    let _ = std::fs::copy(&db_path, &backup_path).expect("copy db file as backup");
 
     // "Restore" = open the backup copy as a fresh store.
     let restored = TursoStore::new(backup_path.to_str().unwrap())
@@ -200,7 +200,7 @@ async fn rollback_leaves_no_committed_rows() {
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
         .await
         .expect("begin transaction");
-    tx.execute(
+    let _ = tx.execute(
         "INSERT INTO url_nodes (id, url, domain, source, depth, priority, discovered_at, crawled) \
          VALUES (?1, ?2, ?3, ?4, 0, 1.0, ?5, 0)",
         libsql::params![

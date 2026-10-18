@@ -115,7 +115,7 @@ impl SearchEngine for InMemorySearchEngine {
             };
             let vectors = embedder.embed(&[&text])?;
             if let Some(vec) = vectors.into_iter().next() {
-                self.vectors.insert(content.url.clone(), vec);
+                let _ = self.vectors.insert(content.url.clone(), vec);
             }
         }
         // Real BM25 lexical index, keyed by URL so re-indexing replaces.
@@ -151,7 +151,7 @@ impl SearchEngine for InMemorySearchEngine {
                 let inputs: Vec<&str> = texts.iter().map(|t| t.as_str()).collect();
                 let vectors = embedder.embed(&inputs)?;
                 for (item, vec) in valid.iter().zip(vectors) {
-                    self.vectors.insert(item.url.clone(), vec);
+                    let _ = self.vectors.insert(item.url.clone(), vec);
                 }
             }
         }
@@ -162,7 +162,7 @@ impl SearchEngine for InMemorySearchEngine {
             self.lexical.upsert(&item.url, &Self::lexical_text(item));
         }
         if count > 0 {
-            self.lexical.refit();
+            let _ = self.lexical.refit();
         }
         self.documents.write().await.extend(valid);
         Ok(count)
@@ -175,7 +175,7 @@ impl SearchEngine for InMemorySearchEngine {
         let hits = self.lexical.search(query, limit);
 
         let docs = self.documents.read().await;
-        let by_url: std::collections::HashMap<&str, &std::sync::Arc<StructuredContent>> =
+        let by_url: HashMap<&str, &std::sync::Arc<StructuredContent>> =
             docs.iter().map(|d| (d.url.as_str(), d)).collect();
 
         let results = hits
@@ -242,7 +242,7 @@ impl SearchEngine for InMemorySearchEngine {
     ) -> Result<Vec<std::sync::Arc<StructuredContent>>> {
         let hits = self.lexical.search(query, limit);
         let docs = self.documents.read().await;
-        let by_url: std::collections::HashMap<&str, &std::sync::Arc<StructuredContent>> =
+        let by_url: HashMap<&str, &std::sync::Arc<StructuredContent>> =
             docs.iter().map(|d| (d.url.as_str(), d)).collect();
 
         Ok(hits
@@ -255,7 +255,7 @@ impl SearchEngine for InMemorySearchEngine {
         if let Some(ref embedder) = self.embedder {
             let vectors = embedder.embed(&[text])?;
             if let Some(vec) = vectors.into_iter().next() {
-                self.vectors.insert(id.to_string(), vec);
+                let _ = self.vectors.insert(id.to_string(), vec);
             }
         }
         Ok(())
@@ -266,7 +266,7 @@ impl SearchEngine for InMemorySearchEngine {
             let inputs: Vec<&str> = items.iter().map(|(_, text)| text.as_str()).collect();
             let vectors = embedder.embed(&inputs)?;
             for ((id, _), vec) in items.iter().zip(vectors) {
-                self.vectors.insert(id.clone(), vec);
+                let _ = self.vectors.insert(id.clone(), vec);
             }
         }
         Ok(())

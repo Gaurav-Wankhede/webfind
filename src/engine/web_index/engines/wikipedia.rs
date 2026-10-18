@@ -57,16 +57,16 @@ impl WikipediaEngine {
             .unwrap_or("en")
             .to_lowercase();
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("action", "query");
-        serializer.append_pair("generator", "search");
-        serializer.append_pair("gsrsearch", query);
-        serializer.append_pair("gsrlimit", &opts.max_results.clamp(1, 20).to_string());
-        serializer.append_pair("prop", "extracts|info");
-        serializer.append_pair("inprop", "url");
-        serializer.append_pair("exintro", "1");
-        serializer.append_pair("explaintext", "1");
-        serializer.append_pair("exsentences", "2");
-        serializer.append_pair("format", "json");
+        let _ = serializer.append_pair("action", "query");
+        let _ = serializer.append_pair("generator", "search");
+        let _ = serializer.append_pair("gsrsearch", query);
+        let _ = serializer.append_pair("gsrlimit", &opts.max_results.clamp(1, 20).to_string());
+        let _ = serializer.append_pair("prop", "extracts|info");
+        let _ = serializer.append_pair("inprop", "url");
+        let _ = serializer.append_pair("exintro", "1");
+        let _ = serializer.append_pair("explaintext", "1");
+        let _ = serializer.append_pair("exsentences", "2");
+        let _ = serializer.append_pair("format", "json");
         format!(
             "https://{language}.wikipedia.org/w/api.php?{}",
             serializer.finish()

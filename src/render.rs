@@ -144,101 +144,47 @@ pub struct BoxFormat;
 impl RenderFormat for BoxFormat {
     fn render_header(&self, ctx: &RenderContext) -> String {
         let status = if ctx.is_valid_content {
-            "OK"
+            ""
         } else {
-            "EXTRACTION_FAILED"
+            " [EXTRACTION_FAILED]"
         };
-        format!(
-            "┌─────────────────────────────────────────────────────────────┐\n\
-             │                    WEBFIND FETCH REPORT                    │\n\
-             ├─────────────────────────────────────────────────────────────┤\n\
-             │ Status:       {:<44} │\n\
-             ├─────────────────────────────────────────────────────────────┤\n",
-            status
-        )
+        format!("# {}{}\n", ctx.title.trim(), status)
     }
 
     fn render_metadata(&self, ctx: &RenderContext) -> String {
         let mut out = String::new();
+        let lang = if ctx.language.is_empty() { "en" } else { &ctx.language };
         out.push_str(&format!(
-            "│ URL:          {:<44} │\n",
-            truncate(&ctx.url, 44)
+            "> {} ({} words, {}ms, {})\n\n",
+            ctx.url, ctx.word_count, ctx.fetch_duration_ms, lang
         ));
-        out.push_str(&format!(
-            "│ Title:        {:<44} │\n",
-            truncate(&ctx.title, 44)
-        ));
-        out.push_str(&format!(
-            "│ Language:     {:<44} │\n",
-            format!("{} ({:.0}%)", ctx.language, ctx.language_confidence * 100.0)
-        ));
-        out.push_str(&format!("│ Words:        {:<44} │\n", ctx.word_count));
-        out.push_str(&format!(
-            "│ Reading time: {:<44} │\n",
-            format!("{}s", ctx.reading_time_seconds)
-        ));
-        out.push_str(&format!(
-            "│ Reading ease: {:<44} │\n",
-            format!("{:.1}", ctx.reading_ease)
-        ));
-        out.push_str(&format!(
-            "│ Grade level:  {:<44} │\n",
-            format!("{:.1}", ctx.grade_level)
-        ));
-        out.push_str(&format!(
-            "│ SSL:          {:<44} │\n",
-            if ctx.ssl_valid { "valid" } else { "invalid" }
-        ));
-        out.push_str(&format!(
-            "│ Paywalled:    {:<44} │\n",
-            if ctx.is_paywalled { "yes" } else { "no" }
-        ));
-        out.push_str(&format!(
-            "│ Fetched in:   {:<44} │\n",
-            format!("{}ms", ctx.fetch_duration_ms)
-        ));
-
-        if let Some(ref author) = ctx.author {
-            out.push_str(&format!("│ Author:       {:<44} │\n", truncate(author, 44)));
-        }
-        if let Some(ref published) = ctx.published_at {
-            out.push_str(&format!(
-                "│ Published:    {:<44} │\n",
-                published.format("%Y-%m-%d %H:%M UTC")
-            ));
-        }
-        out.push_str("├─────────────────────────────────────────────────────────────┤\n");
         out
     }
 
     fn render_excerpt(&self, ctx: &RenderContext) -> String {
-        let mut out = String::new();
-        out.push_str("│ EXCERPT                                                   │\n");
-        out.push_str("├─────────────────────────────────────────────────────────────┤\n");
-        for line in word_wrap(&ctx.excerpt, 59) {
-            out.push_str(&format!("│ {:<59} │\n", line));
+        if ctx.excerpt.trim().is_empty() {
+            String::new()
+        } else {
+            format!("{}\n\n", ctx.excerpt.trim())
         }
-        out
     }
 
     fn render_keywords(&self, ctx: &RenderContext, show: bool) -> String {
         if !show || ctx.keywords.is_empty() {
             return String::new();
         }
-        let mut out = String::new();
-        out.push_str("├─────────────────────────────────────────────────────────────┤\n");
-        out.push_str("│ KEYWORDS                                                  │\n");
-        out.push_str("├─────────────────────────────────────────────────────────────┤\n");
-        let kw_str: Vec<String> = ctx
+        let clean_kws: Vec<&str> = ctx
             .keywords
             .iter()
+            .map(|k| k.text.as_str())
+            .filter(|w| w.len() > 1 && w.chars().any(char::is_alphabetic))
             .take(10)
-            .map(|k| format!("{} ({:.1})", k.text, k.tfidf_score))
             .collect();
-        for line in word_wrap(&kw_str.join(", "), 59) {
-            out.push_str(&format!("│ {:<59} │\n", line));
+        if clean_kws.is_empty() {
+            String::new()
+        } else {
+            format!("**Keywords**: {}\n", clean_kws.join(", "))
         }
-        out
     }
 
     fn render_links(&self, ctx: &RenderContext, show: bool) -> String {
@@ -247,32 +193,22 @@ impl RenderFormat for BoxFormat {
         }
         let mut out = String::new();
         if !ctx.internal_links.is_empty() {
-            out.push_str(&format!(
-                "├─────────────────────────────────────────────────────────────┤\n\
-                 │ INTERNAL LINKS ({:<44}) │\n\
-                 ├─────────────────────────────────────────────────────────────┤\n",
-                ctx.internal_links.len()
-            ));
-            for link in ctx.internal_links.iter().take(10) {
-                out.push_str(&format!("│  {:<58} │\n", truncate(link, 58)));
+            out.push_str("\n**Internal Links**:\n");
+            for link in ctx.internal_links.iter().take(5) {
+                out.push_str(&format!("- {}\n", link));
             }
         }
         if !ctx.external_links.is_empty() {
-            out.push_str(&format!(
-                "├─────────────────────────────────────────────────────────────┤\n\
-                 │ EXTERNAL LINKS ({:<44}) │\n\
-                 ├─────────────────────────────────────────────────────────────┤\n",
-                ctx.external_links.len()
-            ));
-            for link in ctx.external_links.iter().take(10) {
-                out.push_str(&format!("│  {:<58} │\n", truncate(link, 58)));
+            out.push_str("\n**External Links**:\n");
+            for link in ctx.external_links.iter().take(5) {
+                out.push_str(&format!("- {}\n", link));
             }
         }
         out
     }
 
     fn render_footer(&self) -> String {
-        "└─────────────────────────────────────────────────────────────┘\n".to_string()
+        String::new()
     }
 }
 

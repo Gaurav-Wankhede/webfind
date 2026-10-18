@@ -24,10 +24,12 @@ pub use engines::{
     arxiv, bing, bing_news, crates_io, ddg, devdocs, github_code, hn, lobsters, marginalia, mdn,
     mojeek, semantic_scholar, stackoverflow, wikipedia,
 };
-pub use rrf::{FusedHit, aggregate_fused, normalize_rrf_scores, reciprocal_rank_fusion};
+pub use rrf::{
+    FusedHit, aggregate_fused, normalize_rrf_scores, rank_biased_lexical_fusion, reciprocal_rank_fusion,
+};
 pub use util::{
     aggregation_key, canonical_url, decode_bing_tracker_url, decode_ddg_redirect_url,
-    extract_keywords, keyword_match_count, normalize_result_url, parse_date_from_snippet,
+    extract_keywords, extract_quoted_terms, keyword_match_count, normalize_result_url, parse_date_from_snippet,
     positional_relevance,
 };
 
@@ -269,10 +271,30 @@ impl LiveIndex {
             }
         }
 
+        // Reliability-weighted RRF: engines are not equally trustworthy within a
+        // single fan-out. An engine that answered promptly with substantive hits is
+        // weighted above one that returned near-empty results or ran slow (often a
+        // soft-block / degraded path that still emits a 200 with a thin page). This
+        // prevents a single weak engine from injecting low-quality hits that RRF
+        // consensus then legitimizes. Weights stay modest (0.5..1.5) so consensus
+        // (agreement across engines) remains the dominant signal — reliability only
+        // tilts ties, it never overrides multi-engine agreement.
         let lists: Vec<(&[Hit], f64)> = reports
             .iter()
             .filter(|r| r.error.is_none())
-            .map(|r| (r.hits.as_slice(), 1.0))
+            .map(|r| {
+                let hit_count = r.hits.len();
+                let lat = r.latency_ms as f64;
+                // Volume factor: 0 hits -> 0.5, >=4 hits -> 1.0
+                let volume = if hit_count == 0 {
+                    0.5
+                } else {
+                    (0.5 + 0.5 * (hit_count.min(4) as f64 / 4.0)).clamp(0.5, 1.0)
+                };
+                // Latency factor: fast (<1500ms) -> 1.0, slow (>8000ms) -> 0.7
+                let speed = (1.0 - (lat / 12000.0) * 0.3).clamp(0.7, 1.0);
+                (r.hits.as_slice(), (volume * speed).clamp(0.5, 1.0))
+            })
             .collect();
         let fused = reciprocal_rank_fusion(&lists, opts.rrf_k);
         // Aggregate per-URL scores into concept groups (host + first path

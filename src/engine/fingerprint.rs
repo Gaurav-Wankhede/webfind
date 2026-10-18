@@ -583,12 +583,12 @@ pub fn fingerprint_id(
     timestamp: &str,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(ip.as_bytes());
-    hasher.update(user_agent.as_bytes());
-    hasher.update(accept_language.as_bytes());
-    hasher.update(device_class.as_bytes());
-    hasher.update(geo_region.as_bytes());
-    hasher.update(timestamp.as_bytes());
+    let _ = hasher.update(ip.as_bytes());
+    let _ = hasher.update(user_agent.as_bytes());
+    let _ = hasher.update(accept_language.as_bytes());
+    let _ = hasher.update(device_class.as_bytes());
+    let _ = hasher.update(geo_region.as_bytes());
+    let _ = hasher.update(timestamp.as_bytes());
     hasher.finalize().to_hex().to_string()
 }
 
@@ -1018,7 +1018,7 @@ impl FingerprintGenerator {
         if used.contains(ip) {
             false
         } else {
-            used.insert(ip.to_string());
+            let _ = used.insert(ip.to_string());
             true
         }
     }
@@ -1065,19 +1065,19 @@ pub fn fingerprint_headers(fp: &Fingerprint) -> reqwest::header::HeaderMap {
     use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, USER_AGENT};
     let mut headers = HeaderMap::new();
     if let Ok(v) = HeaderValue::from_str(&fp.user_agent) {
-        headers.insert(USER_AGENT, v);
+        let _ = headers.insert(USER_AGENT, v);
     }
     if let Ok(v) = HeaderValue::from_str(&fp.accept) {
-        headers.insert(ACCEPT, v);
+        let _ = headers.insert(ACCEPT, v);
     }
     if let Ok(v) = HeaderValue::from_str(&fp.accept_language) {
-        headers.insert(ACCEPT_LANGUAGE, v);
+        let _ = headers.insert(ACCEPT_LANGUAGE, v);
     }
     if let Ok(v) = HeaderValue::from_str(&fp.ip) {
-        headers.insert("X-Forwarded-For", v);
+        let _ = headers.insert("X-Forwarded-For", v);
     }
     if let Ok(v) = HeaderValue::from_str("1.1 webfind-proxy") {
-        headers.insert("Via", v);
+        let _ = headers.insert("Via", v);
     }
     headers
 }

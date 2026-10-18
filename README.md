@@ -176,7 +176,7 @@ WebFind is intentionally architected as a **pure CLI system** — avoiding the b
 ### The Single-Call Pattern
 
 ```bash
-webfind deep-search "your query here" \
+webfind search "your query here" --depth deep --live \
   --max-pages 20 --delay 300 --deep --dynamic \
   --output /tmp/webfind_result.json
 ```
@@ -185,9 +185,9 @@ webfind deep-search "your query here" \
 - **stderr**: Real-time progress indicators (`Deep-searching: ...`, `Crawl + persist complete ...`), diagnostics, and crawl telemetry.
 - **Graph Awareness**: All discovered URLs and pages persist to `webfind.db`. Future searches automatically leverage past crawls.
 
-### Essential Flags (for `webfind deep-search`)
+### Search Depth & Scoping Flags (for `webfind search`)
 
-These flags apply to **`webfind deep-search`** (the autonomous multi-page crawler and CDP extractor):
+These flags configure depth levels and scoping for **`webfind search`**:
 
 | Flag | Default | Description |
 |---|---|---|
@@ -216,8 +216,7 @@ For immediate latency-critical grounding without long-running crawls, use **`web
 
 > **Crucial Distinction for AI Agents:**
 > - To fetch **instant live web hits** (1–3s): `webfind search "<query>" --live --limit 5 --output json`
-> - To execute an **exhaustive deep crawl** (15–60s+): `webfind deep-search "<query>" --max-pages 20 --dynamic`
-> - `webfind search` does **not** take `--deep`. The `--deep` flag belongs strictly to `webfind deep-search`.
+> - To execute a **deep search** across engines: `webfind search "<query>" --depth deep --live --limit 5`
 
 ---
 
@@ -246,19 +245,23 @@ webfind search "async runtime architecture" --live --domains "docs.rs,github.com
 webfind search "distributed systems consensus" --limit 5 --hybrid
 ```
 
-### 2. Autonomous Deep Research (`webfind deep-search`)
+### 2. Deep Search & Full Content Extraction (`webfind search --depth deep`)
 Full autonomous crawling, link traversal, headless Chromium (CDP) JavaScript rendering, and direct persistence to embedded Turso graph memory:
 
 ```bash
 # Autonomous deep crawl and research on a topic (auto-discovers authoritative seeds)
-webfind deep-search "post-quantum cryptography lattice signatures" \
+webfind search "post-quantum cryptography lattice signatures" \
+  --depth deep \
+  --live \
   --max-pages 20 \
   --delay 300 \
   --dynamic \
   --output /tmp/research.json
 
 # Targeted deep research on a specific documentation domain
-webfind deep-search "SIMD vectorization patterns" \
+webfind search "SIMD vectorization patterns" \
+  --depth deep \
+  --live \
   --seed https://doc.rust-lang.org \
   --depth 3 \
   --max-pages 50 \

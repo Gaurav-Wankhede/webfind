@@ -41,10 +41,10 @@ impl MarginaliaEngine {
 
     fn build_url(query: &str, opts: &EngineOptions) -> String {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("query", query);
-        serializer.append_pair("count", &opts.max_results.to_string());
+        let _ = serializer.append_pair("query", query);
+        let _ = serializer.append_pair("count", &opts.max_results.to_string());
         // Domain category 3 = general web.
-        serializer.append_pair("dc", "3");
+        let _ = serializer.append_pair("dc", "3");
         format!(
             "https://api2.marginalia-search.com/search?{}",
             serializer.finish()

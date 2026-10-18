@@ -87,6 +87,95 @@ pub enum Commands {
         turso_path: Option<String>,
     },
 
+    /// Research a topic: crawl authoritative sources into the persistent graph
+    /// and synthesize a cited report. Seeds come from live engines, the index,
+    /// and the graph memory — not a hardcoded list.
+    Research {
+        /// The research question / topic
+        query: String,
+
+        /// Seed URL to start from (optional; discovered seeds are used otherwise)
+        #[arg(long)]
+        seed: Option<String>,
+
+        /// Additional seed URLs (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        seeds: Vec<String>,
+
+        /// Maximum pages to crawl
+        #[arg(long, default_value = "20")]
+        max_pages: u32,
+
+        /// Delay between requests (ms)
+        #[arg(long, default_value = "1000")]
+        delay: u32,
+
+        /// Respect robots.txt
+        #[arg(long, default_value = "true")]
+        respect_robots: bool,
+
+        /// Rotate through these proxy URLs (comma-separated, supports socks5://)
+        #[arg(long)]
+        proxies: Option<String>,
+
+        /// Enable BM25 + vector hybrid re-ranking
+        #[arg(long, default_value = "false")]
+        hybrid: bool,
+
+        /// Maximum results to return
+        #[arg(short, long, default_value = "5")]
+        limit: u32,
+
+        /// Include graph relationships
+        #[arg(long, default_value = "false")]
+        include_graph: bool,
+
+        /// Include full page content
+        #[arg(long, default_value = "true")]
+        include_content: bool,
+
+        /// Follow external (off-domain) links
+        #[arg(long, default_value = "false")]
+        follow_external: bool,
+
+        /// Minimum crawl depth
+        #[arg(long, default_value = "1")]
+        min_depth: u32,
+
+        /// Maximum crawl depth
+        #[arg(long, default_value = "2")]
+        max_depth: u32,
+
+        /// Auto-map crawl depth from the site's own map (sitemap/llms.txt)
+        #[arg(long, default_value = "false")]
+        auto_depth: bool,
+
+        /// Domain filter (comma-separated)
+        #[arg(long)]
+        domains: Option<String>,
+
+        /// Render JS-heavy pages in headless Chromium
+        #[arg(long, default_value = "false")]
+        dynamic: bool,
+
+        /// Deep research: no crawl deadline caps + CDP stealth + scroll
+        #[arg(long, default_value = "false")]
+        deep: bool,
+
+        /// Write output to this file path instead of stdout
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+
+        /// Graph store backend
+        #[arg(long, value_enum, env = "WEBFIND_GRAPH_STORE")]
+        graph_store: Option<GraphStoreArg>,
+
+        /// Path to the Turso/libSQL database file (when --graph-store turso)
+        #[arg(long)]
+        turso_path: Option<String>,
+    },
+
+
     /// Fetch and extract content from a URL
     Fetch {
         /// URL to fetch (or first URL if --urls is used)
@@ -311,34 +400,6 @@ pub enum Commands {
         #[arg(long)]
         source_ips: Option<String>,
     },
-
-    /// Start the HTTP API + Web UI server (pure CLI / HTTP, no MCP)
-    Serve {
-        /// Port for HTTP transport (default: 4747)
-        #[arg(long, default_value = "4747")]
-        port: u16,
-
-        /// Graph store to load PageRank from for ranking.
-        #[arg(long, value_enum, env = "WEBFIND_GRAPH_STORE")]
-        graph_store: Option<GraphStoreArg>,
-
-        /// Path to the Turso/libSQL database file (when --graph-store turso).
-        #[arg(long)]
-        turso_path: Option<String>,
-
-        /// Enable BM25 + vector hybrid re-ranking by default.
-        #[arg(long, default_value = "false")]
-        hybrid: bool,
-
-        /// Optional per-IP rate limit in requests per second (0 = disabled).
-        #[arg(long, env = "WEBFIND_RATE_LIMIT")]
-        rate_limit: Option<u32>,
-
-        /// Port for the HTML GUI server (default: 4749).
-        #[arg(long, default_value = "4749", env = "WEBFIND_GUI_PORT")]
-        gui_port: u16,
-    },
-
     /// Migrate a legacy SurrealDB JSON export into a fresh Turso database
     Migrate {
         /// Path to the JSON export file (url_nodes + link_edges).

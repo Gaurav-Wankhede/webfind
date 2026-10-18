@@ -1,0 +1,66 @@
+//! Engine modules for WebFind
+//!
+//! Core search and retrieval engine components.
+
+pub mod bg_worker;
+pub mod bulk_crawler;
+pub mod crawl_graph;
+pub mod device_profile;
+pub mod discovery;
+pub mod embedder;
+pub mod fetcher;
+pub mod fingerprint;
+pub mod human_client;
+pub mod indexer;
+pub mod live_ingest;
+pub mod proxy_pool;
+pub mod proxy_server;
+pub mod query_router;
+pub mod ranker;
+pub mod research_service;
+pub mod search_engine;
+pub mod security_gate;
+pub mod seed_catalog;
+pub mod curation_daemon;
+pub mod site_policy;
+pub mod source_tier;
+pub mod relevance;
+pub mod util;
+pub mod bm25_index;
+pub mod content_classifier;
+pub mod crawler;
+pub mod reddit;
+pub mod web_index;
+pub mod pipeline;
+pub mod graph_summary;
+
+pub use query_router::*;
+pub use source_tier::*;
+pub use relevance::*;
+pub use seed_catalog::*;
+pub use curation_daemon::*;
+pub use bg_worker::*;
+pub use bulk_crawler::*;
+pub use crawl_graph::*;
+pub use device_profile::*;
+pub use embedder::*;
+pub use fetcher::*;
+pub use fingerprint::*;
+pub use human_client::*;
+pub use indexer::*;
+pub use live_ingest::*;
+pub use proxy_pool::*;
+pub use proxy_server::*;
+pub use ranker::*;
+pub use research_service::*;
+pub use search_engine::*;
+pub use security_gate::*;
+pub use site_policy::*;
+pub use util::*;
+pub use bm25_index::*;
+pub use content_classifier::*;
+pub use crawler::*;
+pub use reddit::*;
+pub use web_index::*;
+pub use pipeline::*;
+pub use graph_summary::*;

@@ -38,9 +38,9 @@ impl MdnEngine {
 
     fn build_url(query: &str, opts: &EngineOptions) -> String {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("q", query);
-        serializer.append_pair("locale", "en-US");
-        serializer.append_pair("size", &opts.max_results.to_string());
+        let _ = serializer.append_pair("q", query);
+        let _ = serializer.append_pair("locale", "en-US");
+        let _ = serializer.append_pair("size", &opts.max_results.to_string());
         format!("{MDN_HOST}/api/v1/search?{}", serializer.finish())
     }
 }

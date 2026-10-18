@@ -19,7 +19,7 @@ impl VectorStore {
     }
 
     pub fn insert(&self, id: String, vector: Vec<f32>) {
-        self.vectors.insert(id, vector);
+        let _ = self.vectors.insert(id, vector);
     }
 
     pub fn len(&self) -> usize {

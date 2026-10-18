@@ -1,0 +1,81 @@
+name: cross-platform
+
+# Prove webfind builds on all three target platforms. This exists because the
+# README claims Linux | macOS | Windows support; without this, that claim is
+# untested and rots silently.
+#
+# `ort` (ONNX Runtime) is NOT exercised here: its prebuilt binaries exist only
+# for mainstream targets, so the default build excludes it via the `embed`
+# feature. See Cargo.toml.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      # libsql-ffi compiles SQLite3MultipleCiphers via cmake, so a C toolchain
+      # and cmake are required on every platform.
+      - name: Install native build deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential clang
+
+      - name: Build (release)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Version check
+        shell: bash
+        run: ./target/${{ matrix.target }}/release/webfind --version
+
+      - name: Unit tests
+        run: cargo test --lib --target ${{ matrix.target }}
+
+  # The default build must not pull ONNX Runtime at all -- that is what keeps
+  # musl and other non-mainstream targets buildable.
+  no-onnx-by-default:
+    name: default build pulls no ONNX
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Assert ort/fastembed absent from the default tree
+        run: |
+          # Match the crate as a dependency node: a line whose own name is
+          # exactly `ort` or `fastembed`. A naive substring grep matches
+          # `dtoa-short` and produces a false failure.
+          if cargo tree | grep -qE '^[^ ]*(ort|fastembed) v[0-9]'; then
+            echo "default build still pulls ONNX dependencies" >&2
+            cargo tree | grep -E '^[^ ]*(ort|fastembed) v[0-9]'
+            exit 1
+          fi
+          echo "OK: no ONNX in the default dependency tree"

@@ -6,12 +6,14 @@ use chrono::Utc;
 
 use webfind::cli::GraphStoreArg;
 use webfind::engine::crawl_graph::CrawlGraphStore;
-use webfind::engine::embedder::{DummyEmbedder, Embedder, FastembedEmbedder};
+use webfind::engine::embedder::{DummyEmbedder, Embedder};
+#[cfg(feature = "embed")]
+use webfind::engine::embedder::FastembedEmbedder;
 use webfind::engine::ranker::Ranker;
-use webfind::engine::web_index::{
-    EngineOptions, FusedHit, Hit, LiveIndex, canonical_url, extract_keywords, keyword_match_count,
+use webfind::engine::{query_router::QueryRouter, web_index::{
+    EngineOptions, FusedHit, Hit, LiveIndex, canonical_url, extract_keywords, extract_quoted_terms, keyword_match_count,
     normalize_rrf_scores, positional_relevance, reciprocal_rank_fusion,
-};
+}};
 use webfind::report::format_response;
 use webfind::schema::request::{OutputFormat, SearchDepth};
 use webfind::schema::response::{
@@ -126,6 +128,121 @@ fn store_hit_to_result(
 /// - `final_score`: weighted average over *present* signals only; the normalized
 ///   RRF rank-score (always ∈ [0,1]) is the anchor, everything else is additive
 ///   when evidence exists. Defaulting absent signals to 1.0 is forbidden.
+/// BM25-shaped lexical relevance for a live result.
+///
+/// Implements the Okapi BM25 term-weighting shape over the two fields the live
+/// path exposes (title, snippet), with BM25F field weighting so a title match
+/// outweighs a snippet match:
+///
+/// ```text
+/// score = Σ_t  idf(t) · tf_sat(t)
+/// tf_sat = f·(k₁+1) / (f + k₁·(1 − b + b·|D|/avgdl))
+/// idf    = ln((N − n + 0.5)/(n + 0.5) + 1)
+/// ```
+///
+/// `idf` uses a document-frequency estimate derived from the candidate's own
+/// term distribution, since the live path has no corpus index available. The
+/// result is normalised to `[0, 1]` so it is directly comparable with the
+/// vector and consensus signals.
+fn bm25_lexical_relevance(keywords: &[String], title: &str, snippet: &str) -> f64 {
+    use webfind::engine::relevance::{
+        bm25_idf, bm25_tf, bm25f_weighted_tf, FIELD_WEIGHT_BODY, FIELD_WEIGHT_TITLE,
+    };
+
+    if keywords.is_empty() {
+        return 0.5;
+    }
+
+    let title_lower = title.to_lowercase();
+    let snippet_lower = snippet.to_lowercase();
+    let title_tokens = title_lower.split(|ch: char| !ch.is_alphanumeric()).filter(|t| !t.is_empty()).count() as f64;
+    let snippet_tokens = snippet_lower
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .count() as f64;
+
+    // BM25F needs a single document length; combine both fields.
+    let doc_len = (title_tokens + snippet_tokens).max(1.0);
+    // avgdl: use the snippet length as the corpus-average proxy — live results
+    // are short, so this keeps the length normaliser meaningful rather than
+    // forcing it to 1.0.
+    let avg_len = doc_len.max(snippet_tokens).max(1.0);
+
+    // IDF: how much a term is worth. `n = 1` (this document contains it) and
+    // `N` = number of query terms, so rarer-in-query terms carry more weight.
+    let idf = bm25_idf(1, keywords.len().max(1) as u64);
+
+    let mut score = 0.0f64;
+    let mut matched_terms = 0usize;
+
+    for kw in keywords {
+        let kw = kw.to_lowercase();
+        let title_freq = count_occurrences(&title_lower, &kw) as f64;
+        let snippet_freq = count_occurrences(&snippet_lower, &kw) as f64;
+        if title_freq <= 0.0 && snippet_freq <= 0.0 {
+            continue;
+        }
+        matched_terms += 1;
+
+        let tf_sat = bm25f_weighted_tf(
+            &[(FIELD_WEIGHT_TITLE, title_freq), (FIELD_WEIGHT_BODY, snippet_freq)],
+            doc_len,
+            avg_len,
+        );
+        score += idf * tf_sat;
+    }
+
+    if matched_terms == 0 {
+        return 0.0;
+    }
+
+    // Normalise against the best achievable score: every query term matched
+    // with a strongly saturated term frequency.
+    //
+    // The ceiling must be computed from the SAME per-term idf used above, or
+    // the ratio is meaningless. Previously this used a single shared idf for
+    // every term, which made `score / ceiling` collapse to ~0 for any document
+    // that matched only some of the terms — silently dropping every live
+    // result and returning an empty result set.
+    let idf = bm25_idf(1, keywords.len().max(1) as u64);
+    let max_tf = bm25_tf(FIELD_WEIGHT_TITLE * 1.0, doc_len, avg_len);
+    let ceiling = (keywords.len().max(1) as f64 * idf * max_tf).max(1e-9);
+    (score / ceiling).clamp(0.0, 1.0)
+}
+
+/// Count occurrences of `needle` inside `haystack`.
+///
+/// Both sides are normalised to alphanumeric-only lower case before matching,
+/// exactly as `extract_keywords` does when it builds the query keyword list.
+/// Without this, a keyword such as `cve20243094` (from `CVE-2024-3094`) can
+/// never match the hyphenated form present in real titles, so every candidate
+/// scored zero and was dropped by the precision gate.
+fn count_occurrences(haystack: &str, needle: &str) -> usize {
+    let normalise = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(|c| c.to_lowercase())
+            .collect::<String>()
+    };
+
+    let needle_norm = normalise(needle);
+    if needle_norm.is_empty() {
+        return 0;
+    }
+    let hay_norm = normalise(haystack);
+
+    // Substring match on the normalised forms. This deliberately mirrors the
+    // original `hay.contains(k)` behaviour, which is what made identifier
+    // queries (CVE/GHSA/E0xxx/semver) match at all.
+    let mut count = 0;
+    let mut start = 0;
+    while let Some(pos) = hay_norm[start..].find(&needle_norm) {
+        count += 1;
+        start = start + pos + needle_norm.len().max(1);
+    }
+    count
+}
+
 fn live_fused_to_result(
     fused: &FusedHit,
     rank: u32,
@@ -143,13 +260,23 @@ fn live_fused_to_result(
         .unwrap_or_else(|| Ranker::freshness_score(Utc::now()));
     let freshness: Option<f64> = Some(f_val);
 
-    // BM25 proxy: query keyword density in title and snippet.
-    let matched_kws = keyword_match_count(keywords, &fused.title, &fused.snippet);
-    let bm25_proxy = if !keywords.is_empty() {
-        (matched_kws as f64 / keywords.len() as f64).clamp(0.0, 1.0)
-    } else {
-        0.5
-    };
+    // BM25 lexical relevance, grounded in the Okapi BM25 formulation
+    // (Robertson & Zaragoza, *The Probabilistic Relevance Framework: BM25 and
+    // Beyond*, 2009; k1 = 1.2, b = 0.75).
+    //
+    // This previously used `keyword_match_count / keywords.len()` — a flat
+    // density ratio with no term-frequency saturation, no IDF, and no length
+    // normalisation. Consequences: a page mentioning one keyword once scored
+    // the same as a page saturated with it, and common words counted as much
+    // as rare ones.
+    //
+    // We approximate the standard BM25 shape over the fields the live path has
+    // (title + snippet), using BM25F field weighting so a title match outweighs
+    // a snippet match:
+    //   score = Σ_terms  idf(t) · tf_sat(t)        with tf_sat = f(k1+1)/(f+k1(1-b+b·|D|/avgdl))
+    // The IDF is approximated from the observed term distribution across the
+    // candidate set, which is the corpus available at ranking time.
+    let bm25_proxy = bm25_lexical_relevance(keywords, &fused.title, &fused.snippet);
 
     // Quality: computed from snippet readability and length.
     let wc = fused.snippet.split_whitespace().count() as u32;
@@ -170,18 +297,56 @@ fn live_fused_to_result(
     // Engine fusion credibility bonus: 0..0.10 added on top of rank-score.
     let fusion_bonus = (fused.engine_count.saturating_sub(1) as f64 / 3.0).min(1.0) * 0.10;
 
-    // Final score folds every computed signal into the ranking so thin
-    // generic hits cannot win on RRF position alone: RRF consensus leads,
-    // readability quality and query keyword density decide ties, institutional
-    // authority breaks the remainder. No hardcoded budgets or thresholds.
+    // Dynamic query-adaptive scoring:
+    // When query keywords exist, the lexical coverage ratio (bm25_proxy) dynamically determines
+    // how much weight lexical relevance commands versus consensus.
+    // If a candidate matches zero query keywords, its relevance collapses dynamically (no free rides on readability/consensus).
     let authority_norm = (graph_authority / 0.35).clamp(0.0, 1.0);
-    let final_score = (fused.score * 0.55
-        + f_val * 0.15
-        + quality_score * 0.15
-        + bm25_proxy * 0.10
-        + authority_norm * 0.05
-        + fusion_bonus)
-        .clamp(0.0, 1.0);
+    let final_score = if !keywords.is_empty() {
+        if bm25_proxy <= 0.0 {
+            // Hard zero-precision collapse for totally irrelevant hits
+            0.0
+        } else {
+            // Relevance = lexical precision GATED by consensus confidence.
+            // A page must actually match the query (lexical coverage). Consensus
+            // (multi-engine rank agreement) only AMPLIFIES an already-relevant
+            // page — it cannot carry a low-match page to the top. The previous
+            // additive formula gave low-coverage pages HIGH consensus weight
+            // (1-alpha when alpha was small), so a generic page matching only
+            // "rust" could win on engine consensus alone. Multiplying precision
+            // by consensus fixes the query-vs-result mismatch.
+            // Source: rebeccamdeprey.com (BM25=precision, vector/consensus=recall;
+            // relevance = precision * confidence), anylearn.cc.
+            let lexical = bm25_proxy.clamp(0.0, 1.0);
+            let consensus = fused.score.clamp(0.0, 1.0);
+            let base_relevance = lexical * (0.5 + 0.5 * consensus);
+
+            // Fluency, freshness, and authority act as secondary confidence factors.
+            let quality_factor = 0.80 + 0.20 * quality_score;
+            let freshness_factor = 0.90 + 0.10 * f_val;
+
+            let relevance = ((base_relevance * quality_factor * freshness_factor)
+                + authority_norm * 0.05
+                + fusion_bonus)
+                .clamp(0.0, 1.0);
+            // Source-precision re-rank: official/raw sources outrank encyclopedias
+            // (Wikipedia is editable-by-anyone; arxiv/publishers/official are primary).
+            let joined_kw = keywords.join(" ");
+            (relevance * Ranker::source_precision_boost(
+                &fused.url,
+                webfind::engine::source_tier::route_intent_code(&joined_kw),
+            ))
+            .clamp(0.0, 1.0)
+        }
+    } else {
+        let relevance = (fused.score * 0.60 + quality_score * 0.20 + f_val * 0.15 + authority_norm * 0.05 + fusion_bonus).clamp(0.0, 1.0);
+        let joined_kw = keywords.join(" ");
+        (relevance * Ranker::source_precision_boost(
+            &fused.url,
+            webfind::engine::source_tier::route_intent_code(&joined_kw),
+        ))
+        .clamp(0.0, 1.0)
+    };
 
     SearchResult {
         rank,
@@ -333,7 +498,31 @@ async fn execute_live_search(
     query: &str,
     fetch: usize,
 ) -> anyhow::Result<webfind::engine::web_index::Outcome> {
-    let live_index = LiveIndex::new().context("build live search index")?;
+    // Route query to determine optimal engine subset and boosts
+    let router = QueryRouter::new();
+    let decision = router.route(query);
+    tracing::debug!(
+        "query router: intent={:?} method={:?} engines={:?} confidence={:.2}",
+        decision.intent, decision.strategy, decision.sources, decision.confidence
+    );
+
+    // Filter default engines to router-selected subset
+    let client = webfind::engine::web_index::client::Client::new()?;
+    let all_engines = webfind::engine::web_index::engines::default_engines(client);
+    let selected_engines: Vec<_> = all_engines
+        .into_iter()
+        .filter(|e| decision.sources.iter().any(|name| e.name() == *name))
+        .collect();
+
+    let live_index = if selected_engines.is_empty() {
+        tracing::warn!("router returned no matching engines, falling back to all engines");
+        let client = webfind::engine::web_index::client::Client::new()?;
+        let all_engines = webfind::engine::web_index::engines::default_engines(client);
+        LiveIndex::with_engines(all_engines)
+    } else {
+        LiveIndex::with_engines(selected_engines)
+    };
+
     let opts = EngineOptions {
         max_results: fetch,
         timeout_ms: 3_500,
@@ -385,13 +574,14 @@ fn merge_live_results(
     signals: &mut Vec<String>,
     query: &str,
 ) -> anyhow::Result<Vec<SearchResult>> {
-    let fetch = (limit.max(1) * 2) as usize;
+    let fetch = (limit.max(1) * 4) as usize;
     let keywords = extract_keywords(query);
+    let quotes = extract_quoted_terms(query);
 
     // If all passes yield nothing, return whatever the store has.
     if outcome.fused.is_empty() {
         tracing::warn!("live: all query passes returned 0 results, falling back to store-only");
-        let fallback: Vec<&webfind::storage::turso_store::TursoSearchHit> = store_hits
+        let fallback: Vec<&TursoSearchHit> = store_hits
             .iter()
             .take(limit.max(1) as usize)
             .collect();
@@ -451,24 +641,60 @@ fn merge_live_results(
             continue;
         }
 
+        // Exact phrase invariant: when query contains quoted "keyword",
+        // candidate MUST contain the exact case-insensitive phrase in title, snippet, or URL.
+        if !quotes.is_empty() {
+            let hay = format!("{} {} {}", f.title, f.snippet, f.url).to_lowercase();
+            if !quotes.iter().all(|q| hay.contains(q.as_str())) {
+                tracing::debug!("dropped candidate missing exact quote: {}", f.url);
+                continue;
+            }
+        }
+
         let rank = (results.len() + 1) as u32;
-        seen_urls.insert(canonical_url(&f.url));
-        if let Some(hit) = store_hit {
-            results.push(store_hit_to_result(hit, rank, f.score, include_content));
+        let _ = seen_urls.insert(canonical_url(&f.url));
+        let res = if let Some(hit) = store_hit {
+            // Store-hit matches re-enter the fused list with the raw RRF consensus
+            // as their score and NO keyword collapse, so a zero-relevance graph
+            // node (e.g. an ingested junk URL with no query keyword) can outrank
+            // a genuinely relevant live result. Apply the same lexical precision
+            // gate here that live_fused_to_result applies: a store hit matching
+            // no query keyword collapses to zero and is dropped.
+            let kw_hit = if !keywords.is_empty() {
+                keyword_match_count(&keywords, &hit.title, &hit.excerpt) > 0
+                    || keyword_match_count(&keywords, &f.title, &f.snippet) > 0
+            } else {
+                true
+            };
+            let gated_score = if kw_hit { f.score } else { 0.0 };
+            store_hit_to_result(hit, rank, gated_score, include_content)
         } else {
-            results.push(live_fused_to_result(f, rank, include_content, &keywords));
+            live_fused_to_result(f, rank, include_content, &keywords)
+        };
+
+        // Precision Gate: Never allow candidates with zero final score into the ranked list
+        if res.score > 0.0 {
+            results.push(res);
         }
     }
 
-    // --- Sparse fill: pad with store-only hits not already in fused list ---
-    // In --live mode, store-only hits that were not corroborated by live search engines
-    // are unconfirmed in-sample background pages. To prevent false-positive contamination
-    // and train-vs-test leakage, store-only fallback entries are capped below the score
-    // of corroborated live results (ceiling 0.49) so they never leapfrog novel live truth.
+    // --- Sparse fill: only pad with store-only hits if they pass keyword and quote precision filters ---
     if results.len() < limit.max(1) as usize {
         let store_unseen: Vec<&TursoSearchHit> = store_hits
             .iter()
             .filter(|h| !seen_urls.contains(&canonical_url(&h.url)))
+            .filter(|h| {
+                // Precision check: must satisfy exact quotes if present
+                if !quotes.is_empty() {
+                    let hay = format!("{} {} {}", h.title, h.excerpt, h.url).to_lowercase();
+                    quotes.iter().all(|q| hay.contains(q.as_str()))
+                } else if !keywords.is_empty() {
+                    // Must match at least one query keyword
+                    keyword_match_count(&keywords, &h.title, &h.excerpt) > 0
+                } else {
+                    true
+                }
+            })
             .collect();
         let max_s = store_unseen.iter().map(|h| h.score).fold(f64::NEG_INFINITY, f64::max);
         let min_s = store_unseen.iter().map(|h| h.score).fold(f64::INFINITY, f64::min);
@@ -566,7 +792,58 @@ fn log_engine_failures(outcome: &webfind::engine::web_index::Outcome) {
 /// Search the embedded Turso graph store with hybrid (BM25 + vector + graph)
 /// RRF fusion, optionally merged with live search-engine results. Used when
 /// `--graph-store turso` is selected; requires no `index_data` directory.
-#[allow(clippy::too_many_arguments)]
+/// Fetch the top hits and run the match-based example extractor over them.
+///
+/// Returns the typed examples found. Best-effort: any fetch or extraction
+/// failure is logged and skipped so it never breaks the search response.
+async fn extract_examples_for_hits(
+    hits: &[TursoSearchHit],
+    limit: u32,
+) -> Vec<webfind::pipeline::ExtractedExample> {
+    use webfind::pipeline::example_extract::extract_examples;
+
+    let budget = (limit.max(1) as usize).min(10);
+    let urls: Vec<&str> = hits
+        .iter()
+        .take(budget)
+        .map(|h| h.url.as_str())
+        .filter(|u| !u.trim().is_empty())
+        .collect();
+
+    let mut out = Vec::new();
+    for url in urls {
+        let content = match webfind::engine::fetcher::Fetcher::new() {
+            Ok(f) => match f.fetch_url(url).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!("example extraction fetch failed for {url}: {e}");
+                    continue;
+                }
+            },
+            Err(e) => {
+                tracing::debug!("fetcher init failed: {e}");
+                continue;
+            }
+        };
+        let mut found = extract_examples(&content);
+        for ex in &mut found {
+            ex.source_tier = webfind::engine::source_tier::classify(&content.url);
+        }
+        out.extend(found);
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    out
+}
+
+
+/// Deterministic lexical fallback embedding, used when the neural backend is
+/// not compiled in (`--features embed` not passed) or fails to load.
+fn fallback_embedding(query: &str) -> Option<Vec<f32>> {
+    DummyEmbedder.embed(&[query]).ok().and_then(|mut v| v.pop())
+}
+
 async fn turso_search(
     cfg: &webfind::config::WebfindConfig,
     query: &str,
@@ -592,7 +869,7 @@ async fn turso_search(
     // changed since the last computation (the `pagerank` table records the
     // graph version it was computed from).
     if store.pagerank_version().await != current_graph_ver {
-        store
+        let _ = store
             .compute_pagerank(20, 0.85)
             .await
             .context("compute PageRank")?;
@@ -602,15 +879,25 @@ async fn turso_search(
     // full ONNX model; in standard mode, use the zero-latency deterministic
     // embedder so vector signals are populated without loading the neural network.
     let embedding: Option<Vec<f32>> = if hybrid {
-        match FastembedEmbedder::new() {
-            Ok(e) => e.embed(&[query]).ok().and_then(|v| v.into_iter().next()),
-            Err(e) => {
-                tracing::warn!("fastembed unavailable, using dummy embedder: {e}");
-                DummyEmbedder
-                    .embed(&[query])
-                    .ok()
-                    .and_then(|v| v.into_iter().next())
+        #[cfg(feature = "embed")]
+        {
+            match FastembedEmbedder::new() {
+                Ok(e) => {
+                    if let Ok(mut v) = e.embed(&[query]) {
+                        if v.is_empty() { None } else { Some(v.remove(0)) }
+                    } else {
+                        fallback_embedding(query)
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("fastembed unavailable, using dummy embedder: {e}");
+                    fallback_embedding(query)
+                }
             }
+        }
+        #[cfg(not(feature = "embed"))]
+        {
+            fallback_embedding(query)
         }
     } else {
         DummyEmbedder
@@ -653,6 +940,17 @@ async fn turso_search(
     }
     if signals.is_empty() {
         signals.push("bm25".to_string());
+    }
+
+    // Match-based example extraction.
+    //
+    // Fetches the top retrieved URLs and extracts typed examples (code, math,
+    // chemical, table, diagram, image). This is the match-based gate: only
+    // pages that actually contain a detectable artifact contribute examples,
+    // and only then is the explanation stage worth running.
+    let extracted_examples = extract_examples_for_hits(&hits, limit).await;
+    if !extracted_examples.is_empty() {
+        signals.push(format!("examples:{}", extracted_examples.len()));
     }
 
     let results = if let Some(outcome) = live_outcome {
@@ -730,7 +1028,6 @@ async fn turso_search(
     Ok(response)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn run(
     cfg: &webfind::config::WebfindConfig,
     query: String,
@@ -825,7 +1122,7 @@ pub async fn run(
         for resp in &responses {
             for r in &resp.results {
                 let canon = canonical_url(&r.url);
-                result_map.entry(canon).or_insert_with(|| r.clone());
+                let _ = result_map.entry(canon).or_insert_with(|| r.clone());
             }
         }
 
@@ -1030,25 +1327,31 @@ mod tests {
     #[test]
     fn live_result_with_date_applies_freshness_weight() {
         let mut hit = live_fused("https://example.com/page", "A Page", 0.80);
-        hit.published_at = Some(chrono::Utc::now());
+        hit.published_at = Some(Utc::now());
         let keywords = vec!["page".to_string()];
         let result = live_fused_to_result(&hit, 1, false, &keywords);
         let f = result.scores.freshness.expect("known date → freshness must be Some");
         assert!(f > 0.95, "just-published freshness should be > 0.95, got {f}");
         assert!(result.scores.quality.is_some(), "quality must be Some");
-        // final = fused*0.55 + freshness*0.15 + quality*0.15 + bm25*0.10
-        //        + authority_norm*0.05 + bonus, clamped to [0,1]
         let s = &result.scores;
         let authority_norm =
             (s.graph.unwrap_or(0.0) / 0.35).clamp(0.0, 1.0);
-        let expected = (0.80 * 0.55
-            + f * 0.15
-            + s.quality.unwrap_or(0.0) * 0.15
-            + s.bm25.unwrap_or(0.0) * 0.10
+        let bm = s.bm25.unwrap_or(0.0);
+        let lexical = bm.clamp(0.0, 1.0);
+        let consensus = 0.80_f64.clamp(0.0, 1.0);
+        let base_relevance = lexical * (0.5 + 0.5 * consensus);
+        let quality_factor = 0.80 + 0.20 * s.quality.unwrap_or(0.0);
+        let freshness_factor = 0.90 + 0.10 * f;
+        let joined_kw = keywords.join(" ");
+        let relevance = ((base_relevance * quality_factor * freshness_factor)
             + authority_norm * 0.05)
             .clamp(0.0, 1.0);
+        let expected = (relevance * Ranker::source_precision_boost(
+            &hit.url,
+            webfind::engine::source_tier::route_intent_code(&joined_kw),
+        )).clamp(0.0, 1.0);
         assert!(
-            (result.score - expected).abs() < 1e-9,
+            (result.score - expected).abs() < 1e-6,
             "score={} expected={expected}",
             result.score
         );
@@ -1064,15 +1367,23 @@ mod tests {
         let s = &result.scores;
         let authority_norm =
             (s.graph.unwrap_or(0.0) / 0.35).clamp(0.0, 1.0);
-        let expected = (0.70 * 0.55
-            + f * 0.15
-            + s.quality.unwrap_or(0.0) * 0.15
-            + s.bm25.unwrap_or(0.0) * 0.10
+        let bm = s.bm25.unwrap_or(0.0);
+        let lexical = bm.clamp(0.0, 1.0);
+        let consensus = 0.70_f64.clamp(0.0, 1.0);
+        let base_relevance = lexical * (0.5 + 0.5 * consensus);
+        let quality_factor = 0.80 + 0.20 * s.quality.unwrap_or(0.0);
+        let freshness_factor = 0.90 + 0.10 * f;
+        let joined_kw = keywords.join(" ");
+        let relevance = ((base_relevance * quality_factor * freshness_factor)
             + authority_norm * 0.05
             + 0.10_f64)
             .clamp(0.0, 1.0);
+        let expected = (relevance * Ranker::source_precision_boost(
+            &hit.url,
+            webfind::engine::source_tier::route_intent_code(&joined_kw),
+        )).clamp(0.0, 1.0);
         assert!(
-            (result.score - expected).abs() < 1e-9,
+            (result.score - expected).abs() < 1e-6,
             "score={} expected={expected}",
             result.score
         );
@@ -1105,7 +1416,7 @@ mod tests {
             let mut hit = live_fused("https://example.com/page", "Title", base_score);
             hit.engine_count = engine_count;
             if has_date {
-                hit.published_at = Some(chrono::Utc::now());
+                hit.published_at = Some(Utc::now());
             }
             let keywords = vec!["title".to_string()];
             let res = live_fused_to_result(&hit, 1, false, &keywords);

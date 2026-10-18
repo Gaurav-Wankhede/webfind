@@ -50,9 +50,9 @@ impl SemanticScholarEngine {
 
     fn build_url(query: &str, opts: &EngineOptions) -> String {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("query", query);
-        serializer.append_pair("limit", &opts.max_results.to_string());
-        serializer.append_pair(
+        let _ = serializer.append_pair("query", query);
+        let _ = serializer.append_pair("limit", &opts.max_results.to_string());
+        let _ = serializer.append_pair(
             "fields",
             "title,abstract,year,url,authors,externalIds,openAccessPdf",
         );

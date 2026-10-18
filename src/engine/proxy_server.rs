@@ -51,7 +51,7 @@ impl ProxyServer {
         loop {
             let (client, peer_addr) = listener.accept().await?;
             let ips = ips.clone();
-            tokio::spawn(async move {
+            let _ = tokio::spawn(async move {
                 if let Err(e) = handle_connection(client, peer_addr, ips).await {
                     debug!("proxy connection from {} error: {}", peer_addr, e);
                 }

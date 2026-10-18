@@ -151,7 +151,7 @@ pub fn canonical_url(url: &str) -> String {
     } else {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
         for (key, value) in &kept {
-            serializer.append_pair(key, value);
+            let _ = serializer.append_pair(key, value);
         }
         parsed.set_query(Some(&serializer.finish()));
     }
@@ -212,146 +212,23 @@ pub fn strip_date_prefix(snippet: &str) -> String {
     stripped.trim().to_string()
 }
 
-/// Stop words removed from query keywords.
-const STOP_WORDS: &[&str] = &[
-    "a",
-    "an",
-    "the",
-    "and",
-    "or",
-    "but",
-    "in",
-    "on",
-    "at",
-    "to",
-    "for",
-    "of",
-    "with",
-    "by",
-    "from",
-    "as",
-    "is",
-    "are",
-    "was",
-    "were",
-    "be",
-    "been",
-    "being",
-    "have",
-    "has",
-    "had",
-    "do",
-    "does",
-    "did",
-    "will",
-    "would",
-    "could",
-    "should",
-    "may",
-    "might",
-    "must",
-    "shall",
-    "can",
-    "need",
-    "dare",
-    "ought",
-    "used",
-    "this",
-    "that",
-    "these",
-    "those",
-    "i",
-    "you",
-    "he",
-    "she",
-    "it",
-    "we",
-    "they",
-    "what",
-    "which",
-    "who",
-    "when",
-    "where",
-    "why",
-    "how",
-    "all",
-    "any",
-    "both",
-    "each",
-    "few",
-    "more",
-    "most",
-    "other",
-    "some",
-    "such",
-    "no",
-    "nor",
-    "not",
-    "only",
-    "own",
-    "same",
-    "so",
-    "than",
-    "too",
-    "very",
-    "just",
-    "now",
-    "then",
-    "also",
-    "about",
-    "up",
-    "out",
-    "if",
-    "because",
-    "until",
-    "while",
-    "during",
-    "before",
-    "after",
-    "above",
-    "below",
-    "between",
-    "into",
-    "through",
-    "over",
-    "under",
-    "again",
-    "further",
-    "once",
-    "here",
-    "there",
-    "everywhere",
-    "anywhere",
-    "somewhere",
-    "get",
-    "me",
-    "my",
-    "your",
-    "his",
-    "her",
-    "its",
-    "our",
-    "their",
-    "what's",
-    "how's",
-    "where's",
-    "who's",
-    "when's",
-    "why's",
-    "latest",
-    "new",
-    "best",
-    "top",
-    "guide",
-    "overview",
-    "introduction",
-    "vs",
-    "versus",
-    "compare",
-    "comparison",
-    "difference",
-    "between",
+/// Search-intent modifiers stripped from keyword extraction.
+const QUERY_MODIFIERS: &[&str] = &[
+    "what's", "how's", "where's", "who's", "when's", "why's",
+    "latest", "new", "best", "top", "guide", "overview", "introduction",
+    "vs", "versus", "compare", "comparison", "difference", "between",
 ];
+
+static STOP_WORDS_SET: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    let mut set: HashSet<String> = stop_words::get(stop_words::Language::English)
+        .iter()
+        .map(|s| (*s).to_lowercase())
+        .collect();
+    for modifier in QUERY_MODIFIERS {
+        let _ = set.insert(modifier.to_string());
+    }
+    set
+});
 
 /// Helper to check if a token is a 4-digit year dynamically (1900..=2100).
 fn is_year_token(s: &str) -> bool {
@@ -363,13 +240,35 @@ fn is_year_token(s: &str) -> bool {
 /// Lowercases, strips punctuation, removes stop words and dynamic year tokens,
 /// deduplicates while preserving order, and caps at 6 keywords so relevance signals stay focused.
 #[must_use]
+pub fn extract_quoted_terms(query: &str) -> Vec<String> {
+    let mut quotes = Vec::new();
+    let mut in_quote = false;
+    let mut current = String::new();
+    for c in query.chars() {
+        if c == '"' || c == '“' || c == '”' {
+            if in_quote {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    quotes.push(trimmed.to_lowercase());
+                }
+                current.clear();
+                in_quote = false;
+            } else {
+                in_quote = true;
+            }
+        } else if in_quote {
+            current.push(c);
+        }
+    }
+    quotes
+}
+
 pub fn extract_keywords(query: &str) -> Vec<String> {
-    let stop_set: HashSet<&str> = STOP_WORDS.iter().copied().collect();
     let mut keywords: Vec<String> = query
         .to_lowercase()
         .split_whitespace()
         .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
-        .filter(|s| !s.is_empty() && !stop_set.contains(s) && !is_year_token(s) && s.len() > 1)
+        .filter(|s| !s.is_empty() && !STOP_WORDS_SET.contains(*s) && !is_year_token(s) && s.len() > 1)
         .map(|s| s.to_string())
         .collect();
 
@@ -389,7 +288,50 @@ pub fn extract_keywords(query: &str) -> Vec<String> {
 /// "rust") in exchange for catching those variants — acceptable for a
 /// tie-break signal.
 #[must_use]
+/// Count query keywords present in a title/snippet text, with an
+/// exact-identifier boost: rare high-signal tokens (CVE ids, error codes,
+/// version strings, package@version) that appear verbatim in the document
+/// count double, so an exact match like "CVE-2024-3094" or "E0308" is not
+/// drowned out by generic keyword pages.
 pub fn keyword_match_count(keywords: &[String], title: &str, snippet: &str) -> usize {
+    if keywords.is_empty() {
+        return 0;
+    }
+    let title_lower = title.to_lowercase();
+    let snippet_lower = snippet.to_lowercase();
+    let hay = format!("{title_lower} {snippet_lower}");
+    let tokens: HashSet<&str> = title_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .chain(snippet_lower.split(|c: char| !c.is_alphanumeric()))
+        .filter(|t| !t.is_empty())
+        .collect();
+    let mut count = 0;
+    for k in keywords {
+        // Match either by token prefix OR by verbatim substring for hyphenated
+        // identifiers (CVE-2024-3094, pkg@1.2.3): the doc tokens split on
+        // non-alphanumerics so "cve-2024-3094" becomes {cve,2024,3094}, but the
+        // full identifier appears verbatim in title/snippet text. Without this,
+        // exact-identifier queries match nothing and over-collapse to zero.
+        let matched = tokens
+            .iter()
+            .any(|t| *t == k.as_str() || t.starts_with(k.as_str()))
+            || hay.contains(k.as_str());
+        if !matched {
+            continue;
+        }
+        // Exact-identifier tokens (CVE-*, GHSA-*, E#### codes, semver, pkg@ver)
+        // count double so a verbatim hit outranks generic keyword pages.
+        let is_identifier = k.contains('-')
+            || (k.len() >= 3 && k.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false)
+                && k[1..].chars().all(|c| c.is_ascii_digit()))
+            || k.contains('@')
+            || k.chars().filter(|c| *c == '.').count() >= 2;
+        count += if is_identifier && hay.contains(k.as_str()) { 2 } else { 1 };
+    }
+    count
+}
+
+pub fn keyword_match_count_deprecated(keywords: &[String], title: &str, snippet: &str) -> usize {
     if keywords.is_empty() {
         return 0;
     }

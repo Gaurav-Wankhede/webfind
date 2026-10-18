@@ -6,7 +6,9 @@ use anyhow::Context;
 use webfind::cli::GraphStoreArg;
 use webfind::config::WebfindConfig;
 use webfind::engine::crawl_graph::{CrawlGraphStore, InMemoryCrawlGraph};
-use webfind::engine::embedder::{Embedder, FastembedEmbedder};
+use webfind::engine::embedder::Embedder;
+#[cfg(feature = "embed")]
+use webfind::engine::embedder::FastembedEmbedder;
 use webfind::engine::graph_summary::build_graph_summary;
 use webfind::engine::indexer::{attach_content, build_metadata};
 use webfind::engine::ranker::Ranker;
@@ -16,8 +18,6 @@ use webfind::schema::request::{OutputFormat, SearchDepth, SearchRequest};
 use webfind::schema::response::SearchResponse;
 use webfind::storage::turso_store::TursoStore;
 
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 pub async fn run(
     cfg: &WebfindConfig,
     seed: Option<String>,
@@ -50,10 +50,19 @@ pub async fn run(
 
     // Build the embedder (KG + vector persistence). Degrade to a deterministic
     // dummy when the ONNX model is unavailable so research still persists.
-    let embedder: Arc<dyn Embedder> = match FastembedEmbedder::new() {
-        Ok(e) => Arc::new(e),
-        Err(e) => {
-            tracing::warn!("fastembed model unavailable, using dummy embedder: {}", e);
+    let embedder: Arc<dyn Embedder> = {
+        #[cfg(feature = "embed")]
+        {
+            match FastembedEmbedder::new() {
+                Ok(e) => Arc::new(e),
+                Err(e) => {
+                    tracing::warn!("fastembed model unavailable, using dummy embedder: {}", e);
+                    Arc::new(webfind::engine::embedder::DummyEmbedder)
+                }
+            }
+        }
+        #[cfg(not(feature = "embed"))]
+        {
             Arc::new(webfind::engine::embedder::DummyEmbedder)
         }
     };
@@ -160,7 +169,7 @@ pub async fn run(
             InMemorySearchEngine::new()
         };
         *indexer = Arc::new(engine);
-        indexer.index_batch(&contents).await?;
+        let _ = indexer.index_batch(&contents).await?;
     }
 
     let indexer_guard = indexer.read().await;

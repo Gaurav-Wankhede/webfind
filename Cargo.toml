@@ -7,7 +7,7 @@ resolver = "2"
 [package]
 name = "webfind"
 readme = "README.md"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.98.0"
 description = "Self-hosted native search engine for AI agents — pure CLI, zero cost"
@@ -80,7 +80,7 @@ unicode-segmentation = "1.13"
 whatlang = "0.18"
 dateparser = "0.3"
 keyword_extraction = { version = "1.5.0", features = ["all", "co_occurrence"] }
-stop-words = "0.8"
+stop-words = "0.10"
 textstat = "0.1"
 simdutf8 = "0.1"
 ahash = "0.8"
@@ -98,6 +98,14 @@ fastembed = "4"
 # semantic retrieval fuse in one place with no second on-disk index.
 # `parallelism` enables rayon batch-fitting; `language_detection` adds whichlang.
 bm25 = { version = "2.3.2", features = ["parallelism", "language_detection"] }
+psl = "2.1"
+hex = "0.4"
+spdx = "0.10"
+chrono-tz = "0.10"
+lol_html = "2.1"
+htmd = "0.1"
+semver = "1.0"
+ua_generator = "0.5"
 
 # Storage
 blake3 = "1.8.5"
@@ -116,7 +124,7 @@ diskann-rs = "0.5"
 libsql = { version = "0.6", features = ["core", "encryption"] }
 
 # HTTP API
-mimalloc = { version = "0.1", features = ["secure"] }
+mimalloc = { version = "0.1", features = ["secure"], optional = true }
 schemars = "1.0"
 axum = "0.8.9"
 tower = "0.5"
@@ -144,6 +152,8 @@ petgraph = "0.8.3"
 #   cargo build --release --features dynamic
 default = []
 dynamic = ["dep:chromiumoxide"]
+embed = []
+mimalloc = ["dep:mimalloc"]
 
 [dependencies.chromiumoxide]
 version = "0.9.1"

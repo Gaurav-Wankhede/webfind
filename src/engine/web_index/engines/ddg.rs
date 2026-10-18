@@ -31,10 +31,10 @@ impl DuckDuckGoEngine {
 
     fn build_url(query: &str, opts: &EngineOptions) -> String {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("q", query);
+        let _ = serializer.append_pair("q", query);
         if let (Some(country), Some(language)) = (&opts.country, &opts.language) {
             let lang = language.get(..2).unwrap_or(language);
-            serializer.append_pair(
+            let _ = serializer.append_pair(
                 "kl",
                 &format!("{}-{}", country.to_lowercase(), lang.to_lowercase()),
             );
@@ -84,7 +84,7 @@ pub fn parse_results(html: &str, max_results: usize) -> Vec<Hit> {
     let mut hits = Vec::new();
 
     // Check if table rows exist
-    let rows: Vec<ElementRef> = document.select(&RESULT_ROW).collect();
+    let rows: Vec<ElementRef<'_>> = document.select(&RESULT_ROW).collect();
     if !rows.is_empty() {
         let mut current_link: Option<(String, String)> = None;
         for row in rows {
@@ -121,8 +121,8 @@ pub fn parse_results(html: &str, max_results: usize) -> Vec<Hit> {
 
     // Fallback if rows didn't match (e.g. customized or mock HTML)
     if hits.is_empty() {
-        let links: Vec<ElementRef> = document.select(&RESULT_LINK).collect();
-        let snippets: Vec<ElementRef> = document.select(&RESULT_SNIPPET).collect();
+        let links: Vec<ElementRef<'_>> = document.select(&RESULT_LINK).collect();
+        let snippets: Vec<ElementRef<'_>> = document.select(&RESULT_SNIPPET).collect();
         let total = links.len().min(max_results);
 
         for (i, link) in links.iter().enumerate().take(total) {

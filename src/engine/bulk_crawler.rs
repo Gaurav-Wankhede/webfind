@@ -77,7 +77,7 @@ fn normalize_url(url: &str) -> String {
             parsed.set_fragment(None);
             let mut s = parsed.to_string();
             if s.ends_with('/') && !s.ends_with("://") {
-                s.pop();
+                let _ = s.pop();
             }
             s.to_lowercase()
         }
@@ -206,7 +206,6 @@ pub enum RespectRobots {
 }
 
 impl BulkDomainCrawler {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         proxy_pool: ProxyPool,
         pages_per_session: usize,
@@ -342,12 +341,12 @@ impl BulkDomainCrawler {
             let mut scope: HashSet<String> = HashSet::new();
             for entry in &blueprint.sitemap_urls {
                 depths.push(path_depth(&entry.url));
-                scope.insert(normalize_url(&entry.url));
+                let _ = scope.insert(normalize_url(&entry.url));
             }
             if let Some(ref llms) = blueprint.llms {
                 for url in llms.urls() {
                     depths.push(path_depth(url));
-                    scope.insert(normalize_url(url));
+                    let _ = scope.insert(normalize_url(url));
                 }
             }
             if scope.is_empty() {
@@ -421,7 +420,7 @@ impl BulkDomainCrawler {
                 entry.changefreq.as_deref(),
             )
             .await;
-            self.enqueue_url(&seed_domain, &entry.url, depth, relevance)
+            let _ = self.enqueue_url(&seed_domain, &entry.url, depth, relevance)
                 .await;
         }
         // llms.txt entries are the site's own statement of which pages matter
@@ -441,11 +440,11 @@ impl BulkDomainCrawler {
                     None,
                 )
                 .await;
-                self.enqueue_url(&seed_domain, url, depth, relevance).await;
+                let _ = self.enqueue_url(&seed_domain, url, depth, relevance).await;
             }
         }
         if !seed_already_crawled {
-            self.enqueue_url(&seed_domain, seed, 0, seed_relevance)
+            let _ = self.enqueue_url(&seed_domain, seed, 0, seed_relevance)
                 .await;
         }
 
@@ -497,7 +496,7 @@ impl BulkDomainCrawler {
                         let mut domains = self.domains.lock().await;
                         if let Some(d) = domains.get_mut(&domain)
                             && let Some(pos) = d.queue.iter().position(|(u, _, _)| u == &url) {
-                                d.queue.remove(pos);
+                                let _ = d.queue.remove(pos);
                             }
                         continue;
                     }
@@ -519,7 +518,7 @@ impl BulkDomainCrawler {
                 let mut domains = self.domains.lock().await;
                 if let Some(d) = domains.get_mut(&domain) {
                     if let Some(pos) = d.queue.iter().position(|(u, _, _)| u == &url) {
-                        d.queue.remove(pos);
+                        let _ = d.queue.remove(pos);
                     }
                     d.last_request = Some(Instant::now());
                 }
@@ -649,7 +648,7 @@ impl BulkDomainCrawler {
                         let content_url = url.clone();
                         let content_clone = content.clone();
                         let worker = worker.clone();
-                        tokio::spawn(async move {
+                        let _ = tokio::spawn(async move {
                             if let Err(e) = worker.persist(content_url, content_clone).await {
                                 tracing::warn!("failed to queue background persist: {}", e);
                             }
@@ -687,7 +686,7 @@ impl BulkDomainCrawler {
             .entry(domain.to_string())
             .or_insert_with(DomainState::new);
         if !state.seen.contains(url) && state.seen.len() < self.max_pages {
-            state.seen.insert(url.to_string());
+            let _ = state.seen.insert(url.to_string());
             state.queue.push_back((url.to_string(), depth, relevance));
             return true;
         }
@@ -819,7 +818,6 @@ impl BulkDomainCrawler {
         state.backoff_until = Some(Instant::now() + backoff);
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn record_url(
         &self,
         url: &str,

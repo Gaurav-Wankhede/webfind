@@ -1,0 +1,50 @@
+{
+  "directive": "This is a CLI/HTTP tool, NOT an MCP server. Remove misleading MCP references.",
+  "files_to_clean": [
+    {
+      "file": "src/cli.rs",
+      "action": "Keep the 'no MCP' clarification in help text - this is correct"
+    },
+    {
+      "file": "src/commands/index.rs",
+      "action": "Remove 'or MCP research calls' - MCP is not a thing for this CLI"
+    },
+    {
+      "file": "src/commands/status.rs",
+      "action": "Remove 'MCP calls' from status message"
+    },
+    {
+      "file": "src/schema/response.rs",
+      "action": "Keep mcp_server field for SearchResult metadata (it's about external sites having MCP, not us)"
+    },
+    {
+      "file": "src/engine/ranker.rs",
+      "action": "Keep mcp_server in AX score calculation - this evaluates if RESULT sites have MCP, not us"
+    },
+    {
+      "file": "src/engine/metadata_sniffer.rs",
+      "action": "Keep mcp_endpoint detection - this sniffs if target site exposes MCP"
+    },
+    {
+      "file": "src/engine/crawl_graph.rs",
+      "action": "Remove MCP comment - not relevant"
+    },
+    {
+      "file": "src/engine/graph_summary.rs",
+      "action": "Keep mcp_server field if it stores external site metadata"
+    },
+    {
+      "file": "src/report.rs",
+      "action": "Keep mcp_server field for reporting on external sites"
+    },
+    {
+      "file": "src/api.rs",
+      "action": "Keep mcp_server field for API responses about external sites"
+    },
+    {
+      "file": "src/commands/search.rs",
+      "action": "Keep mcp_server field for result metadata about external sites"
+    }
+  ],
+  "principle": "MCP fields in schemas are for METADATA ABOUT EXTERNAL SITES (does this result site have an MCP server?), not for us being an MCP server. CLI help text should clarify 'pure CLI/HTTP, no MCP server'."
+}

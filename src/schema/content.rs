@@ -11,13 +11,19 @@ pub struct StructuredContent {
     pub final_url: String,
     pub status_code: u16,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_url: Option<String>,
     pub language: String,
     pub language_confidence: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site_name: Option<String>,
     pub content_text: String,
     pub content_html: String,
@@ -29,20 +35,31 @@ pub struct StructuredContent {
     pub reading_time_seconds: u32,
     pub reading_ease: f64,
     pub grade_level: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<Keyword>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_graph: Option<OpenGraph>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub twitter_card: Option<TwitterCard>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub json_ld: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub internal_links: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_links: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub favicon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rss_url: Option<String>,
     pub normalized_text: String,
     pub fetched_at: DateTime<Utc>,
     pub fetch_duration_ms: u64,
     pub html_size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding: Option<String>,
     pub ssl_valid: bool,
     pub redirect_count: u8,
@@ -124,27 +141,47 @@ pub struct CompactStructuredContent {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Entities {
     // Technical / Document Structure
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub code_blocks: Vec<CodeBlockEntity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tables: Vec<TableEntity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headings: Vec<HeadingEntity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagrams: Vec<DiagramEntity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<ExampleEntity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub faqs: Vec<FaqEntity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<StepEntity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub maths: Vec<MathEntity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub callouts: Vec<CalloutEntity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub package_versions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub licenses: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repository_urls: Vec<String>,
 
     // Contact & Commerce
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub emails: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phones: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addresses: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub urls: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prices: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dates: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ip_addresses: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub social_handles: Vec<String>,
 }
 

@@ -207,6 +207,8 @@ pub struct SiteBlueprint {
     pub llms: Option<LlmsIndex>,
     /// Topic keywords extracted from sampling top sitemap pages.
     pub topic_keywords: Vec<String>,
+    /// Discovered unauthenticated OpenAPI, Swagger, and schema endpoints.
+    pub api_endpoints: Vec<String>,
 }
 
 /// Fetches and parses robots.txt and sitemap.xml truly in parallel.
@@ -256,12 +258,20 @@ impl SiteExplorer {
             format!("{}/llm.txt", base),
         ];
 
-        // TRUE PARALLEL fetch of robots.txt, the root sitemap, and the
-        // site's curated LLM index (llms-full.txt preferred, then llms.txt, llm.txt).
-        let (robots_res, sitemap_res, llms_res) = join!(
+        let api_probe_urls = [
+            format!("{}/openapi.json", base),
+            format!("{}/swagger.json", base),
+            format!("{}/.well-known/ai-plugin.json", base),
+        ];
+
+        // TRUE PARALLEL fetch of robots.txt, the root sitemap, the
+        // site's curated LLM index (llms-full.txt preferred, then llms.txt, llm.txt),
+        // and OpenAPI / Swagger metadata suffix probes.
+        let (robots_res, sitemap_res, llms_res, api_endpoints) = join!(
             Self::fetch_robots(&self.client, &robots_url),
             self.fetch_sitemap(sitemap_url, 0),
             Self::fetch_llms_index(&self.client, &manifest_urls),
+            Self::probe_api_endpoints(&self.client, &api_probe_urls),
         );
 
         let robots = robots_res.unwrap_or_else(|e| {
@@ -291,7 +301,7 @@ impl SiteExplorer {
         // Deduplicate by URL, keep highest priority and latest lastmod.
         let mut by_url: HashMap<String, SitemapUrl> = HashMap::new();
         for entry in sitemap_urls {
-            by_url
+            let _ = by_url
                 .entry(entry.url.clone())
                 .and_modify(|existing| {
                     existing.priority = existing.priority.max(entry.priority);
@@ -319,7 +329,34 @@ impl SiteExplorer {
             sitemap_urls,
             llms,
             topic_keywords: Vec::new(),
+            api_endpoints,
         })
+    }
+
+    /// Probe common unauthenticated API spec endpoints in parallel.
+    async fn probe_api_endpoints(client: &reqwest::Client, urls: &[String]) -> Vec<String> {
+        let mut discovered = Vec::new();
+        let fetches: Vec<_> = urls
+            .iter()
+            .map(|u| async move {
+                let res = client
+                    .get(u)
+                    .header(reqwest::header::ACCEPT, "application/json, text/yaml, */*")
+                    .timeout(Duration::from_secs(5))
+                    .send()
+                    .await;
+                match res {
+                    Ok(resp) if resp.status().is_success() => Some(u.clone()),
+                    _ => None,
+                }
+            })
+            .collect();
+
+        let results = futures::future::join_all(fetches).await;
+        for url in results.into_iter().flatten() {
+            discovered.push(url);
+        }
+        discovered
     }
 
     /// Sample top sitemap pages by priority and extract topic keywords.
@@ -351,7 +388,7 @@ impl SiteExplorer {
         }
 
         // Deduplicate and keep most frequent keywords.
-        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut counts: HashMap<String, usize> = HashMap::new();
         for kw in all_keywords {
             *counts.entry(kw).or_insert(0) += 1;
         }
@@ -446,7 +483,7 @@ impl SiteExplorer {
         let body = if bytes.starts_with(&[0x1f, 0x8b]) {
             let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
             let mut text = String::new();
-            decoder
+            let _ = decoder
                 .read_to_string(&mut text)
                 .context("decode gzip sitemap")?;
             text

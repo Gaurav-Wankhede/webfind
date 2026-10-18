@@ -114,7 +114,19 @@ impl CurationDaemon {
     pub async fn sweep(&self) -> SweepStats {
         let mut stats = SweepStats::default();
         for domain in self.active_domains() {
-            for source in domain.sources {
+            // Source-tiered crawl priority: within each domain, crawl the
+            // highest-trust sources (official/raw, precision 1.0/0.95) before
+            // lower-trust mirrors, so the local index fills with authoritative
+            // content first when a sweep is page-budget-limited. Stable sort
+            // preserves catalog order within a tier.
+            let mut sources: Vec<&crate::engine::seed_catalog::SeedSource> =
+                domain.sources.iter().collect();
+            sources.sort_by(|a, b| {
+                crate::engine::source_tier::classify(b.url)
+                    .precision()
+                    .total_cmp(&crate::engine::source_tier::classify(a.url).precision())
+            });
+            for source in sources {
                 if !self.is_due(source.url).await {
                     continue;
                 }
@@ -188,7 +200,7 @@ impl CurationDaemon {
     }
 
     async fn mark_crawled(&self, url: &str) {
-        self.last_crawl
+        let _ = self.last_crawl
             .lock()
             .await
             .insert(url.to_string(), Instant::now());

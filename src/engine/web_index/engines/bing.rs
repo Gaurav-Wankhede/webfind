@@ -37,14 +37,14 @@ impl BingEngine {
 
     fn build_url(query: &str, opts: &EngineOptions) -> String {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("q", query);
+        let _ = serializer.append_pair("q", query);
         if let Some(country) = &opts.country {
-            serializer.append_pair("cc", country);
+            let _ = serializer.append_pair("cc", country);
         } else {
             // Pin the market to English so a non-US IP does not get
             // locale-mixed results; an explicit country opts back in.
-            serializer.append_pair("mkt", "en-US");
-            serializer.append_pair("setlang", "en");
+            let _ = serializer.append_pair("mkt", "en-US");
+            let _ = serializer.append_pair("setlang", "en");
         }
         format!("https://www.bing.com/search?{}", serializer.finish())
     }
@@ -84,7 +84,7 @@ impl Engine for BingEngine {
 #[must_use]
 pub fn parse_results(html: &str, max_results: usize) -> Vec<Hit> {
     let document = Html::parse_document(html);
-    let items: Vec<ElementRef> = document.select(&RESULT_ITEM).collect();
+    let items: Vec<ElementRef<'_>> = document.select(&RESULT_ITEM).collect();
     let total = items.len().min(max_results);
 
     let mut hits = Vec::with_capacity(total);

@@ -17,6 +17,7 @@ pub mod lobsters;
 pub mod marginalia;
 pub mod mdn;
 pub mod mojeek;
+pub mod raw_github;
 pub mod semantic_scholar;
 pub mod stackoverflow;
 pub mod wikipedia;
@@ -44,6 +45,7 @@ pub fn default_engines(client: Client) -> Vec<Arc<dyn Engine>> {
         Arc::new(crates_io::CratesIoEngine::new(client.clone())),
         Arc::new(mdn::MdnEngine::new(client.clone())),
         Arc::new(devdocs::DevDocsEngine::new(client.clone())),
-        Arc::new(github_code::GithubCodeEngine::new(client)),
+        Arc::new(github_code::GithubCodeEngine::new(client.clone())),
+        Arc::new(raw_github::RawGithubEngine::new(client)),
     ]
 }

@@ -24,9 +24,9 @@ async fn run_webfind(
     let binary = webfind_binary();
     tokio::task::spawn_blocking(move || {
         let mut cmd = Command::new(binary);
-        cmd.args(args);
+        let _ = cmd.args(args);
         for (k, v) in env_vars {
-            cmd.env(k, v);
+            let _ = cmd.env(k, v);
         }
         cmd.output().expect("webfind command should run")
     })

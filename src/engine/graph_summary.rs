@@ -18,7 +18,7 @@ pub async fn build_graph_summary(
     let mut result_domains = HashSet::new();
     for url in &result_urls {
         if let Some(domain) = util::extract_domain(url) {
-            result_domains.insert(domain);
+            let _ = result_domains.insert(domain);
         }
     }
 

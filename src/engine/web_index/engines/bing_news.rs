@@ -46,14 +46,14 @@ impl BingNewsEngine {
 
     fn build_url(query: &str, opts: &EngineOptions) -> String {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("q", query);
-        serializer.append_pair("filters", "tnews");
-        serializer.append_pair("form", "YFNR");
+        let _ = serializer.append_pair("q", query);
+        let _ = serializer.append_pair("filters", "tnews");
+        let _ = serializer.append_pair("form", "YFNR");
         if let Some(country) = &opts.country {
-            serializer.append_pair("cc", country);
+            let _ = serializer.append_pair("cc", country);
         } else {
-            serializer.append_pair("mkt", "en-US");
-            serializer.append_pair("setlang", "en");
+            let _ = serializer.append_pair("mkt", "en-US");
+            let _ = serializer.append_pair("setlang", "en");
         }
         format!("https://www.bing.com/search?{}", serializer.finish())
     }
@@ -81,7 +81,7 @@ impl Engine for BingNewsEngine {
 }
 
 fn parse_results(doc: &Html, max_results: usize) -> Vec<Hit> {
-    let cards: Vec<ElementRef> = doc.select(&NEWS_CARD).collect();
+    let cards: Vec<ElementRef<'_>> = doc.select(&NEWS_CARD).collect();
     let total = cards.len().min(max_results);
     let mut hits = Vec::with_capacity(total);
 

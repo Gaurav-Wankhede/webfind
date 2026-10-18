@@ -209,7 +209,6 @@ fn print_budget(mode: &FetchMode, body_chars: usize) {
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn run(
     url: String,
     urls: Vec<String>,
@@ -223,7 +222,7 @@ pub async fn run(
     dynamic_wait_ms: u64,
     proxies: Option<String>,
 ) -> anyhow::Result<()> {
-    use webfind::engine::pipeline::FetchPipeline;
+    use webfind::pipeline::FetchPipeline;
 
     let mut all_urls = vec![url];
     let mut urls = urls;
@@ -311,8 +310,10 @@ pub async fn run(
             }
         }
     } else {
-        let pipeline = FetchPipeline::new(fetcher);
-        let results = pipeline.fetch_all(&all_urls).await;
+        // Multi-URL path: fetch concurrently via the embedded pipeline. The
+        // single-URL path above already has its own `fetcher`; here we use the
+        // stateless batched helper so every URL gets an independent client.
+        let results = FetchPipeline::fetch_all(&all_urls).await;
         let valid = FetchPipeline::filter_valid(results.clone());
         let (success, failure, errors) = FetchPipeline::summarize(&results);
 

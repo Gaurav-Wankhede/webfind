@@ -40,12 +40,12 @@ impl StackOverflowEngine {
 
     fn build_url(query: &str, opts: &EngineOptions) -> String {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("order", "desc");
-        serializer.append_pair("sort", "relevance");
-        serializer.append_pair("q", query);
-        serializer.append_pair("site", "stackoverflow");
-        serializer.append_pair("filter", "withbody");
-        serializer.append_pair("pagesize", &opts.max_results.to_string());
+        let _ = serializer.append_pair("order", "desc");
+        let _ = serializer.append_pair("sort", "relevance");
+        let _ = serializer.append_pair("q", query);
+        let _ = serializer.append_pair("site", "stackoverflow");
+        let _ = serializer.append_pair("filter", "withbody");
+        let _ = serializer.append_pair("pagesize", &opts.max_results.to_string());
         format!(
             "https://api.stackexchange.com/2.3/search/advanced?{}",
             serializer.finish()

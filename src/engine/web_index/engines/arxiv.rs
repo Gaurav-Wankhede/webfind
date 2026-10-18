@@ -42,9 +42,9 @@ impl ArxivEngine {
 
     fn build_url(query: &str, opts: &EngineOptions) -> String {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("search_query", &format!("all:{query}"));
-        serializer.append_pair("max_results", &opts.max_results.to_string());
-        serializer.append_pair("sortBy", "relevance");
+        let _ = serializer.append_pair("search_query", &format!("all:{query}"));
+        let _ = serializer.append_pair("max_results", &opts.max_results.to_string());
+        let _ = serializer.append_pair("sortBy", "relevance");
         format!("https://export.arxiv.org/api/query?{}", serializer.finish())
     }
 }
